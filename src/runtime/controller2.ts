@@ -179,6 +179,19 @@ export class BotController {
       this.logger.debug(
         `[tg] set reaction failed chat=${chatId} message_id=${String(message.message_id)}: ${String(e)}`,
       );
+      try {
+        await this.telegram.sendMessageSingle({
+          chatId,
+          messageThreadId: forumThreadId,
+          replyToMessageId: message.message_id,
+          text: "👍",
+          priority: "user",
+        });
+      } catch (sendErr) {
+        this.logger.debug(
+          `[tg] thumbs up fallback send failed chat=${chatId} message_id=${String(message.message_id)}: ${String(sendErr)}`,
+        );
+      }
     }
 
     const listIntent = parseListSessionsIntentFromTelegram(text);

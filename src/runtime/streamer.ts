@@ -109,7 +109,7 @@ export class JsonlStreamer {
           if (!trimmed) continue;
           try {
             const obj = JSON.parse(trimmed) as unknown;
-            fragments.push(...mapCodexEventToFragments(obj));
+            fragments.push(...mapCodexEventToFragments(obj, { includeUserMessages: session.platform !== "telegram" }));
           } catch {
             continue;
           }
@@ -252,8 +252,9 @@ function getTextFromContentItems(content: unknown): string {
   return out.join("");
 }
 
-function mapCodexEventToFragments(obj: unknown): StreamFragment[] {
+function mapCodexEventToFragments(obj: unknown, opts?: { includeUserMessages?: boolean }): StreamFragment[] {
   if (!obj || typeof obj !== "object") return [];
+  const includeUserMessages = opts?.includeUserMessages !== false;
   const type = (obj as { type?: unknown }).type;
 
   // RolloutLine: { timestamp, type, payload }
@@ -317,7 +318,7 @@ function mapCodexEventToFragments(obj: unknown): StreamFragment[] {
 
     if (type === "event_msg") {
       if (!payload || typeof payload !== "object") return [];
-      return mapEventMsgPayload(payload as Record<string, unknown>);
+      return mapEventMsgPayload(payload as Record<string, unknown>, { includeUserMessages });
     }
 
     return [];
@@ -337,9 +338,10 @@ function mapCodexEventToFragments(obj: unknown): StreamFragment[] {
   return [];
 }
 
-function mapEventMsgPayload(payload: Record<string, unknown>): StreamFragment[] {
+function mapEventMsgPayload(payload: Record<string, unknown>, opts?: { includeUserMessages?: boolean }): StreamFragment[] {
   const evType = typeof payload.type === "string" ? payload.type : null;
   if (!evType) return [];
+  const includeUserMessages = opts?.includeUserMessages !== false;
 
   const text = (value: unknown, continuous = false): StreamFragment[] => {
     if (typeof value !== "string" || value.length === 0) return [];
@@ -368,7 +370,7 @@ function mapEventMsgPayload(payload: Record<string, unknown>): StreamFragment[] 
     case "agent_message":
       return text(stringOrEmpty(payload.message));
     case "user_message":
-      return [];
+      return includeUserMessages ? text(`User: ${stringOrEmpty(payload.message)}`) : [];
     case "agent_message_delta":
     case "agent_message_content_delta":
       return text(stringOrEmpty(payload.delta), true);
