@@ -137,8 +137,8 @@ class TailBuffer {
 
 function buildBaseArgs(config: AppConfig, cwd: string): string[] {
   const args: string[] = ["exec", "--json", "--color", "never", "-C", cwd];
-  if (config.codex.full_auto) args.push("--full-auto");
   if (config.codex.dangerously_bypass_approvals_and_sandbox) args.push("--dangerously-bypass-approvals-and-sandbox");
+  else if (config.codex.full_auto) args.push("--full-auto");
   if (config.codex.skip_git_repo_check) args.push("--skip-git-repo-check");
   return args;
 }

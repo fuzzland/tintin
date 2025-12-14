@@ -216,7 +216,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     dangerously_bypass_approvals_and_sandbox:
       typeof codex.dangerously_bypass_approvals_and_sandbox === "boolean"
         ? codex.dangerously_bypass_approvals_and_sandbox
-        : false,
+        : true,
     skip_git_repo_check: typeof codex.skip_git_repo_check === "boolean" ? codex.skip_git_repo_check : true,
   };
 
