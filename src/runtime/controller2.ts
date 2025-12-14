@@ -173,6 +173,14 @@ export class BotController {
     );
     if (!text) return;
 
+    try {
+      await this.telegram.setMessageReaction({ chatId, messageId: message.message_id, emoji: "👍" });
+    } catch (e) {
+      this.logger.debug(
+        `[tg] set reaction failed chat=${chatId} message_id=${String(message.message_id)}: ${String(e)}`,
+      );
+    }
+
     const listIntent = parseListSessionsIntentFromTelegram(text);
     if (listIntent) {
       const access = await this.telegramAccessDecision(chatId, userId);

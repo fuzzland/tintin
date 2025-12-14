@@ -327,6 +327,17 @@ export class TelegramClient {
     return this.api("getUpdates", payload);
   }
 
+  async setMessageReaction(opts: { chatId: number | string; messageId: number; emoji: string; isBig?: boolean }) {
+    await this.limiter.waitTurn();
+    const reaction = [{ type: "emoji", emoji: opts.emoji }];
+    await this.api("setMessageReaction", {
+      chat_id: opts.chatId,
+      message_id: opts.messageId,
+      reaction,
+      is_big: opts.isBig ?? false,
+    });
+  }
+
   private async api<T>(method: string, payload: unknown): Promise<T> {
     let attempts = 0;
     while (true) {

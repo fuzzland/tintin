@@ -368,7 +368,7 @@ function mapEventMsgPayload(payload: Record<string, unknown>): StreamFragment[] 
     case "agent_message":
       return text(stringOrEmpty(payload.message));
     case "user_message":
-      return text(`User: ${stringOrEmpty(payload.message)}`);
+      return [];
     case "agent_message_delta":
     case "agent_message_content_delta":
       return text(stringOrEmpty(payload.delta), true);
