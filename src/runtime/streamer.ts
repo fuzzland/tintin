@@ -13,15 +13,21 @@ interface BufferState {
   lastFlushMs: number;
 }
 
+type MessageVerbosity = 1 | 2 | 3;
+
 type StreamFragment =
   | { kind: "text"; text: string; continuous?: boolean }
   | { kind: "tool_call"; text: string }
   | { kind: "tool_output"; text: string }
   | { kind: "final" };
 
+const USER_PRIORITY_BURST_MESSAGES = 5;
+
 export class JsonlStreamer {
   private readonly buffers = new Map<string, BufferState>();
   private readonly pendingToolCalls = new Map<string, string[]>();
+  private readonly pendingUserPriority = new Map<string, number>();
+  private readonly lastUserMessageAtSeen = new Map<string, number | null>();
   private running = false;
 
   constructor(
@@ -59,8 +65,11 @@ export class JsonlStreamer {
 
   private async pollOnce(onlySessionIds?: string[]) {
     const sessions = await listRunningSessions(this.db);
+    const runningSessionIds = new Set<string>();
     for (const session of sessions) {
       if (onlySessionIds && !onlySessionIds.includes(session.id)) continue;
+      runningSessionIds.add(session.id);
+      this.noteUserActivity(session.id, session.last_user_message_at, session.created_at);
       if (!session.codex_session_id) continue;
 
       const offsets = await listSessionOffsets(this.db, session.id);
@@ -109,7 +118,12 @@ export class JsonlStreamer {
           if (!trimmed) continue;
           try {
             const obj = JSON.parse(trimmed) as unknown;
-            fragments.push(...mapCodexEventToFragments(obj, { includeUserMessages: session.platform !== "telegram" }));
+            fragments.push(
+              ...mapCodexEventToFragments(obj, {
+                includeUserMessages: session.platform !== "telegram",
+                verbosity: this.config.bot.message_verbosity,
+              }),
+            );
           } catch {
             continue;
           }
@@ -145,7 +159,7 @@ export class JsonlStreamer {
               outputText: frag.text,
               maxMessageChars: maxChars,
             });
-            await this.sendToSession(session.id, { text: msg });
+            await this.sendToSession(session.id, { text: msg, priority: this.takeSendPriority(session.id) });
           }
         }
       }
@@ -156,6 +170,7 @@ export class JsonlStreamer {
         await this.flushIfNeeded(session.id, false);
       }
     }
+    if (!onlySessionIds) this.cleanupPriorityState(runningSessionIds);
   }
 
   private append(sessionId: string, text: string, opts?: { continuous?: boolean }) {
@@ -173,7 +188,46 @@ export class JsonlStreamer {
     if (!should) return;
     const payload = s.text.trim();
     this.buffers.set(sessionId, { text: "", lastFlushMs: now });
-    await this.sendToSession(sessionId, { text: payload, final: opts?.final === true });
+    await this.sendToSession(sessionId, {
+      text: payload,
+      final: opts?.final === true,
+      priority: this.takeSendPriority(sessionId),
+    });
+  }
+
+  private noteUserActivity(sessionId: string, lastUserMessageAt: number | null, createdAt: number) {
+    const prev = this.lastUserMessageAtSeen.get(sessionId);
+    this.lastUserMessageAtSeen.set(sessionId, lastUserMessageAt);
+
+    // On first observation, only treat as a "fresh" session if it was created recently,
+    // to avoid a burst of high-priority output after a bot restart.
+    if (prev === undefined) {
+      const ageMs = nowMs() - createdAt;
+      if (ageMs >= 0 && ageMs < 60_000 && typeof lastUserMessageAt === "number" && lastUserMessageAt > 0) {
+        this.pendingUserPriority.set(sessionId, USER_PRIORITY_BURST_MESSAGES);
+      }
+      return;
+    }
+
+    if (typeof lastUserMessageAt === "number" && lastUserMessageAt > 0 && (prev === null || lastUserMessageAt > prev)) {
+      this.pendingUserPriority.set(sessionId, USER_PRIORITY_BURST_MESSAGES);
+    }
+  }
+
+  private takeSendPriority(sessionId: string): "user" | "background" {
+    const remaining = this.pendingUserPriority.get(sessionId) ?? 0;
+    if (remaining <= 0) return "background";
+    if (remaining <= 1) this.pendingUserPriority.delete(sessionId);
+    else this.pendingUserPriority.set(sessionId, remaining - 1);
+    return "user";
+  }
+
+  private cleanupPriorityState(runningSessionIds: Set<string>) {
+    for (const id of this.lastUserMessageAtSeen.keys()) {
+      if (runningSessionIds.has(id)) continue;
+      this.lastUserMessageAtSeen.delete(id);
+      this.pendingUserPriority.delete(id);
+    }
   }
 }
 
@@ -252,9 +306,16 @@ function getTextFromContentItems(content: unknown): string {
   return out.join("");
 }
 
-function mapCodexEventToFragments(obj: unknown, opts?: { includeUserMessages?: boolean }): StreamFragment[] {
+function mapCodexEventToFragments(
+  obj: unknown,
+  opts?: { includeUserMessages?: boolean; verbosity?: MessageVerbosity },
+): StreamFragment[] {
   if (!obj || typeof obj !== "object") return [];
+  const verbosity = normalizeMessageVerbosity(opts?.verbosity);
   const includeUserMessages = opts?.includeUserMessages !== false;
+  const includeReasoning = verbosity >= 2;
+  const includeEvents = verbosity >= 2;
+  const includeTools = verbosity >= 3;
   const type = (obj as { type?: unknown }).type;
 
   // RolloutLine: { timestamp, type, payload }
@@ -270,6 +331,7 @@ function mapCodexEventToFragments(obj: unknown, opts?: { includeUserMessages?: b
       }
 
       if (itemType === "function_call") {
+        if (!includeTools) return [];
         const name = (payload as { name?: unknown }).name;
         const argumentsRaw = (payload as { arguments?: unknown }).arguments;
         if (typeof name !== "string") return [];
@@ -280,6 +342,7 @@ function mapCodexEventToFragments(obj: unknown, opts?: { includeUserMessages?: b
       }
 
       if (itemType === "function_call_output") {
+        if (!includeTools) return [];
         const output = (payload as { output?: unknown }).output;
         const text = typeof output === "string" ? output : JSON.stringify(output);
         if (!text) return [];
@@ -287,6 +350,7 @@ function mapCodexEventToFragments(obj: unknown, opts?: { includeUserMessages?: b
       }
 
       if (itemType === "custom_tool_call") {
+        if (!includeTools) return [];
         const name = (payload as { name?: unknown }).name;
         const input = (payload as { input?: unknown }).input;
         if (typeof name !== "string") return [];
@@ -295,6 +359,7 @@ function mapCodexEventToFragments(obj: unknown, opts?: { includeUserMessages?: b
       }
 
       if (itemType === "custom_tool_call_output") {
+        if (!includeTools) return [];
         const output = (payload as { output?: unknown }).output;
         const text = typeof output === "string" ? output : JSON.stringify(output);
         if (!text) return [];
@@ -302,12 +367,14 @@ function mapCodexEventToFragments(obj: unknown, opts?: { includeUserMessages?: b
       }
 
       if (itemType === "web_search_call") {
+        if (!includeTools) return [];
         const action = (payload as { action?: unknown }).action;
         const query = action && typeof action === "object" ? (action as { query?: unknown }).query : undefined;
         if (typeof query === "string") return [{ kind: "text", text: `Web search: ${query}` }];
       }
 
       if (itemType === "local_shell_call") {
+        if (!includeTools) return [];
         const action = (payload as { action?: unknown }).action;
         const cmd = action && typeof action === "object" ? (action as { command?: unknown }).command : undefined;
         if (typeof cmd === "string") return [{ kind: "tool_call", text: `$ ${cmd}` }];
@@ -318,7 +385,12 @@ function mapCodexEventToFragments(obj: unknown, opts?: { includeUserMessages?: b
 
     if (type === "event_msg") {
       if (!payload || typeof payload !== "object") return [];
-      return mapEventMsgPayload(payload as Record<string, unknown>, { includeUserMessages });
+      return mapEventMsgPayload(payload as Record<string, unknown>, {
+        includeUserMessages,
+        includeReasoning,
+        includeEvents,
+        includeTools,
+      });
     }
 
     return [];
@@ -338,10 +410,16 @@ function mapCodexEventToFragments(obj: unknown, opts?: { includeUserMessages?: b
   return [];
 }
 
-function mapEventMsgPayload(payload: Record<string, unknown>, opts?: { includeUserMessages?: boolean }): StreamFragment[] {
+function mapEventMsgPayload(
+  payload: Record<string, unknown>,
+  opts?: { includeUserMessages?: boolean; includeReasoning?: boolean; includeEvents?: boolean; includeTools?: boolean },
+): StreamFragment[] {
   const evType = typeof payload.type === "string" ? payload.type : null;
   if (!evType) return [];
   const includeUserMessages = opts?.includeUserMessages !== false;
+  const includeReasoning = opts?.includeReasoning !== false;
+  const includeEvents = opts?.includeEvents !== false;
+  const includeTools = opts?.includeTools !== false;
 
   const text = (value: unknown, continuous = false): StreamFragment[] => {
     if (typeof value !== "string" || value.length === 0) return [];
@@ -350,20 +428,25 @@ function mapEventMsgPayload(payload: Record<string, unknown>, opts?: { includeUs
 
   switch (evType) {
     case "error":
-      return text(`Error: ${stringOrEmpty(payload.message)}`);
+      if (!includeEvents) return [];
+      return text(formatTitledText("Error", stringOrEmpty(payload.message)));
     case "warning":
-      return text(`Warning: ${stringOrEmpty(payload.message)}`);
+      if (!includeEvents) return [];
+      return text(formatTitledText("Warning", stringOrEmpty(payload.message)));
     case "context_compacted":
-      return text("Context compacted");
+      if (!includeEvents) return [];
+      return text(formatTitledText("Context compacted"));
     case "task_started": {
+      if (!includeEvents) return [];
       const ctxWin = numberOrNull(payload.model_context_window);
-      const suffix = ctxWin !== null ? ` (context window ${ctxWin})` : "";
-      return text(`Task started${suffix}`);
+      const suffix = ctxWin !== null ? `context window ${ctxWin}` : "";
+      return text(formatTitledText("Task started", suffix || null));
     }
     case "task_complete": {
+      if (!includeEvents) return [];
       const last = stringOrEmpty(payload.last_agent_message);
-      if (last) return text(`Task complete. Last message: ${last}`);
-      return text("Task complete");
+      const body = last ? `Last message: ${last}` : null;
+      return text(formatTitledText("Task complete", body));
     }
     case "token_count":
       return [];
@@ -375,42 +458,58 @@ function mapEventMsgPayload(payload: Record<string, unknown>, opts?: { includeUs
     case "agent_message_content_delta":
       return text(stringOrEmpty(payload.delta), true);
     case "agent_reasoning": {
+      if (!includeReasoning) return [];
       const msg = stringOrEmpty(payload.text);
-      return msg ? text(`Reasoning: ${msg}`) : [];
+      const title = stringOrEmpty((payload as { title?: unknown }).title) || "Reasoning";
+      return msg ? text(formatTitledText(title, msg, { inline: false })) : [];
     }
     case "agent_reasoning_delta":
     case "reasoning_content_delta":
-      return text(stringOrEmpty(payload.delta), true);
+      return includeReasoning ? text(stringOrEmpty(payload.delta), true) : [];
     case "agent_reasoning_raw_content": {
+      if (!includeReasoning) return [];
       const msg = stringOrEmpty(payload.text);
-      return msg ? text(`Reasoning (raw): ${msg}`) : [];
+      const title = stringOrEmpty((payload as { title?: unknown }).title) || "Reasoning (raw)";
+      return msg ? text(formatTitledText(title, msg, { inline: false })) : [];
     }
     case "agent_reasoning_raw_content_delta":
     case "reasoning_raw_content_delta":
-      return text(stringOrEmpty(payload.delta), true);
+      return includeReasoning ? text(stringOrEmpty(payload.delta), true) : [];
     case "agent_reasoning_section_break":
-      return text("\n----\n", true);
+      return includeReasoning ? text("\n----\n", true) : [];
     case "session_configured":
-      return text(formatSessionConfigured(payload));
-    case "mcp_startup_update":
-      return text(formatMcpStartupUpdate(payload));
-    case "mcp_startup_complete":
-      return text(formatMcpStartupComplete(payload));
+      if (!includeEvents) return [];
+      return text(formatTitledText("Session configured", formatSessionConfigured(payload) || null));
+    case "mcp_startup_update": {
+      if (!includeEvents) return [];
+      const update = formatMcpStartupUpdate(payload);
+      return text(formatTitledText(update.title, update.detail || null));
+    }
+    case "mcp_startup_complete": {
+      if (!includeEvents) return [];
+      const summary = formatMcpStartupComplete(payload);
+      return text(formatTitledText(summary.title, summary.detail));
+    }
     case "mcp_tool_call_begin": {
+      if (!includeTools) return [];
       const call = formatMcpInvocation(payload.invocation);
       return call ? [{ kind: "tool_call", text: call }] : [];
     }
     case "mcp_tool_call_end": {
+      if (!includeTools) return [];
       const summary = formatMcpToolResult(payload.result, payload.invocation);
       return summary ? [{ kind: "tool_output", text: summary }] : [];
     }
     case "web_search_begin":
+      if (!includeTools) return [];
       return text("Web search started");
     case "web_search_end": {
+      if (!includeTools) return [];
       const query = stringOrEmpty(payload.query);
       return query ? text(`Web search: ${query}`) : [];
     }
     case "exec_command_begin": {
+      if (!includeTools) return [];
       const cmd = formatCommand(payload.command);
       const cwd = stringOrEmpty(payload.cwd);
       const prefix = cwd ? `[${cwd}] ` : "";
@@ -418,16 +517,19 @@ function mapEventMsgPayload(payload: Record<string, unknown>, opts?: { includeUs
       return text(body);
     }
     case "exec_command_output_delta": {
+      if (!includeTools) return [];
       const chunk = decodeBase64ToString(payload.chunk);
       return chunk ? text(chunk, true) : [];
     }
     case "terminal_interaction": {
+      if (!includeTools) return [];
       const stdin = stringOrEmpty(payload.stdin);
       const pid = stringOrEmpty(payload.process_id);
       if (!stdin) return [];
       return text(pid ? `[stdin -> ${pid}] ${stdin}` : `[stdin] ${stdin}`);
     }
     case "exec_command_end": {
+      if (!includeTools) return [];
       const exit = numberOrNull(payload.exit_code);
       const cmd = formatCommand(payload.command);
       const status = exit !== null ? ` (exit ${exit})` : "";
@@ -437,10 +539,12 @@ function mapEventMsgPayload(payload: Record<string, unknown>, opts?: { includeUs
       return text(summary);
     }
     case "view_image_tool_call": {
+      if (!includeTools) return [];
       const path = stringOrEmpty(payload.path);
       return path ? text(`View image: ${path}`) : [];
     }
     case "exec_approval_request": {
+      if (!includeEvents) return [];
       const cmd = formatCommand(payload.command);
       const cwd = stringOrEmpty(payload.cwd);
       const reason = stringOrEmpty(payload.reason);
@@ -448,50 +552,62 @@ function mapEventMsgPayload(payload: Record<string, unknown>, opts?: { includeUs
       if (cwd) parts.push(`[${cwd}]`);
       if (cmd) parts.push(`$ ${cmd}`);
       if (reason) parts.push(`reason: ${reason}`);
-      return text(`Approval needed: ${parts.join(" ")}`.trim());
+      return text(formatTitledText("Approval needed", parts.join(" ").trim() || null));
     }
     case "elicitation_request": {
+      if (!includeEvents) return [];
       const server = stringOrEmpty(payload.server_name);
       const message = stringOrEmpty(payload.message);
       const prefix = server ? `${server}: ` : "";
-      return text(`Elicitation request: ${prefix}${message}`);
+      return text(formatTitledText("Elicitation request", `${prefix}${message}`.trim() || null));
     }
     case "apply_patch_approval_request": {
+      if (!includeEvents) return [];
       const summary = formatPatchApprovalRequest(payload);
-      return summary ? text(summary) : [];
+      return summary ? text(formatTitledText("Patch approval needed", summary)) : [];
     }
     case "deprecation_notice": {
+      if (!includeEvents) return [];
       const summary = stringOrEmpty(payload.summary);
       const details = stringOrEmpty(payload.details);
-      return text(details ? `Deprecated: ${summary} - ${details}` : `Deprecated: ${summary}`);
+      const body = details ? `${summary} - ${details}` : summary;
+      return text(formatTitledText("Deprecated", body || null));
     }
     case "background_event":
+      if (!includeEvents) return [];
       return text(stringOrEmpty(payload.message));
     case "undo_started": {
+      if (!includeEvents) return [];
       const msg = stringOrEmpty(payload.message);
-      return text(msg ? `Undo started: ${msg}` : "Undo started");
+      return text(formatTitledText("Undo started", msg || null));
     }
     case "undo_completed": {
+      if (!includeEvents) return [];
       const msg = stringOrEmpty(payload.message);
       const success = typeof payload.success === "boolean" ? payload.success : false;
       const base = success ? "Undo completed" : "Undo failed";
-      return text(msg ? `${base}: ${msg}` : base);
+      return text(formatTitledText(base, msg || null));
     }
     case "stream_error":
-      return text(`Stream error: ${stringOrEmpty(payload.message)}`);
+      if (!includeEvents) return [];
+      return text(formatTitledText("Stream error", stringOrEmpty(payload.message)));
     case "patch_apply_begin": {
+      if (!includeEvents) return [];
       const summary = formatPatchApplyBegin(payload);
-      return text(summary);
+      return text(formatTitledText("Applying patch", summary));
     }
     case "patch_apply_end": {
+      if (!includeEvents) return [];
       const summary = formatPatchApplyEnd(payload);
-      return text(summary);
+      return text(formatTitledText("Patch apply", summary));
     }
     case "turn_diff": {
+      if (!includeTools) return [];
       const diff = stringOrEmpty(payload.unified_diff);
       return diff ? [{ kind: "tool_output", text: diff }] : [];
     }
     case "get_history_entry_response": {
+      if (!includeEvents) return [];
       const offset = numberOrNull(payload.offset);
       const logId = numberOrNull(payload.log_id);
       const entry = (payload as { entry?: unknown }).entry;
@@ -499,31 +615,37 @@ function mapEventMsgPayload(payload: Record<string, unknown>, opts?: { includeUs
       const label = `History entry${logId !== null ? ` log ${logId}` : ""}${
         offset !== null ? ` offset ${offset}` : ""
       }`;
-      return text(found ? `${label} returned` : `${label} not found`);
+      return text(formatTitledText(label, found ? "returned" : "not found"));
     }
     case "mcp_list_tools_response":
-      return text(formatMcpListTools(payload));
+      if (!includeEvents) return [];
+      return text(formatTitledText("MCP list", formatMcpListTools(payload)));
     case "list_custom_prompts_response":
-      return text(formatCustomPrompts(payload));
+      if (!includeEvents) return [];
+      return text(formatTitledText("Custom prompts", formatCustomPrompts(payload)));
     case "plan_update": {
+      if (!includeEvents) return [];
       const plan = formatPlanUpdate(payload);
       return plan ? text(plan) : [];
     }
     case "turn_aborted": {
+      if (!includeEvents) return [];
       const reason = formatTurnAbortReason(payload.reason);
-      return text(reason ? `Turn aborted: ${reason}` : "Turn aborted");
+      return text(formatTitledText("Turn aborted", reason || null));
     }
     case "shutdown_complete": {
-      const message = text("Shutdown complete");
+      const message = includeEvents ? text(formatTitledText("Shutdown complete")) : [];
       return [...message, { kind: "final" }];
     }
     case "entered_review_mode": {
+      if (!includeEvents) return [];
       const summary = formatEnteredReview(payload);
-      return summary ? text(summary) : [];
+      return text(formatTitledText("Entered review mode", summary));
     }
     case "exited_review_mode": {
+      if (!includeEvents) return [];
       const summary = formatExitedReview(payload);
-      return summary ? text(summary) : [];
+      return text(formatTitledText("Exited review mode", summary));
     }
     case "raw_response_item":
     case "item_started":
@@ -559,6 +681,27 @@ function safeJson(value: unknown): string {
 function truncateJson(value: unknown, maxLen = 400): string {
   const raw = safeJson(value);
   return raw.length > maxLen ? `${raw.slice(0, maxLen)}...` : raw;
+}
+
+function normalizeMessageVerbosity(value: unknown): MessageVerbosity {
+  if (value === 1) return 1;
+  if (value === 2) return 2;
+  if (value === 3) return 3;
+  if (typeof value === "number") {
+    if (value <= 1) return 1;
+    if (value <= 2) return 2;
+  }
+  return 3;
+}
+
+function formatTitledText(title: string, body?: string | null, opts?: { inline?: boolean }): string {
+  const cleanTitle = title.trim();
+  const hasBody = typeof body === "string" && body.trim().length > 0;
+  if (!hasBody) return `*${cleanTitle}*`;
+  const cleanBody = body.trim();
+  const inline = opts?.inline ?? !cleanBody.includes("\n");
+  const separator = inline ? " " : "\n";
+  return `*${cleanTitle}*${separator}${cleanBody}`;
 }
 
 function formatTokenCount(payload: Record<string, unknown>): string | null {
@@ -609,10 +752,10 @@ function formatSessionConfigured(payload: Record<string, unknown>): string {
   if (model) parts.push(model);
   if (provider) parts.push(`provider=${provider}`);
   if (cwd) parts.push(`cwd=${cwd}`);
-  return parts.length > 0 ? `Session configured: ${parts.join(" | ")}` : "Session configured";
+  return parts.join(" | ");
 }
 
-function formatMcpStartupUpdate(payload: Record<string, unknown>): string {
+function formatMcpStartupUpdate(payload: Record<string, unknown>): { title: string; detail: string } {
   const server = stringOrEmpty(payload.server) || "server";
   const statusObj = (payload as { status?: unknown }).status;
   let status = "";
@@ -626,14 +769,14 @@ function formatMcpStartupUpdate(payload: Record<string, unknown>): string {
       if (error) status += ` (${error})`;
     }
   }
-  return `MCP ${server}: ${status || "status unknown"}`;
+  return { title: `MCP ${server}`, detail: status || "status unknown" };
 }
 
-function formatMcpStartupComplete(payload: Record<string, unknown>): string {
+function formatMcpStartupComplete(payload: Record<string, unknown>): { title: string; detail: string } {
   const ready = Array.isArray(payload.ready) ? payload.ready.length : 0;
   const failed = Array.isArray(payload.failed) ? payload.failed.length : 0;
   const cancelled = Array.isArray(payload.cancelled) ? payload.cancelled.length : 0;
-  return `MCP startup: ready=${ready}, failed=${failed}, cancelled=${cancelled}`;
+  return { title: "MCP startup", detail: `ready=${ready}, failed=${failed}, cancelled=${cancelled}` };
 }
 
 function formatMcpInvocation(invocation: unknown): string | null {
@@ -697,7 +840,7 @@ function formatPatchApprovalRequest(payload: Record<string, unknown>): string | 
   const parts = [`${count} file(s)`];
   if (grantRoot) parts.push(`grant ${grantRoot}`);
   if (reason) parts.push(`reason: ${reason}`);
-  return parts.length > 0 ? `Patch approval needed: ${parts.join(", ")}` : null;
+  return parts.length > 0 ? parts.join(", ") : null;
 }
 
 function countMapEntries(value: unknown): number {
@@ -707,7 +850,7 @@ function countMapEntries(value: unknown): number {
 function formatPatchApplyBegin(payload: Record<string, unknown>): string {
   const count = countMapEntries(payload.changes);
   const auto = (payload as { auto_approved?: unknown }).auto_approved === true;
-  return `Applying patch (${count} file(s))${auto ? " [auto-approved]" : ""}`;
+  return `${count} file(s)${auto ? " [auto-approved]" : ""}`;
 }
 
 function formatPatchApplyEnd(payload: Record<string, unknown>): string {
@@ -716,7 +859,7 @@ function formatPatchApplyEnd(payload: Record<string, unknown>): string {
   const stderr = stringOrEmpty(payload.stderr);
   const stdout = stringOrEmpty(payload.stdout);
   const details = stderr || stdout;
-  const base = `Patch apply ${success ? "succeeded" : "failed"} (${count} file(s))`;
+  const base = `${success ? "succeeded" : "failed"} (${count} file(s))`;
   return details ? `${base}: ${details}` : base;
 }
 
@@ -734,7 +877,7 @@ function formatMcpListTools(payload: Record<string, unknown>): string {
           .map((v) => (Array.isArray(v) ? v.length : 0))
           .reduce((a, b) => a + b, 0)
       : 0;
-  return `MCP list: ${tools} tool(s), ${resources} resource(s), ${templates} template(s)`;
+  return `${tools} tool(s), ${resources} resource(s), ${templates} template(s)`;
 }
 
 function formatCustomPrompts(payload: Record<string, unknown>): string {
@@ -742,10 +885,10 @@ function formatCustomPrompts(payload: Record<string, unknown>): string {
   const names = prompts
     .map((p) => (p && typeof p === "object" ? stringOrEmpty((p as { name?: unknown }).name) : ""))
     .filter((n) => n.length > 0);
-  if (names.length === 0) return "Custom prompts: none";
+  if (names.length === 0) return "none";
   const preview = names.slice(0, 5).join(", ");
   const suffix = names.length > 5 ? ` (+${names.length - 5} more)` : "";
-  return `Custom prompts: ${preview}${suffix}`;
+  return `${preview}${suffix}`;
 }
 
 function formatPlanUpdate(payload: Record<string, unknown>): string | null {
@@ -762,7 +905,8 @@ function formatPlanUpdate(payload: Record<string, unknown>): string | null {
     .filter((l) => l.length > 0);
 
   if (lines.length === 0 && !explanation) return null;
-  const header = explanation ? `Plan update: ${explanation}` : "Plan update";
+  const header = formatTitledText("Plan update", explanation || null, { inline: false });
+  if (lines.length === 0) return header;
   return [header, ...lines].join("\n");
 }
 
@@ -798,18 +942,21 @@ function formatReviewTarget(target: unknown): string | null {
 function formatEnteredReview(payload: Record<string, unknown>): string | null {
   const target = formatReviewTarget(payload.target);
   const hint = stringOrEmpty(payload.user_facing_hint);
-  const base = target ? `Entered review mode for ${target}` : "Entered review mode";
-  return hint ? `${base} - ${hint}` : base;
+  const parts: string[] = [];
+  if (target) parts.push(`for ${target}`);
+  if (hint) parts.push(hint);
+  if (parts.length === 0) return null;
+  return parts.join(" - ");
 }
 
 function formatExitedReview(payload: Record<string, unknown>): string | null {
   const reviewOutput = payload.review_output;
-  if (!reviewOutput || typeof reviewOutput !== "object") return "Exited review mode";
+  if (!reviewOutput || typeof reviewOutput !== "object") return null;
   const findings = Array.isArray((reviewOutput as { findings?: unknown }).findings)
     ? (reviewOutput as { findings: unknown[] }).findings.length
     : 0;
   const correctness = stringOrEmpty((reviewOutput as { overall_correctness?: unknown }).overall_correctness);
-  const base = findings > 0 ? `Exited review mode (findings: ${findings})` : "Exited review mode (no findings)";
+  const base = findings > 0 ? `findings: ${findings}` : "no findings";
   return correctness ? `${base} - ${correctness}` : base;
 }
 

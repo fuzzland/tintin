@@ -4,6 +4,8 @@ host = "0.0.0.0"
 port = 8787
 data_dir = "./data"
 log_level = "info"
+# 1=response only, 2=response+reasoning+events (no tool call output), 3=all messages
+message_verbosity = 3
 
 [db]
 # sqlite (SQLAlchemy-style URL):

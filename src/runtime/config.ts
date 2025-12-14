@@ -11,6 +11,7 @@ export interface BotSection {
   port: number;
   data_dir: string;
   log_level: string;
+  message_verbosity: 1 | 2 | 3;
 }
 
 export interface DbSection {
@@ -141,6 +142,17 @@ function normalizeUrl(u: string, label: string): string {
   }
 }
 
+function normalizeMessageVerbosity(value: unknown): 1 | 2 | 3 {
+  if (value === 1) return 1;
+  if (value === 2) return 2;
+  if (value === 3) return 3;
+  if (typeof value === "number") {
+    if (value <= 1) return 1;
+    if (value <= 2) return 2;
+  }
+  return 3;
+}
+
 export async function loadConfig(configPath: string): Promise<AppConfig> {
   const absPath = path.resolve(configPath);
   const configDir = path.dirname(absPath);
@@ -169,6 +181,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     data_dir:
       typeof bot.data_dir === "string" ? path.resolve(configDir, bot.data_dir) : path.resolve(configDir, "./data"),
     log_level: typeof bot.log_level === "string" ? bot.log_level : "info",
+    message_verbosity: normalizeMessageVerbosity((bot as any).message_verbosity),
   };
 
   const dbSection: DbSection = {
