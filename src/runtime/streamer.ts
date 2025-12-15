@@ -524,6 +524,32 @@ function mapCodexEventToFragments(
   return [];
 }
 
+function extractTitleFromPayload(
+  payload: Record<string, unknown>,
+): { title: string | null; content: string | null } {
+  if (
+    payload &&
+    typeof payload === "object" &&
+    (payload as { type?: unknown }).type === "agent_reasoning" &&
+    typeof (payload as { text?: unknown }).text === "string"
+  ) {
+    const text = (payload as { text: string }).text;
+    // Get the first occurrence of **xxx**
+    const match = text.match(/\*\*(.*?)\*\*/);
+    const title = match && typeof match[1] === "string" ? match[1] : null;
+    // Remove the matched **title** from the text for content
+    let content: string | null = text;
+    if (title !== null) {
+      // Strip the first **title** (including the "**") and any whitespace/newlines directly after
+      content = content.replace(/\*\*.*?\*\*\s*/, "");
+    }
+    content = content.trim();
+    if (content.length === 0) content = null;
+    return { title, content };
+  }
+  return { title: null, content: null };
+}
+
 function mapEventMsgPayload(
   payload: Record<string, unknown>,
   opts?: { includeUserMessages?: boolean; includeReasoning?: boolean; includeEvents?: boolean; includeTools?: boolean },
@@ -574,8 +600,11 @@ function mapEventMsgPayload(
     case "agent_reasoning": {
       if (!includeReasoning) return [];
       const msg = stringOrEmpty(payload.text);
-      const title = stringOrEmpty((payload as { title?: unknown }).title) || "Reasoning";
-      return msg ? text(formatTitledText(title, msg, { inline: false })) : [];
+      let {
+        title,
+        content,
+      } = extractTitleFromPayload(payload);
+      return content ? text(formatTitledText(title ?? "Reasoning", content ?? msg, { inline: false })) : [];
     }
     case "agent_reasoning_delta":
     case "reasoning_content_delta":
