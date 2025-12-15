@@ -4,6 +4,7 @@ import { access, mkdir } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { PlaywrightMcpSection } from "./config.js";
 import type { Logger } from "./log.js";
@@ -29,7 +30,11 @@ export class PlaywrightMcpManager {
   async ensureServer(): Promise<PlaywrightServerInfo> {
     if (this.startPromise) {
       const started = await this.startPromise;
-      return started.info;
+      const healthy = await this.isServerHealthy(started.info).catch(() => false);
+      if (healthy) return started.info;
+      await this.stop().catch(() => undefined);
+      this.startPromise = null;
+      this.clientPromise = null;
     }
     this.startPromise = this.startServer().catch((e) => {
       this.startPromise = null;
@@ -90,9 +95,28 @@ export class PlaywrightMcpManager {
 
   private async createClient(server: PlaywrightServerInfo): Promise<Client> {
     const client = new Client({ name: "tintin", version: "0.1.0" }, { capabilities: {} });
-    const transport = new SSEClientTransport(new URL(server.url));
-    await client.connect(transport);
+    const primary = new StreamableHTTPClientTransport(new URL(server.url));
+    try {
+      await client.connect(primary);
+      return client;
+    } catch (e) {
+      this.logger.warn(`[playwright-mcp] streamable HTTP connect failed (${String(e)}), falling back to SSE`);
+    }
+    // Legacy SSE fallback: server advertises /sse for SSE transport
+    const sseUrl = new URL(server.url);
+    sseUrl.pathname = sseUrl.pathname.replace(/\/mcp$/, "") + "/sse";
+    const fallback = new SSEClientTransport(sseUrl);
+    await client.connect(fallback);
     return client;
+  }
+
+  private async isServerHealthy(info: PlaywrightServerInfo): Promise<boolean> {
+    try {
+      const res = await fetch(info.url, { method: "GET" });
+      return res.ok;
+    } catch {
+      return false;
+    }
   }
 
   private async startServer(): Promise<{ info: PlaywrightServerInfo; child: ChildProcessWithoutNullStreams }> {
@@ -183,8 +207,32 @@ function buildPlaywrightArgs(opts: {
   headless: boolean;
   executablePath?: string;
   timeoutMs: number;
+  userAgent?: string;
+  viewportSize?: string;
 }): string[] {
-  const args = ["-y", opts.pkg, "--browser", opts.browser, "--host", opts.host, "--port", String(opts.port), "--user-data-dir", opts.userDataDir, "--output-dir", opts.outputDir, "--snapshot-mode", opts.snapshotMode, "--image-responses", opts.imageResponses, "--shared-browser-context", "--timeout-navigation", String(Math.max(1_000, Math.min(opts.timeoutMs, 60_000)))];
+  const args = [
+    "-y",
+    opts.pkg,
+    "--browser",
+    opts.browser,
+    "--host",
+    opts.host,
+    "--port",
+    String(opts.port),
+    "--user-data-dir",
+    opts.userDataDir,
+    "--output-dir",
+    opts.outputDir,
+    "--snapshot-mode",
+    opts.snapshotMode,
+    "--image-responses",
+    opts.imageResponses,
+    "--shared-browser-context",
+    "--timeout-navigation",
+    String(Math.max(1_000, Math.min(opts.timeoutMs, 60_000))),
+  ];
+  if (opts.userAgent) args.push("--user-agent", opts.userAgent);
+  if (opts.viewportSize) args.push("--viewport-size", opts.viewportSize);
   if (opts.executablePath) args.push("--executable-path", opts.executablePath);
   if (opts.headless) args.push("--headless");
   return args;

@@ -352,16 +352,29 @@ export async function createBotService(deps: BotServiceDeps) {
           const space = Number(session.space_id);
           if (Number.isNaN(chatId) || Number.isNaN(space)) return;
           const send = async (opts: { messageThreadId?: number; replyToMessageId?: number }) => {
-            await telegram.sendDocument({
-              chatId,
-              messageThreadId: opts.messageThreadId,
-              replyToMessageId: opts.replyToMessageId,
-              filename: message.filename,
-              file: message.file,
-              mimeType: message.mimeType,
-              caption,
-              priority,
-            });
+            try {
+              await telegram.sendPhoto({
+                chatId,
+                messageThreadId: opts.messageThreadId,
+                replyToMessageId: opts.replyToMessageId,
+                filename: message.filename,
+                file: message.file,
+                mimeType: message.mimeType,
+                caption,
+                priority,
+              });
+            } catch {
+              await telegram.sendDocument({
+                chatId,
+                messageThreadId: opts.messageThreadId,
+                replyToMessageId: opts.replyToMessageId,
+                filename: message.filename,
+                file: message.file,
+                mimeType: message.mimeType,
+                caption,
+                priority,
+              });
+            }
           };
           if (config.telegram?.use_topics) {
             try {

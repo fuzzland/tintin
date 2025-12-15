@@ -2,8 +2,6 @@ import { RateLimiter, chunkText, sleep } from "../util.js";
 import type { Logger } from "../log.js";
 import type { ProjectEntry, TelegramSection } from "../config.js";
 import { redactText } from "../redact.js";
-import { File, FormData } from "undici";
-import { Blob } from "node:buffer";
 
 const TELEGRAM_USER_SEND_RATE_PER_SEC = 10;
 
@@ -209,15 +207,42 @@ export class TelegramClient {
     await limiter.waitTurn();
 
     const form = new FormData();
-    form.set("chat_id", String(opts.chatId));
-    if (opts.messageThreadId) form.set("message_thread_id", String(opts.messageThreadId));
-    else if (opts.replyToMessageId) form.set("reply_to_message_id", String(opts.replyToMessageId));
-    if (opts.caption) form.set("caption", sanitizeTelegramText(redactText(opts.caption), this.defaultParseMode, false));
+    form.append("chat_id", String(opts.chatId));
+    if (opts.messageThreadId) form.append("message_thread_id", String(opts.messageThreadId));
+    else if (opts.replyToMessageId) form.append("reply_to_message_id", String(opts.replyToMessageId));
+    if (opts.caption) form.append("caption", sanitizeTelegramText(redactText(opts.caption), this.defaultParseMode, false));
     const blob = new Blob([opts.file], { type: opts.mimeType ?? "application/octet-stream" });
-    const file = new File([blob], opts.filename, { type: opts.mimeType ?? "application/octet-stream" });
-    form.set("document", file);
+    form.append("document", blob, opts.filename);
 
     const url = `${this.baseUrl}/sendDocument`;
+    const res = await fetch(url, { method: "POST", body: form });
+    const json = (await res.json()) as TelegramApiResponse<TelegramMessage>;
+    if (!json.ok) throw new TelegramApiError(json.error_code, json.description);
+    return json.result;
+  }
+
+  async sendPhoto(opts: {
+    chatId: number | string;
+    messageThreadId?: number;
+    replyToMessageId?: number;
+    filename: string;
+    file: Buffer;
+    mimeType?: string;
+    caption?: string;
+    priority?: TelegramSendPriority;
+  }) {
+    const limiter = (opts.priority ?? "background") === "user" ? this.userLimiter : this.backgroundLimiter;
+    await limiter.waitTurn();
+
+    const form = new FormData();
+    form.append("chat_id", String(opts.chatId));
+    if (opts.messageThreadId) form.append("message_thread_id", String(opts.messageThreadId));
+    else if (opts.replyToMessageId) form.append("reply_to_message_id", String(opts.replyToMessageId));
+    if (opts.caption) form.append("caption", sanitizeTelegramText(redactText(opts.caption), this.defaultParseMode, false));
+    const blob = new Blob([opts.file], { type: opts.mimeType ?? "image/png" });
+    form.append("photo", blob, opts.filename);
+
+    const url = `${this.baseUrl}/sendPhoto`;
     const res = await fetch(url, { method: "POST", body: form });
     const json = (await res.json()) as TelegramApiResponse<TelegramMessage>;
     if (!json.ok) throw new TelegramApiError(json.error_code, json.description);

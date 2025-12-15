@@ -31,6 +31,8 @@ export class JsonlStreamer {
   private readonly buffers = new Map<string, BufferState>();
   private readonly pendingToolCalls = new Map<string, string[]>();
   private readonly planCallIds = new Map<string, Set<string>>();
+  private readonly playwrightCallIds = new Map<string, Map<string, string>>();
+  private readonly playwrightCapturedCallIds = new Map<string, Set<string>>();
   private readonly pendingUserPriority = new Map<string, number>();
   private readonly lastUserMessageAtSeen = new Map<string, number | null>();
   private running = false;
@@ -125,7 +127,8 @@ export class JsonlStreamer {
           try {
             const obj = JSON.parse(trimmed) as unknown;
 
-            if ((obj as { type?: unknown }).type === "mcp_tool_call_end") {
+            const objType = (obj as { type?: unknown }).type;
+            if (objType === "mcp_tool_call_end" || objType === "response_item") {
               void this.maybeCapturePlaywrightScreenshot(session.id, obj as Record<string, unknown>);
             }
 
@@ -209,6 +212,32 @@ export class JsonlStreamer {
 
   private async maybeCapturePlaywrightScreenshot(sessionId: string, obj: Record<string, unknown>) {
     if (!this.playwrightMcp || !this.config.playwright_mcp?.enabled) return;
+    const type = (obj as { type?: unknown }).type;
+    if (type === "response_item") {
+      const payload = (obj as { payload?: unknown }).payload;
+      if (!payload || typeof payload !== "object") return;
+      const payloadType = stringOrEmpty((payload as { type?: unknown }).type);
+      const callId = stringOrEmpty((payload as { call_id?: unknown }).call_id);
+      if (payloadType === "function_call") {
+        const name = stringOrEmpty((payload as { name?: unknown }).name);
+        const parsed = parseMcpFunctionName(name);
+        if (parsed && parsed.server.toLowerCase() === "playwright" && callId) {
+          this.rememberPlaywrightCall(sessionId, callId, parsed.tool);
+        }
+        return;
+      }
+      if (payloadType === "function_call_output" && callId) {
+        if (this.hasCapturedPlaywrightCall(sessionId, callId)) return;
+        const tool = this.consumePlaywrightCall(sessionId, callId);
+        if (tool) {
+          await this.captureAndSendPlaywrightScreenshot(sessionId, callId, tool);
+          this.markCapturedPlaywrightCall(sessionId, callId);
+        }
+        return;
+      }
+      return;
+    }
+
     const payload = (obj as { payload?: unknown }).payload;
     if (!payload || typeof payload !== "object") return;
     const invocation = (payload as { invocation?: unknown }).invocation;
@@ -217,8 +246,44 @@ export class JsonlStreamer {
     if (server !== "playwright") return;
     const tool = stringOrEmpty((invocation as { tool?: unknown }).tool);
     const callId = stringOrEmpty((invocation as { call_id?: unknown }).call_id);
+    if (this.hasCapturedPlaywrightCall(sessionId, callId)) return;
+    this.consumePlaywrightCall(sessionId, callId);
+    await this.captureAndSendPlaywrightScreenshot(sessionId, callId || undefined, tool || undefined);
+    this.markCapturedPlaywrightCall(sessionId, callId);
+  }
+
+  private rememberPlaywrightCall(sessionId: string, callId: string, tool: string) {
+    const perSession = this.playwrightCallIds.get(sessionId) ?? new Map<string, string>();
+    perSession.set(callId, tool);
+    this.playwrightCallIds.set(sessionId, perSession);
+  }
+
+  private consumePlaywrightCall(sessionId: string, callId: string): string | null {
+    if (!callId) return null;
+    const perSession = this.playwrightCallIds.get(sessionId);
+    if (!perSession) return null;
+    const tool = perSession.get(callId) ?? null;
+    if (tool) perSession.delete(callId);
+    if (perSession.size === 0) this.playwrightCallIds.delete(sessionId);
+    return tool;
+  }
+
+  private hasCapturedPlaywrightCall(sessionId: string, callId: string | null): boolean {
+    if (!callId) return false;
+    const set = this.playwrightCapturedCallIds.get(sessionId);
+    return set ? set.has(callId) : false;
+  }
+
+  private markCapturedPlaywrightCall(sessionId: string, callId: string | null) {
+    if (!callId) return;
+    const set = this.playwrightCapturedCallIds.get(sessionId) ?? new Set<string>();
+    set.add(callId);
+    this.playwrightCapturedCallIds.set(sessionId, set);
+  }
+
+  private async captureAndSendPlaywrightScreenshot(sessionId: string, callId?: string, tool?: string) {
     try {
-      const result = await this.playwrightMcp.takeScreenshot({
+      const result = await this.playwrightMcp?.takeScreenshot({
         sessionId,
         callId: callId || undefined,
         tool: tool || undefined,
@@ -295,6 +360,8 @@ export class JsonlStreamer {
       this.lastUserMessageAtSeen.delete(id);
       this.pendingUserPriority.delete(id);
       this.planCallIds.delete(id);
+      this.playwrightCallIds.delete(id);
+      this.playwrightCapturedCallIds.delete(id);
     }
   }
 
@@ -1026,6 +1093,16 @@ function formatMcpContentBlock(block: unknown): string | null {
     return (block as { text: string }).text;
   }
   return truncateJson(block, 200);
+}
+
+function parseMcpFunctionName(name: string): { server: string; tool: string } | null {
+  if (typeof name !== "string") return null;
+  const parts = name.split("__");
+  if (parts.length < 3) return null;
+  const [prefix, server, ...rest] = parts;
+  const tool = rest.join("__");
+  if (prefix !== "mcp" || !server || !tool) return null;
+  return { server, tool };
 }
 
 function formatPatchApprovalRequest(payload: Record<string, unknown>): string | null {

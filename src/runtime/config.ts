@@ -95,6 +95,8 @@ export interface PlaywrightMcpSection {
   output_dir: string;
   executable_path?: string;
   timeout_ms: number;
+  user_agent?: string;
+  viewport_size?: string;
 }
 
 export interface AppConfig {
@@ -208,11 +210,19 @@ function normalizePlaywrightMcpSection(
 
   const snapshotMode = normalizePlaywrightSnapshotMode((value as any).snapshot_mode);
   const imageResponses = normalizePlaywrightImageResponse((value as any).image_responses);
-  const headless = typeof (value as any).headless === "boolean" ? (value as any).headless : true;
+  const headless = typeof (value as any).headless === "boolean" ? (value as any).headless : false;
   const timeoutMs =
     typeof (value as any).timeout_ms === "number" && Number.isFinite((value as any).timeout_ms)
       ? Math.max(1_000, Math.floor((value as any).timeout_ms))
       : 20_000;
+  const userAgent =
+    typeof (value as any).user_agent === "string" && (value as any).user_agent.trim().length > 0
+      ? (value as any).user_agent.trim()
+      : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36";
+  const viewportSize =
+    typeof (value as any).viewport_size === "string" && (value as any).viewport_size.trim().length > 0
+      ? (value as any).viewport_size.trim()
+      : "1366x768";
 
   const userDataDirRaw =
     typeof (value as any).user_data_dir === "string" && (value as any).user_data_dir.trim().length > 0
@@ -250,6 +260,8 @@ function normalizePlaywrightMcpSection(
     output_dir,
     executable_path,
     timeout_ms: timeoutMs,
+    user_agent: userAgent,
+    viewport_size: viewportSize,
   };
 }
 
