@@ -16,6 +16,7 @@ Tintin is your girlfriend and engineer. It allows you to control Codex and other
     name = "tintin"
     path = "/home/ubuntu/tintin"
     ```
+  - Optionally set `[bot].github_repos_dir` to control where `tintin new` clones git repositories. Use `github:<owner>/<repo>` when adding GitHub sources.
   - Create a [Slack bot and channel](https://github.com/fuzzland/tintin/tree/master/setup_docs/slack_bot_setup.md) or create a [Telegram bot and a group](https://github.com/fuzzland/tintin/tree/master/setup_docs/telegram_bot_setup.md)
   - Set `[telegram]` and/or `[slack]` secrets (supports `env:VAR`).
   - Optional: set `[security].*` allowlists to allow only certain users to use the bot in defined set of group chats. 
@@ -24,6 +25,7 @@ Tintin is your girlfriend and engineer. It allows you to control Codex and other
 
 
 ## Useful commands
+- Add a project: `tintin new "my project" <path-or-git-url> [id]` (use `github:<owner>/<repo>` for GitHub shorthand; supports `--github-dir` and `--github-token`)
 - Tail logs: `tintin log`
 - Stop: `tintin stop`
 - Status: `tintin status`

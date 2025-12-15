@@ -3,6 +3,8 @@ name = "codexbot"
 host = "0.0.0.0"
 port = 8787
 data_dir = "./data"
+# Base directory for cloning git repos when using `tintin new` (relative paths are resolved from this config file)
+github_repos_dir = "./data/repos"
 log_level = "debug"
 # 1=response only, 2=response+reasoning+events (no tool call output), 3=all messages
 message_verbosity = 2

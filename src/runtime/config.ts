@@ -10,6 +10,7 @@ export interface BotSection {
   host: string;
   port: number;
   data_dir: string;
+  github_repos_dir: string;
   log_level: string;
   message_verbosity: 1 | 2 | 3;
 }
@@ -77,6 +78,25 @@ export interface SlackSection {
   rate_limit_msgs_per_sec: number;
 }
 
+export type PlaywrightSnapshotMode = "incremental" | "full" | "none";
+export type PlaywrightImageResponseMode = "allow" | "omit";
+
+export interface PlaywrightMcpSection {
+  enabled: boolean;
+  package: string;
+  browser: string;
+  host: string;
+  port_start: number;
+  port_end: number;
+  snapshot_mode: PlaywrightSnapshotMode;
+  image_responses: PlaywrightImageResponseMode;
+  headless: boolean;
+  user_data_dir: string;
+  output_dir: string;
+  executable_path?: string;
+  timeout_ms: number;
+}
+
 export interface AppConfig {
   bot: BotSection;
   db: DbSection;
@@ -85,6 +105,7 @@ export interface AppConfig {
   projects: ProjectEntry[];
   telegram?: TelegramSection;
   slack?: SlackSection;
+  playwright_mcp?: PlaywrightMcpSection | null;
   config_dir: string;
 }
 
@@ -155,6 +176,83 @@ function normalizeMessageVerbosity(value: unknown): 1 | 2 | 3 {
   return 3;
 }
 
+function normalizePlaywrightSnapshotMode(value: unknown): PlaywrightSnapshotMode {
+  const raw = typeof value === "string" ? value.toLowerCase() : "";
+  if (raw === "incremental" || raw === "full" || raw === "none") return raw;
+  return "full";
+}
+
+function normalizePlaywrightImageResponse(value: unknown): PlaywrightImageResponseMode {
+  const raw = typeof value === "string" ? value.toLowerCase() : "";
+  if (raw === "omit") return "omit";
+  return "allow";
+}
+
+function normalizePlaywrightMcpSection(
+  value: unknown,
+  opts: { configDir: string; dataDir: string },
+): PlaywrightMcpSection | null {
+  if (value === undefined) return null;
+  if (!isRecord(value)) throw new Error("[playwright_mcp] must be a table");
+
+  const enabled = typeof value.enabled === "boolean" ? value.enabled : true;
+  const pkg =
+    typeof value.package === "string" && value.package.trim().length > 0 ? value.package.trim() : "@playwright/mcp@latest";
+  const browser = typeof value.browser === "string" && value.browser.trim().length > 0 ? value.browser.trim() : "chrome";
+  const host = typeof value.host === "string" && value.host.trim().length > 0 ? value.host.trim() : "127.0.0.1";
+
+  let portStart = typeof value.port_start === "number" ? Math.floor(value.port_start) : 11_000;
+  if (!Number.isFinite(portStart) || portStart < 10_001) portStart = 10_001;
+  let portEnd = typeof value.port_end === "number" ? Math.floor(value.port_end) : portStart + 2000;
+  if (!Number.isFinite(portEnd) || portEnd <= portStart) portEnd = portStart + 100;
+
+  const snapshotMode = normalizePlaywrightSnapshotMode((value as any).snapshot_mode);
+  const imageResponses = normalizePlaywrightImageResponse((value as any).image_responses);
+  const headless = typeof (value as any).headless === "boolean" ? (value as any).headless : true;
+  const timeoutMs =
+    typeof (value as any).timeout_ms === "number" && Number.isFinite((value as any).timeout_ms)
+      ? Math.max(1_000, Math.floor((value as any).timeout_ms))
+      : 20_000;
+
+  const userDataDirRaw =
+    typeof (value as any).user_data_dir === "string" && (value as any).user_data_dir.trim().length > 0
+      ? (value as any).user_data_dir
+      : path.join(opts.dataDir, "playwright", "{sessionId}", "profile");
+  const outputDirRaw =
+    typeof (value as any).output_dir === "string" && (value as any).output_dir.trim().length > 0
+      ? (value as any).output_dir
+      : path.join(opts.dataDir, "playwright", "{sessionId}", "artifacts");
+
+  const user_data_dir = path.isAbsolute(userDataDirRaw) ? userDataDirRaw : path.resolve(opts.configDir, userDataDirRaw);
+  const output_dir = path.isAbsolute(outputDirRaw) ? outputDirRaw : path.resolve(opts.configDir, outputDirRaw);
+
+  const executablePathRaw =
+    typeof (value as any).executable_path === "string" && (value as any).executable_path.trim().length > 0
+      ? (value as any).executable_path.trim()
+      : null;
+  const executable_path = executablePathRaw
+    ? path.isAbsolute(executablePathRaw)
+      ? executablePathRaw
+      : path.resolve(opts.configDir, executablePathRaw)
+    : undefined;
+
+  return {
+    enabled,
+    package: pkg,
+    browser,
+    host,
+    port_start: portStart,
+    port_end: portEnd,
+    snapshot_mode: snapshotMode,
+    image_responses: imageResponses,
+    headless,
+    user_data_dir,
+    output_dir,
+    executable_path,
+    timeout_ms: timeoutMs,
+  };
+}
+
 export async function loadConfig(configPath: string): Promise<AppConfig> {
   const absPath = path.resolve(configPath);
   const configDir = path.dirname(absPath);
@@ -176,12 +274,22 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
   assert(isRecord(codex), "[codex] section is required");
   assert(Array.isArray(projects), "[[projects]] entries are required");
 
+  const rawDataDir =
+    typeof bot.data_dir === "string" ? path.resolve(configDir, bot.data_dir) : path.resolve(configDir, "./data");
+  const rawGithubReposDir = (bot as any).github_repos_dir;
+  const githubReposDir =
+    typeof rawGithubReposDir === "string" && rawGithubReposDir.length > 0
+      ? path.isAbsolute(rawGithubReposDir)
+        ? rawGithubReposDir
+        : path.resolve(configDir, rawGithubReposDir)
+      : path.join(rawDataDir, "repos");
+
   const botSection: BotSection = {
     name: typeof bot.name === "string" ? bot.name : "codexbot",
     host: typeof bot.host === "string" ? bot.host : "0.0.0.0",
     port: typeof bot.port === "number" ? bot.port : 8787,
-    data_dir:
-      typeof bot.data_dir === "string" ? path.resolve(configDir, bot.data_dir) : path.resolve(configDir, "./data"),
+    data_dir: rawDataDir,
+    github_repos_dir: githubReposDir,
     log_level: typeof bot.log_level === "string" ? bot.log_level : "info",
     message_verbosity: normalizeMessageVerbosity((bot as any).message_verbosity),
   };
@@ -328,6 +436,11 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     assert(slackSection.signing_secret.length > 0, "[slack].signing_secret is required");
   }
 
+  const playwrightMcp = normalizePlaywrightMcpSection((resolved as any).playwright_mcp, {
+    configDir,
+    dataDir: botSection.data_dir,
+  });
+
   assert(telegramSection || slackSection, "At least one of [telegram] or [slack] must be configured");
 
   return {
@@ -338,6 +451,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     projects: projectEntries,
     telegram: telegramSection,
     slack: slackSection,
+    playwright_mcp: playwrightMcp,
     config_dir: configDir,
   };
 }
