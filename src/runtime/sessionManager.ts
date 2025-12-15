@@ -326,18 +326,16 @@ export class SessionManager {
     }
 
     // If users queued messages while we were running, resume one-by-one.
-    if (status !== "killed") {
-      const pending = await listPendingMessages(this.db, sessionId, 100);
-      if (pending.length > 0) {
-        const next = pending[0]!;
-        await this.sendToSession(sessionId, { text: `Processing 1 queued message…`, priority: "user" });
-        await consumePendingMessages(this.db, [next.id]);
+    const pending = await listPendingMessages(this.db, sessionId, 100);
+    if (pending.length > 0) {
+      const next = pending[0]!;
+      await this.sendToSession(sessionId, { text: `Processing 1 queued message…`, priority: "user" });
+      await consumePendingMessages(this.db, [next.id]);
 
-        const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
-        if (session && session.codex_session_id) {
-          await this.resumeSession(session as SessionRow, next.message_text);
-          return;
-        }
+      const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
+      if (session && session.codex_session_id) {
+        await this.resumeSession(session as SessionRow, next.message_text);
+        return;
       }
     }
 
