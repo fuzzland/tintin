@@ -32,6 +32,7 @@ references/
 # local runtime data
 data
 config.toml
+config2.toml
 .codex
 
 # IntelliJ based IDEs

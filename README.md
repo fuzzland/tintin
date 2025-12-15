@@ -8,7 +8,7 @@ Tintin is your girlfriend and engineer. It allows you to control Codex and other
 
 - Run `npm i -g @fuzzland/tintin`. 
 
-- Create `config.toml` by copying [example config](https://github.com/fuzzland/tintin/):
+- Create `config.toml` by copying [example config](https://github.com/fuzzland/tintin/blob/master/config.example.toml):
   - Set your projects. For example:
     ```
     [[projects]]
@@ -16,7 +16,7 @@ Tintin is your girlfriend and engineer. It allows you to control Codex and other
     name = "tintin"
     path = "/home/ubuntu/tintin"
     ```
-  - [Create a bot and channel](https://github.com/fuzzland/tintin/tree/master/setup_docs/slack_bot_setup.md) or create a [Telegram bot and a group](https://github.com/fuzzland/tintin/tree/master/setup_docs/telegram_bot_setup.md)
+  - Create a [Slack bot and channel](https://github.com/fuzzland/tintin/tree/master/setup_docs/slack_bot_setup.md) or create a [Telegram bot and a group](https://github.com/fuzzland/tintin/tree/master/setup_docs/telegram_bot_setup.md)
   - Set `[telegram]` and/or `[slack]` secrets (supports `env:VAR`).
   - Optional: set `[security].*` allowlists to allow only certain users to use the bot in defined set of group chats. 
 
