@@ -11,7 +11,20 @@ import { sleep } from "./util.js";
 import picomatch from "picomatch";
 
 export function resolveSessionsRoot(codexCwd: string, sessionsDir: string): string {
-  return path.isAbsolute(sessionsDir) ? sessionsDir : path.join(codexCwd, sessionsDir);
+  // Expand ~ to home directory if present
+  if (sessionsDir.startsWith("~")) {
+    const home = process.env.HOME || process.env.USERPROFILE || "";
+    const expanded =
+      sessionsDir === "~"
+        ? home
+        : path.join(home, sessionsDir.slice(1).replace(/^[/\\]?/, ""));
+    return expanded;
+  }
+  // If not starting with ~, check if it's absolute or relative to cwd
+  if (path.isAbsolute(sessionsDir)) {
+    return sessionsDir;
+  }
+  return path.join(codexCwd, sessionsDir);
 }
 
 export function resolveCodexHomeFromSessionsRoot(sessionsRoot: string): string {

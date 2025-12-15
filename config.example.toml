@@ -13,9 +13,9 @@ url = "sqlite+aiosqlite:///./data/codexbot.db"
 echo = false
 
 [security]
-restrict_paths = true
-allow_roots = ["/"]
-deny_globs = []
+restrict_paths = false
+# allow_roots = ["/dev/"]
+# deny_globs = []
 max_sessions_per_chat = 100000
 max_concurrent_sessions_per_chat = 100000
 # Optional allowlists (empty => allow all)
@@ -28,7 +28,7 @@ max_concurrent_sessions_per_chat = 100000
 
 [codex]
 binary = "codex"
-sessions_dir = ".codex/sessions"
+sessions_dir = "~/.codex/sessions"
 poll_interval_ms = 500
 max_catchup_lines = 2000
 timeout_seconds = 3600
@@ -45,7 +45,7 @@ name = "Custom path…"
 path = "*"
 
 [telegram]
-token = "env:TELEGRAM_TOKEN"
+token = "<FILL ME TELEGRAM BOT TOKEN>"
 # Optional extra bots used only for sending to reduce rate limiting; first token above is still used for updates/webhooks.
 # additional_bot_tokens = ["env:TELEGRAM_TOKEN_2", "env:TELEGRAM_TOKEN_3"]
 mode = "poll" # webhook | poll
@@ -56,8 +56,8 @@ message_queue_interval_ms = 3000
 rate_limit_msgs_per_sec = 1.0
 
 [slack]
-bot_token = "env:SLACK_BOT_TOKEN"
-signing_secret = "env:SLACK_SIGNING_SECRET"
+bot_token = "<FILL ME SLACK BOT TOKEN>"
+signing_secret = "<FILL ME SLACK SINGING TOKEN>"
 events_path = "/slack/events"
 interactions_path = "/slack/interactions"
 session_mode = "thread"

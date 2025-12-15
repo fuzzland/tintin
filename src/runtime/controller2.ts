@@ -567,6 +567,7 @@ export class BotController {
       const chatId = chat ? String(chat.id) : null;
       const userId = chat && chat.type === "channel" ? String(chat.id) : String(cb.from.id);
       const messageId = cb.message?.message_id ?? null;
+      // @ts-ignore
       const messageText = cb.message?.text ?? cb.message?.caption ?? undefined;
       if (!chatId || !sessionId) {
         await this.telegram.answerCallbackQuery(cb.id, "Session not found.");
@@ -622,6 +623,7 @@ export class BotController {
       const chatId = chat ? String(chat.id) : null;
       const userId = chat && chat.type === "channel" ? String(chat.id) : String(cb.from.id);
       const messageId = cb.message?.message_id ?? null;
+      // @ts-ignore
       const messageText = cb.message?.text ?? cb.message?.caption ?? undefined;
       if (!chatId || !sessionId) {
         await this.telegram.answerCallbackQuery(cb.id, "Session not found.");
