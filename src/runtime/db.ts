@@ -1,5 +1,5 @@
 import { Kysely, MysqlDialect, PostgresDialect, SqliteDialect } from "kysely";
-import { Database as BunSqliteDatabase } from "bun:sqlite";
+import Database from "better-sqlite3";
 import { Pool as PgPool, types as pgTypes } from "pg";
 import mysql from "mysql2/promise";
 import path from "node:path";
@@ -79,22 +79,6 @@ export interface DatabaseSchema {
 
 export type Db = Kysely<DatabaseSchema>;
 
-function bunSqliteCompat(db: BunSqliteDatabase): { prepare: (sql: string) => any; close: () => void } {
-  return {
-    prepare(sql: string) {
-      const stmt: any = db.prepare(sql);
-      if (typeof stmt.reader !== "boolean") {
-        const cols = Array.isArray(stmt.columnNames) ? stmt.columnNames : [];
-        stmt.reader = cols.length > 0;
-      }
-      return stmt;
-    },
-    close() {
-      db.close();
-    },
-  };
-}
-
 function normalizeDbUrl(url: string): string {
   if (url.startsWith("postgresql+asyncpg://")) return `postgresql://${url.slice("postgresql+asyncpg://".length)}`;
   if (url.startsWith("postgres+asyncpg://")) return `postgres://${url.slice("postgres+asyncpg://".length)}`;
@@ -127,14 +111,12 @@ export async function createDatabase(config: AppConfig, logger: Logger): Promise
     if (filePath !== ":memory:") {
       await mkdir(path.dirname(filePath), { recursive: true });
     }
-    const sqlite = new BunSqliteDatabase(filePath);
-    sqlite.exec("PRAGMA journal_mode=WAL;");
-    sqlite.exec("PRAGMA foreign_keys=ON;");
+    const sqlite = new Database(filePath);
+    sqlite.pragma("journal_mode = WAL");
+    sqlite.pragma("foreign_keys = ON");
 
     return new Kysely<DatabaseSchema>({
-      dialect: new SqliteDialect({
-        database: bunSqliteCompat(sqlite) as any,
-      }),
+      dialect: new SqliteDialect({ database: sqlite }),
     });
   }
 

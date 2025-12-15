@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { mkdir, open, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -147,7 +147,7 @@ async function startDaemon(args: CliArgs) {
   const childEnv: NodeJS.ProcessEnv = { ...process.env, CONFIG_PATH: configPath };
   if (!childEnv.BOT_AUTO_MIGRATE) childEnv.BOT_AUTO_MIGRATE = "1";
 
-  const child = spawn(process.execPath, ["run", path.join(ROOT_DIR, "src/main.ts"), "--config", configPath], {
+  const child = spawn(process.execPath, [path.join(ROOT_DIR, "src/main.js"), "--config", configPath], {
     cwd: ROOT_DIR,
     detached: true,
     stdio: ["ignore", logFd, logFd],

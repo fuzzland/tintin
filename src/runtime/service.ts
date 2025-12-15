@@ -9,11 +9,41 @@ import { JsonlStreamer } from "./streamer.js";
 import { SessionManager } from "./sessionManager.js";
 import type { SendToSessionFn } from "./messaging.js";
 import type { TelegramMessage } from "./platform/telegram.js";
+import http from "node:http";
 
 export interface BotServiceDeps {
   config: AppConfig;
   db: Db;
   logger: Logger;
+}
+
+function readHeader(req: http.IncomingMessage, name: string): string | null {
+  const value = req.headers[name];
+  if (Array.isArray(value)) return value[0] ?? null;
+  return value ?? null;
+}
+
+async function readRequestBody(req: http.IncomingMessage): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const chunks: Array<Buffer> = [];
+    req.on("data", (chunk: Buffer | string) => {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", (err) => reject(err));
+  });
+}
+
+function sendText(res: http.ServerResponse, status: number, body: string) {
+  res.statusCode = status;
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.end(body);
+}
+
+function sendJson(res: http.ServerResponse, status: number, body: any) {
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.end(JSON.stringify(body));
 }
 
 export async function createBotService(deps: BotServiceDeps) {
@@ -572,33 +602,42 @@ export async function createBotService(deps: BotServiceDeps) {
     })().catch(() => {});
   }
 
-  const server = Bun.serve({
-    port: config.bot.port,
-    hostname: config.bot.host,
-    async fetch(req) {
-      const url = new URL(req.url);
-      const pathname = url.pathname;
+  const server = http.createServer(async (req, res) => {
+    if (!req.url || !req.method) {
+      sendText(res, 400, "bad request");
+      return;
+    }
 
-      if (req.method === "GET" && pathname === "/healthz") return new Response("ok");
+    const url = new URL(req.url, `http://${req.headers.host ?? `${config.bot.host}:${config.bot.port}`}`);
+    const pathname = url.pathname;
+
+    try {
+      if (req.method === "GET" && pathname === "/healthz") {
+        sendText(res, 200, "ok");
+        return;
+      }
 
       // Telegram webhook
       if (telegram && config.telegram?.mode === "webhook" && req.method === "POST" && pathname === config.telegram?.webhook_path) {
-        const secretHeader = req.headers.get("x-telegram-bot-api-secret-token");
+        const secretHeader = readHeader(req, "x-telegram-bot-api-secret-token");
         if (!secretHeader) {
           logger.warn("Telegram webhook unauthorized (missing secret header)");
-          return new Response("unauthorized", { status: 401 });
+          sendText(res, 401, "unauthorized");
+          return;
         }
         if (secretHeader !== config.telegram?.webhook_secret_token) {
           logger.warn("Telegram webhook unauthorized (bad secret header)");
-          return new Response("unauthorized", { status: 401 });
+          sendText(res, 401, "unauthorized");
+          return;
         }
-        const bodyText = await req.text();
+        const bodyText = await readRequestBody(req);
         let body: any;
         try {
           body = JSON.parse(bodyText);
         } catch {
           logger.warn("Telegram webhook bad JSON");
-          return new Response("bad request", { status: 400 });
+          sendText(res, 400, "bad request");
+          return;
         }
         const updateId = typeof body?.update_id === "number" ? body.update_id : "?";
         const keys = body && typeof body === "object" ? Object.keys(body).filter((k) => k !== "update_id").join(",") : "-";
@@ -610,25 +649,28 @@ export async function createBotService(deps: BotServiceDeps) {
             logger.error("Telegram update handler error", e);
           }
         });
-        return new Response("ok");
+        sendText(res, 200, "ok");
+        return;
       }
 
       // Slack Events API
       if (slack && req.method === "POST" && pathname === config.slack?.events_path) {
-        const bodyText = await req.text();
+        const bodyText = await readRequestBody(req);
         const ok = verifySlackSignature({
           signingSecret: config.slack!.signing_secret,
-          timestampHeader: req.headers.get("x-slack-request-timestamp"),
-          signatureHeader: req.headers.get("x-slack-signature"),
+          timestampHeader: readHeader(req, "x-slack-request-timestamp"),
+          signatureHeader: readHeader(req, "x-slack-signature"),
           body: bodyText,
         });
         if (!ok) {
           logger.warn("Slack events unauthorized (bad signature)");
-          return new Response("unauthorized", { status: 401 });
+          sendText(res, 401, "unauthorized");
+          return;
         }
         const body = JSON.parse(bodyText) as any;
         if (body.type === "url_verification" && typeof body.challenge === "string") {
-          return Response.json({ challenge: body.challenge });
+          sendJson(res, 200, { challenge: body.challenge });
+          return;
         }
         const evType = body?.event?.type ?? body?.type ?? "?";
         logger.debug(`[slack] events type=${String(evType)}`);
@@ -639,25 +681,30 @@ export async function createBotService(deps: BotServiceDeps) {
             logger.error("Slack event handler error", e);
           }
         });
-        return new Response("ok");
+        sendText(res, 200, "ok");
+        return;
       }
 
       // Slack Interactivity
       if (slack && req.method === "POST" && pathname === config.slack?.interactions_path) {
-        const bodyText = await req.text();
+        const bodyText = await readRequestBody(req);
         const ok = verifySlackSignature({
           signingSecret: config.slack!.signing_secret,
-          timestampHeader: req.headers.get("x-slack-request-timestamp"),
-          signatureHeader: req.headers.get("x-slack-signature"),
+          timestampHeader: readHeader(req, "x-slack-request-timestamp"),
+          signatureHeader: readHeader(req, "x-slack-signature"),
           body: bodyText,
         });
         if (!ok) {
           logger.warn("Slack interactions unauthorized (bad signature)");
-          return new Response("unauthorized", { status: 401 });
+          sendText(res, 401, "unauthorized");
+          return;
         }
         const params = new URLSearchParams(bodyText);
         const payloadRaw = params.get("payload");
-        if (!payloadRaw) return new Response("bad request", { status: 400 });
+        if (!payloadRaw) {
+          sendText(res, 400, "bad request");
+          return;
+        }
         const payload = JSON.parse(payloadRaw) as any;
 
         // Respond quickly; do real work async.
@@ -671,18 +718,31 @@ export async function createBotService(deps: BotServiceDeps) {
         });
 
         if (payload.type === "view_submission") {
-          return Response.json({ response_action: "clear" });
+          sendJson(res, 200, { response_action: "clear" });
+          return;
         }
-        return new Response("");
+        sendText(res, 200, "");
+        return;
       }
 
-      return new Response("not found", { status: 404 });
-    },
+      sendText(res, 404, "not found");
+    } catch (err) {
+      logger.error("HTTP handler error", err);
+      sendText(res, 500, "internal error");
+    }
   });
 
   return {
     async start() {
-      logger.info(`Listening on http://${config.bot.host}:${config.bot.port}`);
+      await new Promise<void>((resolve, reject) => {
+        const onError = (err: Error) => reject(err);
+        server.once("error", onError);
+        server.listen(config.bot.port, config.bot.host, () => {
+          server.off("error", onError);
+          logger.info(`Listening on http://${config.bot.host}:${config.bot.port}`);
+          resolve();
+        });
+      });
     },
   };
 }

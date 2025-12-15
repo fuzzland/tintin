@@ -216,15 +216,40 @@ export class BotController {
         statuses: listIntent.statuses,
         limit: 20,
       });
-	      await this.telegram.sendMessage({
-	        chatId,
-	        messageThreadId: forumThreadId,
-	        replyToMessageId: message.message_id,
-	        text: formatSessionList("telegram", sessions),
-	        priority: "user",
-	      });
-	      return;
-	    }
+      await this.telegram.sendMessage({
+        chatId,
+        messageThreadId: forumThreadId,
+        replyToMessageId: message.message_id,
+        text: formatSessionList("telegram", sessions),
+        priority: "user",
+      });
+      return;
+    }
+
+    const settingsIntent = parseSettingsIntentFromTelegram(text);
+    if (settingsIntent) {
+      const access = await this.telegramAccessDecision(chatId, userId);
+      if (!access.allowed) {
+        this.logger.warn(`[tg] rejected settings chat=${chatId} user=${userId} reason=${access.reason ?? "-"}`);
+        await this.telegram.sendMessage({
+          chatId,
+          messageThreadId: forumThreadId,
+          replyToMessageId: message.message_id,
+          text: "Not authorized.",
+          priority: "user",
+        });
+        return;
+      }
+      const result = applySettingsCommand(this.config, settingsIntent);
+      await this.telegram.sendMessage({
+        chatId,
+        messageThreadId: forumThreadId,
+        replyToMessageId: message.message_id,
+        text: result,
+        priority: "user",
+      });
+      return;
+    }
 
     // Allow "@bot sessions" style listing too.
     const botUsername = this.telegram.botUsername;
@@ -258,11 +283,35 @@ export class BotController {
 	            chatId,
 	            messageThreadId: forumThreadId,
 	            replyToMessageId: message.message_id,
-	            text: formatSessionList("telegram", sessions),
-	            priority: "user",
-	          });
-	          return;
-	        }
+            text: formatSessionList("telegram", sessions),
+            priority: "user",
+          });
+          return;
+        }
+
+        if (rest.toLowerCase().startsWith("settings")) {
+          const access = await this.telegramAccessDecision(chatId, userId);
+          if (!access.allowed) {
+            this.logger.warn(`[tg] rejected mention settings chat=${chatId} user=${userId} reason=${access.reason ?? "-"}`);
+            await this.telegram.sendMessage({
+              chatId,
+              messageThreadId: forumThreadId,
+              replyToMessageId: message.message_id,
+              text: "Not authorized.",
+              priority: "user",
+            });
+            return;
+          }
+          const result = applySettingsCommand(this.config, parseSettingsArgs(rest.slice("settings".length)) ?? { kind: "list" });
+          await this.telegram.sendMessage({
+            chatId,
+            messageThreadId: forumThreadId,
+            replyToMessageId: message.message_id,
+            text: result,
+            priority: "user",
+          });
+          return;
+        }
       }
     }
 
@@ -374,15 +423,16 @@ export class BotController {
       updated_at: nowMs(),
     });
 
-	    await this.telegram.sendMessage({
-	      chatId,
-	      text: "Choose a project:",
-	      messageThreadId,
-	      replyToMessageId,
-	      replyMarkup: this.telegram.projectKeyboard(this.config.projects),
-	      priority: "user",
-	    });
-	  }
+    const menuText = buildMenuText("telegram");
+    await this.telegram.sendMessage({
+      chatId,
+      text: menuText,
+      messageThreadId,
+      replyToMessageId,
+      replyMarkup: this.telegram.projectKeyboard(this.config.projects),
+      priority: "user",
+    });
+  }
 
   private async handleTelegramCallback(cb: TelegramCallbackQuery) {
     if (!this.telegram) return;
@@ -919,6 +969,17 @@ export class BotController {
         return;
       }
 
+      const settingsIntent = parseSettingsIntentFromSlack(text);
+      if (settingsIntent) {
+        const result = applySettingsCommand(this.config, settingsIntent);
+        await this.slack.postEphemeral({
+          channel: channelId,
+          user: userId,
+          text: result,
+        });
+        return;
+      }
+
       await this.startSlackWizard(teamId, channelId, userId);
       return;
     }
@@ -1009,20 +1070,27 @@ export class BotController {
       value: p.id,
     }));
 
+    const menuText = buildMenuText("slack");
+    const commandExamples = buildCommandExamples("slack");
+
     await this.slack.postEphemeral({
       channel: channelId,
       user: userId,
-      text: "Choose a project to start a Codex session:",
+      text: menuText,
       blocks: [
         {
           type: "section",
-          text: { type: "mrkdwn", text: "Choose a project:" },
+          text: { type: "mrkdwn", text: "Choose a project to start a Codex session:" },
           accessory: {
             type: "static_select",
             action_id: "project_select",
             placeholder: { type: "plain_text", text: "Select a project" },
             options,
           },
+        },
+        {
+          type: "section",
+          text: { type: "mrkdwn", text: commandExamples },
         },
       ],
     });
@@ -1318,6 +1386,116 @@ function parseListSessionsIntentFromSlack(text: string): { statuses?: SessionSta
   return { statuses: parseSessionStatusFilter(rest) };
 }
 
+type SettingsCommand =
+  | { kind: "list" }
+  | { kind: "set"; target: string; value: string }
+  | { kind: "unset"; target: string };
+
+function parseSettingsIntentFromTelegram(text: string): SettingsCommand | null {
+  const cmd = parseTelegramCommand(text);
+  if (!cmd) return null;
+  if (cmd.command === "settings") return parseSettingsArgs(cmd.args);
+  if (cmd.command !== "codex") return null;
+  const rest = cmd.args.trim();
+  if (!rest.toLowerCase().startsWith("settings")) return null;
+  return parseSettingsArgs(rest.slice("settings".length));
+}
+
+function parseSettingsIntentFromSlack(text: string): SettingsCommand | null {
+  const m = text.match(/\bsettings\b(.*)$/i);
+  if (!m) return null;
+  const rest = (m[1] ?? "").trim();
+  return parseSettingsArgs(rest);
+}
+
+function parseSettingsArgs(args: string): SettingsCommand | null {
+  const trimmed = args.trim();
+  if (!trimmed) return { kind: "list" };
+  const parts = trimmed.split(/\s+/);
+  const head = (parts.shift() ?? "").toLowerCase();
+  if (!head) return { kind: "list" };
+  if (head === "list") return { kind: "list" };
+
+  if (head === "mcp") {
+    const sub = (parts.shift() ?? "").toLowerCase();
+    if (!sub) return { kind: "list" };
+    if (sub === "set" && parts.length >= 2) {
+      const target = `mcp.${parts.shift()!}`;
+      return { kind: "set", target, value: parts.join(" ") };
+    }
+    if (sub === "unset" && parts.length >= 1) {
+      return { kind: "unset", target: `mcp.${parts.join(" ")}` };
+    }
+    return { kind: "list" };
+  }
+
+  if (head === "set" && parts.length >= 2) {
+    const target = parts.shift()!;
+    return { kind: "set", target, value: parts.join(" ") };
+  }
+  if (head === "unset" && parts.length >= 1) {
+    return { kind: "unset", target: parts.join(" ") };
+  }
+
+  // Shorthand: `settings foo bar` -> treat as set
+  if (parts.length >= 1) return { kind: "set", target: head, value: parts.join(" ") };
+  return { kind: "list" };
+}
+
+function applySettingsCommand(config: AppConfig, cmd: SettingsCommand): string {
+  if (cmd.kind === "list") return formatSettingsSummary(config);
+
+  const parsed = resolveSettingTarget(cmd.target);
+  if (!parsed) return `Unknown setting "${cmd.target}".\nSupported: ${formatSupportedSettingKeys()}`;
+
+  if (parsed.type === "bool") {
+    if (cmd.kind !== "set") return `Use "settings set ${parsed.label} <on|off>" to change it.`;
+    const value = parseBool(cmd.value);
+    if (value === null) return `Expected true/false value for ${parsed.label}.`;
+    const prev = config.codex[parsed.key];
+    (config.codex as any)[parsed.key] = value;
+    return `${parsed.label} updated (${String(prev)} -> ${String(value)}). Runtime-only; affects new Codex runs. Use "settings" to view current values.`;
+  }
+
+  if (parsed.type === "number") {
+    if (cmd.kind !== "set") return `Use "settings set ${parsed.label} <number>" to change it.`;
+    const n = Number(cmd.value);
+    if (!Number.isFinite(n)) return `Expected a number for ${parsed.label}.`;
+    const next = Math.floor(n);
+    if (next < parsed.min) return `${parsed.label} must be >= ${parsed.min}.`;
+    const prev = config.codex[parsed.key];
+    (config.codex as any)[parsed.key] = next;
+    return `${parsed.label} updated (${String(prev)} -> ${String(next)}). Runtime-only; affects new Codex runs. Use "settings" to view current values.`;
+  }
+
+  if (parsed.type === "string") {
+    if (cmd.kind !== "set") return `Use "settings set ${parsed.label} <value>" to change it.`;
+    const next = cmd.value.trim();
+    if (!next) return `${parsed.label} cannot be empty.`;
+    const prev = config.codex[parsed.key];
+    (config.codex as any)[parsed.key] = next;
+    return `${parsed.label} updated (${prev ?? "(empty)"} -> ${next}). Runtime-only; affects new Codex runs. Use "settings" to view current values.`;
+  }
+
+  if (parsed.type === "env") {
+    const key = parsed.envKey;
+    if (cmd.kind === "unset") {
+      if (!(key in config.codex.env)) return `Env \`${key}\` is already unset.`;
+      delete config.codex.env[key];
+      return `${parsed.label} removed. Runtime-only; affects new Codex runs. Use "settings" to view current values.`;
+    }
+    const value = cmd.value.trim();
+    if (!value) return `${parsed.label} cannot be empty.`;
+    const prev = config.codex.env[key];
+    config.codex.env[key] = value;
+    const current = formatEnvValue(value);
+    const suffix = prev ? ` (was ${formatEnvValue(prev)})` : "";
+    return `${parsed.label} set to ${current}${suffix}. Runtime-only; affects new Codex runs. Use "settings" to view current values.`;
+  }
+
+  return "Unsupported settings command.";
+}
+
 function parseSessionStatusFilter(text: string): SessionStatus[] | undefined {
   const t = text.toLowerCase();
   if (!t) return undefined;
@@ -1328,6 +1506,160 @@ function parseSessionStatusFilter(text: string): SessionStatus[] | undefined {
   if (/\berror\b/.test(t)) return ["error"];
   if (/\bkilled\b/.test(t)) return ["killed"];
   return undefined;
+}
+
+function buildMenuText(platform: "telegram" | "slack"): string {
+  const commands =
+    platform === "telegram"
+      ? ["- /sessions - list recent sessions (add 'active' to filter)", "- /settings - list/tweak Codex + MCP config"]
+      : ["- Mention me with \"sessions\" to list recent sessions", "- Mention me with \"settings\" to list/tweak Codex + MCP config"];
+  const examples = buildCommandExamples(platform);
+  const lines = [`Choose a project to start a Codex session.`, ...commands, "", examples];
+  return lines.join("\n");
+}
+
+function buildCommandExamples(platform: "telegram" | "slack"): string {
+  const sessions = platform === "telegram" ? "/sessions active" : "@bot sessions active";
+  const settings = platform === "telegram" ? "/settings" : "@bot settings";
+  const prefix = platform === "telegram" ? "" : "@bot ";
+  const envSet = `${prefix}settings set mcp.SEARCH http://localhost:3000`;
+  const envUnset = `${prefix}settings unset mcp.SEARCH`;
+  return [
+    "Examples:",
+    `- \`${sessions}\``,
+    `- \`${settings}\``,
+    `- \`${prefix}settings set codex.timeout_seconds 1800\``,
+    `- \`${envSet}\``,
+    `- \`${envUnset}\``,
+  ].join("\n");
+}
+
+type BoolSettingKey = "full_auto" | "dangerously_bypass_approvals_and_sandbox" | "skip_git_repo_check";
+type NumberSettingKey = "timeout_seconds" | "poll_interval_ms" | "max_catchup_lines";
+type StringSettingKey = "binary" | "sessions_dir";
+
+function resolveSettingTarget(
+  raw: string,
+):
+  | { type: "bool"; key: BoolSettingKey; label: string }
+  | { type: "number"; key: NumberSettingKey; label: string; min: number }
+  | { type: "string"; key: StringSettingKey; label: string }
+  | { type: "env"; envKey: string; label: string }
+  | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+
+  if (lower === "full_auto" || lower === "codex.full_auto") return { type: "bool", key: "full_auto", label: "`codex.full_auto`" };
+  if (lower === "dangerously_bypass_approvals_and_sandbox" || lower === "codex.dangerously_bypass_approvals_and_sandbox")
+    return { type: "bool", key: "dangerously_bypass_approvals_and_sandbox", label: "`codex.dangerously_bypass_approvals_and_sandbox`" };
+  if (lower === "skip_git_repo_check" || lower === "codex.skip_git_repo_check")
+    return { type: "bool", key: "skip_git_repo_check", label: "`codex.skip_git_repo_check`" };
+
+  if (lower === "timeout_seconds" || lower === "codex.timeout_seconds")
+    return { type: "number", key: "timeout_seconds", label: "`codex.timeout_seconds`", min: 10 };
+  if (lower === "poll_interval_ms" || lower === "codex.poll_interval_ms")
+    return { type: "number", key: "poll_interval_ms", label: "`codex.poll_interval_ms`", min: 100 };
+  if (lower === "max_catchup_lines" || lower === "codex.max_catchup_lines")
+    return { type: "number", key: "max_catchup_lines", label: "`codex.max_catchup_lines`", min: 1 };
+
+  if (lower === "binary" || lower === "codex.binary") return { type: "string", key: "binary", label: "`codex.binary`" };
+  if (lower === "sessions_dir" || lower === "codex.sessions_dir")
+    return { type: "string", key: "sessions_dir", label: "`codex.sessions_dir`" };
+
+  if (lower.startsWith("codex.env.")) {
+    const key = trimmed.slice("codex.env.".length).trim();
+    if (!key) return null;
+    return { type: "env", envKey: key, label: `Env \`${key}\`` };
+  }
+
+  if (lower.startsWith("env.")) {
+    const key = trimmed.slice("env.".length).trim();
+    if (!key) return null;
+    return { type: "env", envKey: key, label: `Env \`${key}\`` };
+  }
+
+  if (lower.startsWith("mcp.")) {
+    const key = trimmed.slice("mcp.".length).trim();
+    if (!key) return null;
+    const envKey = normalizeEnvKey(key, { forceMcp: true });
+    if (!envKey) return null;
+    return { type: "env", envKey, label: `MCP \`${envKey}\`` };
+  }
+
+  return null;
+}
+
+function formatSupportedSettingKeys(): string {
+  return [
+    "`codex.full_auto`",
+    "`codex.dangerously_bypass_approvals_and_sandbox`",
+    "`codex.skip_git_repo_check`",
+    "`codex.timeout_seconds`",
+    "`codex.poll_interval_ms`",
+    "`codex.max_catchup_lines`",
+    "`codex.binary`",
+    "`codex.sessions_dir`",
+    "`codex.env.<KEY>`",
+    "`mcp.<NAME>`",
+  ].join(", ");
+}
+
+function formatSettingsSummary(config: AppConfig): string {
+  const lines = [
+    "Settings (runtime only; not saved to config.toml):",
+    `- \`codex.binary\`: ${config.codex.binary}`,
+    `- \`codex.sessions_dir\`: ${config.codex.sessions_dir}`,
+    `- \`codex.timeout_seconds\`: ${String(config.codex.timeout_seconds)}`,
+    `- \`codex.poll_interval_ms\`: ${String(config.codex.poll_interval_ms)}`,
+    `- \`codex.max_catchup_lines\`: ${String(config.codex.max_catchup_lines)}`,
+    `- \`codex.full_auto\`: ${String(config.codex.full_auto)}`,
+    `- \`codex.dangerously_bypass_approvals_and_sandbox\`: ${String(config.codex.dangerously_bypass_approvals_and_sandbox)}`,
+    `- \`codex.skip_git_repo_check\`: ${String(config.codex.skip_git_repo_check)}`,
+  ];
+
+  const envEntries = Object.entries(config.codex.env);
+  if (envEntries.length === 0) lines.push("- env overrides: (none)");
+  else {
+    lines.push("- env overrides:");
+    for (const [k, v] of envEntries) lines.push(`  - \`${k}\` = ${formatEnvValue(v)}`);
+  }
+
+  const mcpEntries = envEntries.filter(([k]) => k.toUpperCase().startsWith("MCP_"));
+  if (mcpEntries.length === 0) lines.push("- MCP env: (none)");
+  else {
+    lines.push("- MCP env:");
+    for (const [k, v] of mcpEntries) lines.push(`  - \`${k}\` = ${formatEnvValue(v)}`);
+  }
+
+  lines.push("", "Examples:", "- settings set codex.timeout_seconds 1800", "- settings set mcp.SEARCH http://localhost:3000", "- settings unset mcp.SEARCH");
+  return lines.join("\n");
+}
+
+function formatEnvValue(value: string): string {
+  const redacted = redactText(value);
+  if (!redacted) return "(empty)";
+  if (redacted.length > 80) return `${redacted.slice(0, 60)}… (${redacted.length} chars)`;
+  return redacted;
+}
+
+function parseBool(input: string): boolean | null {
+  const t = input.trim().toLowerCase();
+  if (!t) return null;
+  if (["1", "true", "yes", "y", "on"].includes(t)) return true;
+  if (["0", "false", "no", "n", "off"].includes(t)) return false;
+  return null;
+}
+
+function normalizeEnvKey(raw: string, opts?: { forceMcp?: boolean }): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return trimmed;
+  const normalized = trimmed.replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
+  if (opts?.forceMcp) {
+    const upper = normalized.toUpperCase();
+    return upper.startsWith("MCP_") ? upper : `MCP_${upper}`;
+  }
+  return normalized;
 }
 
 function telegramChatIdMatchesAllowlist(chatId: string, allowIds: string[]): boolean {

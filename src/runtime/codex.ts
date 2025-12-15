@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import readline from "node:readline";
@@ -8,6 +8,7 @@ import type { AppConfig } from "./config.js";
 import type { Logger } from "./log.js";
 import { redactText } from "./redact.js";
 import { sleep } from "./util.js";
+import picomatch from "picomatch";
 
 export function resolveSessionsRoot(codexCwd: string, sessionsDir: string): string {
   return path.isAbsolute(sessionsDir) ? sessionsDir : path.join(codexCwd, sessionsDir);
@@ -35,25 +36,39 @@ export async function findSessionJsonlFiles(opts: {
     // Layout A: sessions/<session_id>/*.jsonl
     const st = await stat(sessionDir).catch(() => null);
     if (st?.isDirectory()) {
-      const glob = new Bun.Glob("**/*.jsonl");
-      const matches: string[] = [];
-      for await (const rel of glob.scan({ cwd: sessionDir })) {
-        matches.push(path.join(sessionDir, rel));
-      }
+      const matches = await findMatchingFiles(sessionDir, ["**/*.jsonl"]);
       if (matches.length > 0) return matches;
     }
 
     for (const pat of patterns) {
-      const glob = new Bun.Glob(pat);
-      const matches: string[] = [];
-      for await (const rel of glob.scan({ cwd: opts.sessionsRoot })) {
-        matches.push(path.join(opts.sessionsRoot, rel));
-      }
+      const matches = await findMatchingFiles(opts.sessionsRoot, [pat]);
       if (matches.length > 0) return matches;
     }
     await sleep(opts.pollMs);
   }
   return [];
+}
+
+async function* walkFiles(root: string): AsyncGenerator<string> {
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    const fullPath = path.join(root, entry.name);
+    if (entry.isDirectory()) {
+      yield* walkFiles(fullPath);
+    } else if (entry.isFile()) {
+      yield fullPath;
+    }
+  }
+}
+
+async function findMatchingFiles(root: string, patterns: string[]): Promise<string[]> {
+  const matchers = patterns.map((pat) => picomatch(pat, { dot: true }));
+  const matches: string[] = [];
+  for await (const filePath of walkFiles(root)) {
+    const rel = path.relative(root, filePath);
+    if (matchers.some((m) => m(rel))) matches.push(filePath);
+  }
+  return matches;
 }
 
 export interface SpawnedCodexProcess {

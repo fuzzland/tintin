@@ -1,31 +1,44 @@
 {
   "name": "tintin",
-  "module": "src/main.ts",
+  "version": "0.1.0",
+  "description": "Tintin daemon and CLI",
   "type": "module",
-  "private": true,
+  "private": false,
+  "main": "./dist/src/main.js",
+  "module": "./dist/src/main.js",
   "bin": {
-    "tintin": "./tintin.ts"
+    "tintin": "./dist/tintin.js"
+  },
+  "files": [
+    "dist",
+    "config.example.toml",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18 <24"
   },
   "scripts": {
-    "tintin": "bun run tintin.ts",
-    "start": "bun run src/main.ts",
-    "dev": "bun --watch src/main.ts",
-    "migrate": "bun run src/migrate.ts",
-    "typecheck": "bunx tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
+    "start": "node dist/src/main.js",
+    "migrate": "node dist/src/migrate.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "publish:public": "npm run build && npm publish --access public",
+    "tintin": "node dist/tintin.js"
   },
   "dependencies": {
     "@iarna/toml": "^2.2.5",
+    "better-sqlite3": "^9.4.5",
     "kysely": "^0.28.5",
     "mysql2": "^3.14.4",
     "picomatch": "^4.0.3",
     "pg": "^8.16.3"
   },
   "devDependencies": {
-    "@types/bun": "latest",
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^20.14.11",
     "@types/pg": "^8.15.5",
-    "@types/picomatch": "^3.0.2"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
+    "@types/picomatch": "^3.0.2",
+    "typescript": "^5.4.5"
   }
 }
