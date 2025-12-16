@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import net from "node:net";
-import { access, mkdir } from "node:fs/promises";
+import { access, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -30,14 +30,13 @@ export class PlaywrightMcpManager {
   async ensureServer(): Promise<PlaywrightServerInfo> {
     if (this.startPromise) {
       const started = await this.startPromise;
-      const healthy = await this.isServerHealthy(started.info).catch(() => false);
-      if (healthy) return started.info;
-      await this.stop().catch(() => undefined);
+      if (!started.child.killed && started.child.exitCode === null) return started.info;
       this.startPromise = null;
       this.clientPromise = null;
     }
     this.startPromise = this.startServer().catch((e) => {
       this.startPromise = null;
+      this.clientPromise = null;
       throw e;
     });
     const started = await this.startPromise;
@@ -66,21 +65,49 @@ export class PlaywrightMcpManager {
     const server = await this.ensureServer();
     const client = await this.ensureClient(server);
     const safeTool = opts.tool ? opts.tool.replace(/[^A-Za-z0-9_-]+/g, "-") : "call";
-    const fileName = path.join(opts.sessionId, `${safeTool || "call"}-${opts.callId ?? "auto"}-${Date.now()}.png`);
-    await mkdir(path.join(server.outputDir, path.dirname(fileName)), { recursive: true });
+    const relFileName = path.join(opts.sessionId, `${safeTool || "call"}-${opts.callId ?? "auto"}-${Date.now()}.png`);
+    const expectedPath = path.join(server.outputDir, relFileName);
+    await mkdir(path.dirname(expectedPath), { recursive: true });
     try {
-      const res = await client.callTool({
+      const res: any = await client.callTool({
         name: "browser_take_screenshot",
         arguments: {
-          filename: fileName,
+          filename: relFileName,
         },
       });
-      const imageBlock = Array.isArray(res.content) ? res.content.find((c: any) => c && typeof c === "object" && c.type === "image") : null;
-      const savedPath = path.join(server.outputDir, fileName);
-      return {
-        savedPath,
-        mimeType: typeof imageBlock?.mimeType === "string" ? imageBlock.mimeType : undefined,
-      };
+      if (res?.isError === true) {
+        const msg = typeof res?.content?.[0]?.text === "string" ? res.content[0].text : "";
+        this.logger.debug(`[playwright-mcp] screenshot tool error: ${safeSnippet(msg)}`);
+        return null;
+      }
+
+      const imageBlock = Array.isArray(res?.content)
+        ? res.content.find((c: any) => c && typeof c === "object" && c.type === "image")
+        : null;
+
+      const mimeType = typeof imageBlock?.mimeType === "string" ? imageBlock.mimeType : undefined;
+      const base64 = typeof imageBlock?.data === "string" ? imageBlock.data : null;
+      if (base64) {
+        const buf = Buffer.from(base64, "base64");
+        await writeFile(expectedPath, buf);
+        return { savedPath: expectedPath, mimeType };
+      }
+
+      const fromText = Array.isArray(res?.content)
+        ? res.content.find((c: any) => c && typeof c === "object" && c.type === "text" && typeof c.text === "string")?.text
+        : null;
+      const linkedPath = typeof fromText === "string" ? extractFirstLinkedFilePath(fromText) : null;
+      const candidates = [linkedPath, expectedPath].filter((p): p is string => typeof p === "string" && p.length > 0);
+      for (const candidate of candidates) {
+        try {
+          await access(candidate);
+          return { savedPath: candidate, mimeType };
+        } catch {
+          continue;
+        }
+      }
+
+      return null;
     } catch (e) {
       this.logger.debug(`[playwright-mcp] screenshot failed: ${String(e)}`);
       return null;
@@ -110,15 +137,6 @@ export class PlaywrightMcpManager {
     return client;
   }
 
-  private async isServerHealthy(info: PlaywrightServerInfo): Promise<boolean> {
-    try {
-      const res = await fetch(info.url, { method: "GET" });
-      return res.ok;
-    } catch {
-      return false;
-    }
-  }
-
   private async startServer(): Promise<{ info: PlaywrightServerInfo; child: ChildProcessWithoutNullStreams }> {
     const userDataDir = substituteSessionId(this.config.user_data_dir, "shared");
     const outputDir = substituteSessionId(this.config.output_dir, "shared");
@@ -141,7 +159,11 @@ export class PlaywrightMcpManager {
       timeoutMs: this.config.timeout_ms,
     });
 
-    this.logger.info(`[playwright-mcp] starting on ${this.config.host}:${port}`);
+    this.logger.info(
+      `[playwright-mcp] starting on ${this.config.host}:${port} browser=${this.config.browser} headless=${String(
+        this.config.headless,
+      )} executable_path=${executablePath ?? "(playwright default)"} output_dir=${outputDir}`,
+    );
     const child = spawn("npx", args, { stdio: ["pipe", "pipe", "pipe"] });
     child.stdout.on("data", (buf) => {
       const text = buf.toString("utf8").trim();
@@ -157,7 +179,24 @@ export class PlaywrightMcpManager {
       this.clientPromise = null;
     });
 
-    await waitForPortOpen(this.config.host, port, this.config.timeout_ms);
+    try {
+      await waitForPortOpen(this.config.host, port, this.config.timeout_ms);
+    } catch (e) {
+      this.logger.warn(`[playwright-mcp] failed to start on ${this.config.host}:${port}: ${String(e)}`);
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // ignore
+      }
+      setTimeout(() => {
+        try {
+          if (!child.killed) child.kill("SIGKILL");
+        } catch {
+          // ignore
+        }
+      }, 2_000);
+      throw e;
+    }
     const info: PlaywrightServerInfo = {
       port,
       url: `http://${this.config.host}:${port}/mcp`,
@@ -170,6 +209,25 @@ export class PlaywrightMcpManager {
 
 function substituteSessionId(p: string, sessionId: string): string {
   return p.replaceAll("{sessionId}", sessionId);
+}
+
+function safeSnippet(text: string, maxChars = 240): string {
+  const clean = (text ?? "").replace(/\s+/g, " ").trim();
+  if (clean.length <= maxChars) return clean;
+  return `${clean.slice(0, maxChars)}…`;
+}
+
+function extractFirstLinkedFilePath(text: string): string | null {
+  const candidates: string[] = [];
+  const re = /\[[^\]]*]\(([^)]+)\)/g;
+  for (const match of text.matchAll(re)) {
+    const raw = (match[1] ?? "").trim();
+    if (!raw) continue;
+    // Playwright MCP uses absolute file system paths in markdown links.
+    candidates.push(raw);
+  }
+  const preferred = candidates.find((p) => p.endsWith(".png") || p.endsWith(".jpeg") || p.endsWith(".jpg"));
+  return preferred ?? candidates[0] ?? null;
 }
 
 async function findChromeExecutable(): Promise<string | null> {

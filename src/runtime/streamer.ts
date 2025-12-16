@@ -33,6 +33,9 @@ export class JsonlStreamer {
   private readonly planCallIds = new Map<string, Set<string>>();
   private readonly playwrightCallIds = new Map<string, Map<string, string>>();
   private readonly playwrightCapturedCallIds = new Map<string, Set<string>>();
+  private readonly playwrightScreenshotPendingTurn = new Map<string, number>();
+  private readonly playwrightScreenshotSendingTurn = new Map<string, number>();
+  private readonly playwrightScreenshotSentTurn = new Map<string, number>();
   private readonly pendingUserPriority = new Map<string, number>();
   private readonly lastUserMessageAtSeen = new Map<string, number | null>();
   private running = false;
@@ -197,8 +200,12 @@ export class JsonlStreamer {
         }
       }
 
-      if (finalize) await this.flushIfNeeded(session.id, true);
-      else await this.flushIfNeeded(session.id, false);
+      if (finalize) {
+        await this.maybeSendPendingPlaywrightScreenshot(session.id);
+        await this.flushIfNeeded(session.id, true);
+      } else {
+        await this.flushIfNeeded(session.id, false);
+      }
     }
     if (!onlySessionIds) this.cleanupPriorityState(runningSessionIds);
   }
@@ -212,6 +219,7 @@ export class JsonlStreamer {
 
   private async maybeCapturePlaywrightScreenshot(sessionId: string, obj: Record<string, unknown>) {
     if (!this.playwrightMcp || !this.config.playwright_mcp?.enabled) return;
+    const turnKey = this.currentTurnKey(sessionId);
     const type = (obj as { type?: unknown }).type;
     if (type === "response_item") {
       const payload = (obj as { payload?: unknown }).payload;
@@ -223,16 +231,40 @@ export class JsonlStreamer {
         const parsed = parseMcpFunctionName(name);
         if (parsed && parsed.server.toLowerCase() === "playwright" && callId) {
           this.rememberPlaywrightCall(sessionId, callId, parsed.tool);
+          if (parsed.tool === "browser_close") {
+            void this.maybeSendPendingPlaywrightScreenshot(sessionId);
+          }
         }
         return;
       }
       if (payloadType === "function_call_output" && callId) {
         if (this.hasCapturedPlaywrightCall(sessionId, callId)) return;
         const tool = this.consumePlaywrightCall(sessionId, callId);
-        if (tool) {
-          await this.captureAndSendPlaywrightScreenshot(sessionId, callId, tool);
+        if (!tool) return;
+
+        if (turnKey !== null && this.playwrightScreenshotSentTurn.get(sessionId) === turnKey) {
           this.markCapturedPlaywrightCall(sessionId, callId);
+          return;
         }
+
+        if (tool === "browser_take_screenshot" && turnKey !== null) {
+          const extracted = extractPlaywrightInlineScreenshot((payload as { output?: unknown }).output);
+          if (extracted) {
+            const ok = await this.sendPlaywrightScreenshotFromToolOutput(sessionId, turnKey, extracted);
+            if (ok) {
+              this.markCapturedPlaywrightCall(sessionId, callId);
+              return;
+            }
+          }
+          this.markPlaywrightPendingScreenshot(sessionId, turnKey);
+          this.markCapturedPlaywrightCall(sessionId, callId);
+          return;
+        }
+
+        if (tool !== "browser_close") {
+          this.markPlaywrightPendingScreenshot(sessionId, turnKey);
+        }
+        this.markCapturedPlaywrightCall(sessionId, callId);
         return;
       }
       return;
@@ -247,8 +279,28 @@ export class JsonlStreamer {
     const tool = stringOrEmpty((invocation as { tool?: unknown }).tool);
     const callId = stringOrEmpty((invocation as { call_id?: unknown }).call_id);
     if (this.hasCapturedPlaywrightCall(sessionId, callId)) return;
+    if (tool === "browser_close") {
+      void this.maybeSendPendingPlaywrightScreenshot(sessionId);
+      this.markCapturedPlaywrightCall(sessionId, callId);
+      return;
+    }
+
+    if (tool === "browser_take_screenshot" && turnKey !== null) {
+      const extracted = extractPlaywrightInlineScreenshotFromMcpResult((payload as { result?: unknown }).result);
+      if (extracted) {
+        const ok = await this.sendPlaywrightScreenshotFromToolOutput(sessionId, turnKey, extracted);
+        if (ok) {
+          this.markCapturedPlaywrightCall(sessionId, callId);
+          return;
+        }
+      }
+      this.markPlaywrightPendingScreenshot(sessionId, turnKey);
+      this.markCapturedPlaywrightCall(sessionId, callId);
+      return;
+    }
+
     this.consumePlaywrightCall(sessionId, callId);
-    await this.captureAndSendPlaywrightScreenshot(sessionId, callId || undefined, tool || undefined);
+    if (tool !== "browser_close") this.markPlaywrightPendingScreenshot(sessionId, turnKey);
     this.markCapturedPlaywrightCall(sessionId, callId);
   }
 
@@ -281,7 +333,7 @@ export class JsonlStreamer {
     this.playwrightCapturedCallIds.set(sessionId, set);
   }
 
-  private async captureAndSendPlaywrightScreenshot(sessionId: string, callId?: string, tool?: string) {
+  private async captureAndSendPlaywrightScreenshot(sessionId: string, callId?: string, tool?: string): Promise<boolean> {
     try {
       const result = await this.playwrightMcp?.takeScreenshot({
         sessionId,
@@ -300,9 +352,71 @@ export class JsonlStreamer {
           caption,
           priority: "user",
         });
+        return true;
       }
     } catch (e) {
       this.logger.debug(`[streamer] screenshot error: ${String(e)}`);
+    }
+    return false;
+  }
+
+  private currentTurnKey(sessionId: string): number | null {
+    const v = this.lastUserMessageAtSeen.get(sessionId);
+    return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null;
+  }
+
+  private markPlaywrightPendingScreenshot(sessionId: string, turnKey: number | null) {
+    if (turnKey === null) return;
+    if (this.playwrightScreenshotSentTurn.get(sessionId) === turnKey) return;
+    this.playwrightScreenshotPendingTurn.set(sessionId, turnKey);
+  }
+
+  private async maybeSendPendingPlaywrightScreenshot(sessionId: string): Promise<void> {
+    if (!this.playwrightMcp || !this.config.playwright_mcp?.enabled) return;
+    const turnKey = this.currentTurnKey(sessionId);
+    if (turnKey === null) return;
+    if (this.playwrightScreenshotSentTurn.get(sessionId) === turnKey) return;
+    if (this.playwrightScreenshotSendingTurn.get(sessionId) === turnKey) return;
+    if (this.playwrightScreenshotPendingTurn.get(sessionId) !== turnKey) return;
+
+    this.playwrightScreenshotSendingTurn.set(sessionId, turnKey);
+    try {
+      const ok = await this.captureAndSendPlaywrightScreenshot(sessionId, undefined, "auto");
+      if (ok) {
+        this.playwrightScreenshotSentTurn.set(sessionId, turnKey);
+        this.playwrightScreenshotPendingTurn.delete(sessionId);
+      }
+    } finally {
+      this.playwrightScreenshotSendingTurn.delete(sessionId);
+    }
+  }
+
+  private async sendPlaywrightScreenshotFromToolOutput(
+    sessionId: string,
+    turnKey: number,
+    screenshot: { file: Buffer; mimeType: string; filename: string; savedPath?: string },
+  ): Promise<boolean> {
+    if (this.playwrightScreenshotSentTurn.get(sessionId) === turnKey) return true;
+    if (this.playwrightScreenshotSendingTurn.get(sessionId) === turnKey) return false;
+
+    this.playwrightScreenshotSendingTurn.set(sessionId, turnKey);
+    try {
+      await this.sendToSession(sessionId, {
+        type: "image",
+        path: screenshot.savedPath ?? screenshot.filename,
+        file: screenshot.file,
+        filename: screenshot.filename,
+        mimeType: screenshot.mimeType,
+        caption: "Playwright screenshot",
+        priority: "user",
+      });
+      this.playwrightScreenshotSentTurn.set(sessionId, turnKey);
+      this.playwrightScreenshotPendingTurn.delete(sessionId);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      this.playwrightScreenshotSendingTurn.delete(sessionId);
     }
   }
 
@@ -362,6 +476,9 @@ export class JsonlStreamer {
       this.planCallIds.delete(id);
       this.playwrightCallIds.delete(id);
       this.playwrightCapturedCallIds.delete(id);
+      this.playwrightScreenshotPendingTurn.delete(id);
+      this.playwrightScreenshotSendingTurn.delete(id);
+      this.playwrightScreenshotSentTurn.delete(id);
     }
   }
 
@@ -1103,6 +1220,107 @@ function parseMcpFunctionName(name: string): { server: string; tool: string } | 
   const tool = rest.join("__");
   if (prefix !== "mcp" || !server || !tool) return null;
   return { server, tool };
+}
+
+function extractPlaywrightInlineScreenshot(
+  output: unknown,
+): { file: Buffer; mimeType: string; filename: string; savedPath?: string } | null {
+  if (!Array.isArray(output)) return null;
+
+  let mimeType: string | null = null;
+  let file: Buffer | null = null;
+  let savedPath: string | null = null;
+
+  for (const item of output) {
+    if (!item || typeof item !== "object") continue;
+    const type = stringOrEmpty((item as { type?: unknown }).type);
+
+    if (type === "input_text" && typeof (item as { text?: unknown }).text === "string") {
+      const text = (item as { text: string }).text;
+      const linked = extractFirstMarkdownLinkPath(text);
+      if (linked) savedPath = linked;
+      const saved = extractSavedPathFromText(text);
+      if (saved) savedPath = saved;
+    }
+
+    if (type === "input_image" && typeof (item as { image_url?: unknown }).image_url === "string") {
+      const parsed = parseDataUrl((item as { image_url: string }).image_url);
+      if (!parsed) continue;
+      mimeType = parsed.mimeType;
+      file = parsed.data;
+    }
+  }
+
+  if (!file || !mimeType) return null;
+  const filename = savedPath ? path.basename(savedPath) : `playwright-${Date.now()}.png`;
+  return { file, mimeType, filename, savedPath: savedPath ?? undefined };
+}
+
+function extractPlaywrightInlineScreenshotFromMcpResult(
+  result: unknown,
+): { file: Buffer; mimeType: string; filename: string; savedPath?: string } | null {
+  if (!result || typeof result !== "object") return null;
+  const content = (result as { content?: unknown }).content;
+  if (!Array.isArray(content)) return null;
+
+  let mimeType: string | null = null;
+  let file: Buffer | null = null;
+  let savedPath: string | null = null;
+
+  for (const item of content) {
+    if (!item || typeof item !== "object") continue;
+    const type = stringOrEmpty((item as { type?: unknown }).type);
+
+    if (type === "text" && typeof (item as { text?: unknown }).text === "string") {
+      const text = (item as { text: string }).text;
+      const linked = extractFirstMarkdownLinkPath(text);
+      if (linked) savedPath = linked;
+      const saved = extractSavedPathFromText(text);
+      if (saved) savedPath = saved;
+    }
+
+    if (type === "image" && typeof (item as { data?: unknown }).data === "string" && typeof (item as { mimeType?: unknown }).mimeType === "string") {
+      try {
+        file = Buffer.from((item as { data: string }).data, "base64");
+        mimeType = (item as { mimeType: string }).mimeType;
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  if (!file || !mimeType) return null;
+  const filename = savedPath ? path.basename(savedPath) : `playwright-${Date.now()}.png`;
+  return { file, mimeType, filename, savedPath: savedPath ?? undefined };
+}
+
+function extractFirstMarkdownLinkPath(text: string): string | null {
+  const re = /\[[^\]]*]\(([^)]+)\)/g;
+  for (const match of text.matchAll(re)) {
+    const raw = (match[1] ?? "").trim();
+    if (!raw) continue;
+    if (raw.startsWith("/")) return raw;
+  }
+  return null;
+}
+
+function extractSavedPathFromText(text: string): string | null {
+  const m = text.match(/save it as\s+([^\s]+)\s*$/im);
+  if (m && typeof m[1] === "string") {
+    const p = m[1].trim();
+    if (p.startsWith("/")) return p;
+  }
+  return null;
+}
+
+function parseDataUrl(url: string): { mimeType: string; data: Buffer } | null {
+  const m = url.match(/^data:([^;]+);base64,(.*)$/s);
+  if (!m) return null;
+  try {
+    return { mimeType: m[1]!, data: Buffer.from(m[2]!, "base64") };
+  } catch {
+    return null;
+  }
 }
 
 function formatPatchApprovalRequest(payload: Record<string, unknown>): string | null {

@@ -213,6 +213,7 @@ function spawnCodexInternal(opts: {
     ...process.env,
     ...envOverrides,
   } as Record<string, string>;
+  ensureNoProxyForLocalhost(env);
 
   opts.logger.debug(
     `[codex] spawn kind=${opts.kind} bin=${opts.config.codex.binary} cwd=${opts.cwd} args=${JSON.stringify(opts.args)} env_overrides=${JSON.stringify(
@@ -289,6 +290,29 @@ function spawnCodexInternal(opts: {
       stderrTail: () => stderrTail.get(),
     },
   };
+}
+
+function ensureNoProxyForLocalhost(env: Record<string, string>) {
+  const additions = ["127.0.0.1", "localhost", "::1"];
+  for (const key of ["NO_PROXY", "no_proxy"] as const) {
+    const raw = env[key] ?? "";
+    const cur = raw.trim();
+    if (cur === "*") continue;
+
+    const parts = cur
+      .split(",")
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+    const set = new Set(parts);
+    let changed = false;
+    for (const a of additions) {
+      if (set.has(a)) continue;
+      set.add(a);
+      changed = true;
+    }
+    if (!changed) continue;
+    env[key] = Array.from(set).join(",");
+  }
 }
 
 function buildTitlePrompt(opts: { projectName: string; initialPrompt: string; maxTitleChars: number }): string {

@@ -123,42 +123,59 @@ export class SessionManager {
 
     await createSession(this.db, session);
 
-    const sessionsRoot = resolveSessionsRoot(session.codex_cwd, this.config.codex.sessions_dir);
-    const codexHome = resolveCodexHomeFromSessionsRoot(sessionsRoot);
-    await ensureSessionsRootExists(sessionsRoot);
+    let spawned: SpawnedCodexProcess | null = null;
+    try {
+      const sessionsRoot = resolveSessionsRoot(session.codex_cwd, this.config.codex.sessions_dir);
+      const codexHome = resolveCodexHomeFromSessionsRoot(sessionsRoot);
+      await ensureSessionsRootExists(sessionsRoot);
 
-    this.logger.debug(
-      `[session] spawn codex kind=exec session=${id} project=${opts.projectId} cwd=${session.codex_cwd} sessionsRoot=${sessionsRoot} codexHome=${codexHome}`,
-    );
-    const extraArgs = await this.playwrightCodexArgs();
-    const spawned = spawnCodexExec({
-      config: this.config,
-      logger: this.logger,
-      cwd: session.codex_cwd,
-      prompt: opts.initialPrompt,
-      extraEnv: { CODEX_HOME: codexHome },
-      extraArgs: extraArgs ?? undefined,
-    });
+      this.logger.debug(
+        `[session] spawn codex kind=exec session=${id} project=${opts.projectId} cwd=${session.codex_cwd} sessionsRoot=${sessionsRoot} codexHome=${codexHome}`,
+      );
+      const extraArgs = await this.playwrightCodexArgs();
+      spawned = spawnCodexExec({
+        config: this.config,
+        logger: this.logger,
+        cwd: session.codex_cwd,
+        prompt: opts.initialPrompt,
+        extraEnv: { CODEX_HOME: codexHome },
+        extraArgs: extraArgs ?? undefined,
+      });
 
-    await updateSession(this.db, id, { pid: spawned.child.pid ?? null, started_at: nowMs(), status: "starting" });
+      await updateSession(this.db, id, { pid: spawned.child.pid ?? null, started_at: nowMs(), status: "starting" });
 
-    const timeout = setTimeout(() => {
-      void this.killSession(id, "timed out, terminating…");
-    }, this.config.codex.timeout_seconds * 1000);
+      const timeout = setTimeout(() => {
+        void this.killSession(id, "timed out, terminating…");
+      }, this.config.codex.timeout_seconds * 1000);
 
-    this.processes.set(id, { child: spawned.child, timeout, kind: "exec", codex: spawned.debug });
+      this.processes.set(id, { child: spawned.child, timeout, kind: "exec", codex: spawned.debug });
 
-    void this.finalizeNewSession(id, spawned.threadId, sessionsRoot).catch(async (e) => {
-      this.logger.error("session start error", e);
-      await updateSession(this.db, id, { status: "error", finished_at: nowMs() });
-      await this.sendToSession(id, { text: `Session error: ${String(e)}`, priority: "user" });
-    });
+      void this.finalizeNewSession(id, spawned.threadId, sessionsRoot).catch(async (e) => {
+        this.logger.error("session start error", e);
+        await updateSession(this.db, id, { status: "error", finished_at: nowMs() });
+        await this.sendToSession(id, { text: `Session error: ${String(e)}`, priority: "user" });
+      });
 
-    spawned.child.on("exit", (code, signal) => {
-      void this.handleExit(id, code, signal);
-    });
+      spawned.child.on("exit", (code, signal) => {
+        void this.handleExit(id, code, signal);
+      });
 
-    return id;
+      return id;
+    } catch (e) {
+      try {
+        if (spawned?.child && !spawned.child.killed) {
+          spawned.child.kill("SIGTERM");
+        }
+      } catch {
+        // ignore
+      }
+      try {
+        await updateSession(this.db, id, { status: "error", finished_at: nowMs(), pid: null });
+      } catch {
+        // ignore: best-effort cleanup
+      }
+      throw e;
+    }
   }
 
   async resumeSession(session: SessionRow, prompt: string): Promise<void> {

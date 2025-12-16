@@ -50,6 +50,10 @@ function sendJson(res: http.ServerResponse, status: number, body: any) {
 export async function createBotService(deps: BotServiceDeps) {
   const { config, db, logger } = deps;
 
+  const isTelegramTopicSession = (session: { platform: string; space_emoji: string | null }): boolean => {
+    return session.platform === "telegram" && typeof session.space_emoji === "string" && session.space_emoji.trim().length > 0;
+  };
+
   const queue = new TaskQueue(16);
   const firstMessageSent = new Set<string>();
   const firstMessageSending = new Set<string>();
@@ -252,7 +256,7 @@ export async function createBotService(deps: BotServiceDeps) {
 
   const upsertPlanMessage = async (
     sessionId: string,
-    session: { platform: string; chat_id: string; space_id: string },
+    session: { platform: string; chat_id: string; space_id: string; space_emoji: string | null },
     plan: Array<{ step: string; status: string }>,
     explanation?: string,
   ) => {
@@ -273,37 +277,25 @@ export async function createBotService(deps: BotServiceDeps) {
       }
 
       try {
-        let sent: TelegramMessage | null = null;
-        if (config.telegram?.use_topics) {
-          try {
-            sent = await telegram.sendMessageSingleStrict({
-              chatId,
-              messageThreadId: space,
-              text,
-              parseMode: "HTML",
-              priority: "user",
-              forcePrimary: true,
-            });
-          } catch {
-            sent = await telegram.sendMessageSingleStrict({
-              chatId,
-              replyToMessageId: space,
-              text,
-              parseMode: "HTML",
-              priority: "user",
-              forcePrimary: true,
-            });
-          }
-        } else {
-          sent = await telegram.sendMessageSingleStrict({
-            chatId,
-            replyToMessageId: space,
-            text,
-            parseMode: "HTML",
-            priority: "user",
-            forcePrimary: true,
-          });
-        }
+        const sent = await telegram.sendMessageSingleStrict(
+          isTelegramTopicSession(session)
+            ? {
+                chatId,
+                messageThreadId: space,
+                text,
+                parseMode: "HTML",
+                priority: "user",
+                forcePrimary: true,
+              }
+            : {
+                chatId,
+                replyToMessageId: space,
+                text,
+                parseMode: "HTML",
+                priority: "user",
+                forcePrimary: true,
+              },
+        );
         if (sent) planTelegramMessageId.set(sessionId, sent.message_id);
       } catch {
         // Ignore plan send failures.
@@ -338,6 +330,7 @@ export async function createBotService(deps: BotServiceDeps) {
     const session = await db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
     if (!session) return;
     const actionsDisabled = reviewCommitDisabled.has(sessionId);
+    const telegramTopicSession = isTelegramTopicSession(session);
     if (message.type === "plan_update") {
       await upsertPlanMessage(sessionId, session, message.plan, message.explanation);
       return;
@@ -376,15 +369,7 @@ export async function createBotService(deps: BotServiceDeps) {
               });
             }
           };
-          if (config.telegram?.use_topics) {
-            try {
-              await send({ messageThreadId: space });
-            } catch {
-              await send({ replyToMessageId: space });
-            }
-          } else {
-            await send({ replyToMessageId: space });
-          }
+          await send(telegramTopicSession ? { messageThreadId: space } : { replyToMessageId: space });
           return;
         }
         if (session.platform === "slack") {
@@ -415,7 +400,7 @@ export async function createBotService(deps: BotServiceDeps) {
       isFirst &&
       !isFinal &&
       (session.status === "starting" || session.status === "running") &&
-      !(session.platform === "telegram" && config.telegram?.use_topics);
+      !(session.platform === "telegram" && telegramTopicSession);
     const includeReviewButton = false;
     const includeCommitButton = false;
 
@@ -436,39 +421,12 @@ export async function createBotService(deps: BotServiceDeps) {
             : buildTelegramInlineKeyboard({ sessionId, includeKill: false, includeReview: true, includeCommit: true });
           const priority = "user" as const;
           try {
-            if (config.telegram?.use_topics) {
-              try {
-                const sent = await telegram.sendMessageSingleStrict({
-                  chatId,
-                  messageThreadId: space,
-                  text: fallbackText,
-                  replyMarkup,
-                  priority,
-                  forcePrimary: true,
-                });
-                lastTelegramMessageId.set(sessionId, sent.message_id);
-              } catch {
-                const sent = await telegram.sendMessageSingleStrict({
-                  chatId,
-                  replyToMessageId: space,
-                  text: fallbackText,
-                  replyMarkup,
-                  priority,
-                  forcePrimary: true,
-                });
-                lastTelegramMessageId.set(sessionId, sent.message_id);
-              }
-            } else {
-              const sent = await telegram.sendMessageSingleStrict({
-                chatId,
-                replyToMessageId: space,
-                text: fallbackText,
-                replyMarkup,
-                priority,
-                forcePrimary: true,
-              });
-              lastTelegramMessageId.set(sessionId, sent.message_id);
-            }
+            const sent = await telegram.sendMessageSingleStrict(
+              telegramTopicSession
+                ? { chatId, messageThreadId: space, text: fallbackText, replyMarkup, priority, forcePrimary: true }
+                : { chatId, replyToMessageId: space, text: fallbackText, replyMarkup, priority, forcePrimary: true },
+            );
+            lastTelegramMessageId.set(sessionId, sent.message_id);
             messageSent = true;
           } catch {
             // Ignore fallback failures.
@@ -514,60 +472,30 @@ export async function createBotService(deps: BotServiceDeps) {
         if (isFencedCodeBlock(text)) {
           const parseMode = "Markdown" as const;
           let sent: TelegramMessage | null = null;
-          if (config.telegram?.use_topics) {
-            try {
-              sent = await telegram.sendMessageSingleStrict({
-                chatId,
-                messageThreadId: space,
-                text,
-                parseMode,
-                replyMarkup,
-                priority,
-                forcePrimary: true,
-              });
-            } catch {
-              try {
-                sent = await telegram.sendMessageSingleStrict({
-                  chatId,
-                  replyToMessageId: space,
-                  text,
-                  parseMode,
-                  replyMarkup,
-                  priority,
-                  forcePrimary: true,
-                });
-              } catch {
-                sent = await telegram.sendMessageSingleStrict({
-                  chatId,
-                  text,
-                  parseMode,
-                  replyMarkup,
-                  priority,
-                  forcePrimary: true,
-                });
-              }
-            }
-          } else {
-            try {
-              sent = await telegram.sendMessageSingleStrict({
-                chatId,
-                replyToMessageId: space,
-                text,
-                parseMode,
-                replyMarkup,
-                priority,
-                forcePrimary: true,
-              });
-            } catch {
-              sent = await telegram.sendMessageSingleStrict({
-                chatId,
-                text,
-                parseMode,
-                replyMarkup,
-                priority,
-                forcePrimary: true,
-              });
-            }
+          try {
+            sent = await telegram.sendMessageSingleStrict(
+              telegramTopicSession
+                ? {
+                    chatId,
+                    messageThreadId: space,
+                    text,
+                    parseMode,
+                    replyMarkup,
+                    priority,
+                    forcePrimary: true,
+                  }
+                : {
+                    chatId,
+                    replyToMessageId: space,
+                    text,
+                    parseMode,
+                    replyMarkup,
+                    priority,
+                    forcePrimary: true,
+                  },
+            );
+          } catch {
+            sent = await telegram.sendMessageSingleStrict({ chatId, text, parseMode, replyMarkup, priority, forcePrimary: true });
           }
           if (sent) lastTelegramMessageId.set(sessionId, sent.message_id);
           messageSent = true;
@@ -576,43 +504,14 @@ export async function createBotService(deps: BotServiceDeps) {
         }
 
         let sent: TelegramMessage | null = null;
-        if (config.telegram?.use_topics) {
-          try {
-            sent = await telegram.sendMessageStrict({
-              chatId,
-              messageThreadId: space,
-              text,
-              replyMarkup,
-              priority,
-              forcePrimary: true,
-            });
-          } catch {
-            try {
-              sent = await telegram.sendMessageStrict({
-                chatId,
-                replyToMessageId: space,
-                text,
-                replyMarkup,
-                priority,
-                forcePrimary: true,
-              });
-            } catch {
-              sent = await telegram.sendMessage({ chatId, text, replyMarkup, priority, forcePrimary: true });
-            }
-          }
-        } else {
-          try {
-            sent = await telegram.sendMessageStrict({
-              chatId,
-              replyToMessageId: space,
-              text,
-              replyMarkup,
-              priority,
-              forcePrimary: true,
-            });
-          } catch {
-            sent = await telegram.sendMessage({ chatId, text, replyMarkup, priority, forcePrimary: true });
-          }
+        try {
+          sent = await telegram.sendMessageStrict(
+            telegramTopicSession
+              ? { chatId, messageThreadId: space, text, replyMarkup, priority, forcePrimary: true }
+              : { chatId, replyToMessageId: space, text, replyMarkup, priority, forcePrimary: true },
+          );
+        } catch {
+          sent = await telegram.sendMessage({ chatId, text, replyMarkup, priority, forcePrimary: true });
         }
         if (sent) lastTelegramMessageId.set(sessionId, sent.message_id);
         messageSent = true;

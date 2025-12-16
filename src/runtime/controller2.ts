@@ -490,7 +490,8 @@ export class BotController {
 
   private telegramForumThreadIdFromMessage(message?: TelegramMessage): number | undefined {
     if (!message) return undefined;
-    if (message.is_topic_message !== true) return undefined;
+    // Telegram sometimes omits `is_topic_message` on callback_query.message even when `message_thread_id` is present.
+    // Prefer the thread id whenever it exists.
     const id = message.message_thread_id;
     if (typeof id !== "number" || id <= 0) return undefined;
     return id;
