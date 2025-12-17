@@ -97,6 +97,7 @@ export class JsonlStreamer {
 
     // Re-fetch offsets after potential insert
     const currentOffsets = await listSessionOffsets(this.db, session.id);
+    let finalize = false;
     for (const off of currentOffsets) {
       let read;
       try {
@@ -113,7 +114,6 @@ export class JsonlStreamer {
         updated_at: nowMs(),
       });
 
-      let finalize = false;
       const fragments: StreamFragment[] = [];
       for (const line of lines) {
         const trimmed = line.trim();
