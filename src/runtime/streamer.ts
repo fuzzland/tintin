@@ -6,7 +6,7 @@ import { findSessionJsonlFiles, resolveSessionsRoot } from "./codex.js";
 import type { SendToSessionFn } from "./messaging.js";
 import { redactText } from "./redact.js";
 import { nowMs, sleep } from "./util.js";
-import { listRunningSessions, listSessionOffsets, upsertSessionOffset, getSessionsByIds } from "./store.js";
+import { listRunningSessions, listSessionOffsets, upsertSessionOffset } from "./store.js";
 import { PlaywrightMcpManager } from "./playwrightMcp.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -59,143 +59,7 @@ export class JsonlStreamer {
   }
 
   async drainSession(sessionId: string) {
-    this.logger.debug(`[streamer] drainSession start session=${sessionId}`);
-    // Process and flush in one call to avoid race with background loop
-    await this.pollOnceAndFlush(sessionId);
-    this.logger.debug(`[streamer] drainSession done session=${sessionId}`);
-  }
-
-  private async pollOnceAndFlush(sessionId: string) {
-    const sessions = await getSessionsByIds(this.db, [sessionId]);
-    if (sessions.length === 0) return;
-    const session = sessions[0]!;
-
-    this.noteUserActivity(session.id, session.last_user_message_at, session.created_at);
-    if (!session.codex_session_id) {
-      this.logger.debug(`[streamer] pollOnceAndFlush skip session=${session.id} no codex_session_id`);
-      return;
-    }
-
-    const offsets = await listSessionOffsets(this.db, session.id);
-    if (offsets.length === 0) {
-      const sessionsRoot = resolveSessionsRoot(session.codex_cwd, this.config.codex.sessions_dir);
-      const files = await findSessionJsonlFiles({
-        sessionsRoot,
-        codexSessionId: session.codex_session_id,
-        timeoutMs: 1,
-        pollMs: 1,
-      });
-      if (files.length === 0) return;
-      for (const f of files) {
-        const initialOffset = await computeCatchupOffsetBytes(f, this.config.codex.max_catchup_lines).catch(() => 0);
-        await upsertSessionOffset(this.db, {
-          id: crypto.randomUUID(),
-          session_id: session.id,
-          jsonl_path: f,
-          byte_offset: initialOffset,
-          updated_at: nowMs(),
-        });
-      }
-    }
-
-    // Re-fetch offsets after potential insert
-    const currentOffsets = await listSessionOffsets(this.db, session.id);
-    let finalize = false;
-    for (const off of currentOffsets) {
-      let read;
-      try {
-        read = await readNewJsonlLines(off.jsonl_path, off.byte_offset);
-      } catch {
-        continue;
-      }
-      const { lines, newOffset } = read;
-      if (lines.length === 0) continue;
-      await upsertSessionOffset(this.db, {
-        ...off,
-        id: off.id,
-        byte_offset: newOffset,
-        updated_at: nowMs(),
-      });
-
-      const fragments: StreamFragment[] = [];
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const obj = JSON.parse(trimmed) as unknown;
-          const objType = (obj as { type?: unknown }).type;
-          if (objType === "mcp_tool_call_end" || objType === "response_item") {
-            void this.maybeCapturePlaywrightScreenshot(session.id, obj as Record<string, unknown>);
-          }
-
-          const planFragment = this.parsePlanUpdate(obj, session.id);
-          if (planFragment) {
-            fragments.push(planFragment);
-            continue;
-          }
-
-          if (this.shouldSuppressPlanOutput(obj, session.id)) continue;
-
-          fragments.push(
-            ...mapCodexEventToFragments(obj, {
-              includeUserMessages: session.platform !== "telegram",
-              verbosity: this.config.bot.message_verbosity,
-            }),
-          );
-        } catch {
-          continue;
-        }
-      }
-
-      for (const frag of fragments) {
-        if (frag.kind === "final") {
-          finalize = true;
-          continue;
-        }
-
-        if (frag.kind === "plan_update") {
-          await this.flushIfNeeded(session.id, true);
-          await this.sendToSession(session.id, {
-            type: "plan_update",
-            plan: frag.plan,
-            explanation: frag.explanation,
-            priority: "user",
-          });
-          continue;
-        }
-
-        if (frag.kind === "text") {
-          this.append(session.id, frag.text, { continuous: frag.continuous });
-          continue;
-        }
-
-        if (frag.kind === "tool_call") {
-          const q = this.pendingToolCalls.get(session.id) ?? [];
-          q.push(frag.text);
-          this.pendingToolCalls.set(session.id, q);
-          continue;
-        }
-
-        if (frag.kind === "tool_output") {
-          const q = this.pendingToolCalls.get(session.id);
-          const callText = q && q.length > 0 ? q.shift()! : null;
-          if (q && q.length === 0) this.pendingToolCalls.delete(session.id);
-
-          await this.flushIfNeeded(session.id, true);
-          const maxChars = this.config.telegram?.max_chars ?? this.config.slack?.max_chars ?? 3500;
-          const msg = formatToolPairMessage({
-            callText,
-            outputText: frag.text,
-            maxMessageChars: maxChars,
-          });
-          await this.sendToSession(session.id, { text: msg, priority: this.takeSendPriority(session.id) });
-        }
-      }
-
-      if (finalize) await this.flushIfNeeded(session.id, true);
-    }
-
-    // Immediately flush
+    await this.pollOnce([sessionId]);
     await this.flushIfNeeded(sessionId, true);
   }
 
@@ -211,20 +75,13 @@ export class JsonlStreamer {
   }
 
   private async pollOnce(onlySessionIds?: string[]) {
-    // When draining specific sessions (e.g., on process exit), query them directly
-    // regardless of status, since they may still be in 'starting' state due to race condition
-    const sessions = onlySessionIds
-      ? await getSessionsByIds(this.db, onlySessionIds)
-      : await listRunningSessions(this.db);
-    this.logger.debug(`[streamer] pollOnce sessions=${sessions.length} onlyIds=${onlySessionIds?.join(",") ?? "-"}`);
+    const sessions = await listRunningSessions(this.db);
     const runningSessionIds = new Set<string>();
     for (const session of sessions) {
+      if (onlySessionIds && !onlySessionIds.includes(session.id)) continue;
       runningSessionIds.add(session.id);
       this.noteUserActivity(session.id, session.last_user_message_at, session.created_at);
-      if (!session.codex_session_id) {
-        this.logger.debug(`[streamer] pollOnce skip session=${session.id} no codex_session_id`);
-        continue;
-      }
+      if (!session.codex_session_id) continue;
 
       const offsets = await listSessionOffsets(this.db, session.id);
       if (offsets.length === 0) {
@@ -358,7 +215,6 @@ export class JsonlStreamer {
     const continuous = opts?.continuous ?? false;
     const next = s.text ? (continuous ? `${s.text}${text}` : `${s.text}\n${text}`) : text;
     this.buffers.set(sessionId, { ...s, text: next });
-    this.logger.debug(`[streamer] append session=${sessionId} textLen=${text.length} bufferLen=${next.length}`);
   }
 
   private async maybeCapturePlaywrightScreenshot(sessionId: string, obj: Record<string, unknown>) {
