@@ -292,6 +292,12 @@ function spawnCodexInternal(opts: {
   };
 }
 
+/**
+ * Ensure local MCP endpoints (e.g. `http://127.0.0.1:11000/mcp`) are not sent through a proxy.
+ *
+ * In some environments, users set `HTTP_PROXY/HTTPS_PROXY` globally; if `NO_PROXY` is missing localhost entries,
+ * Codex may fail to connect to local services like Playwright MCP (resulting in misleading 404s/timeouts).
+ */
 function ensureNoProxyForLocalhost(env: Record<string, string>) {
   const additions = ["127.0.0.1", "localhost", "::1"];
   for (const key of ["NO_PROXY", "no_proxy"] as const) {

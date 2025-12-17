@@ -12,10 +12,17 @@ function envHasProxy(): boolean {
 
 const proxyAgent = envHasProxy() ? new EnvHttpProxyAgent() : null;
 
+/**
+ * Proxy-aware `fetch` wrapper.
+ *
+ * Uses `EnvHttpProxyAgent` when proxy environment variables are present (e.g. `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`),
+ * and respects `NO_PROXY`/`no_proxy` for bypass rules.
+ *
+ * If the caller already provided an explicit `dispatcher` in `init`, it is preserved.
+ */
 export const fetchWithProxy: typeof undiciFetch = (input, init) => {
   if (!proxyAgent) return undiciFetch(input, init);
   if (init && "dispatcher" in init && init.dispatcher) return undiciFetch(input, init);
   const nextInit = init ? { ...init, dispatcher: proxyAgent } : { dispatcher: proxyAgent };
   return undiciFetch(input, nextInit);
 };
-

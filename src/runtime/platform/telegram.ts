@@ -172,8 +172,11 @@ export class TelegramClient {
     const parseMode = this.defaultParseMode;
     const sanitized = sanitizeTelegramText(redacted, parseMode, false);
     const chunks = chunkText(sanitized, this.maxChars);
-    // When replying to a message, `reply_to_message_id` is sufficient to route the message into the correct topic/thread.
-    // Some Telegram contexts include a `message_thread_id` in updates but reject it in sendMessage (400: message thread not found).
+    // In Telegram supergroups with Topics (forum groups), updates may include a `message_thread_id`.
+    // When replying (`reply_to_message_id`), Telegram already routes the message into the correct topic/thread.
+    // Passing both can fail in some contexts with 400 "message thread not found", so we omit `message_thread_id` when replying.
+    // See: https://core.telegram.org/bots/api#sendmessage (message_thread_id)
+    //      https://core.telegram.org/bots/api#message (message_thread_id field)
     const messageThreadId = opts.replyToMessageId ? undefined : opts.messageThreadId;
     const usePrimary = this.requirePrimary(opts.forcePrimary, opts.replyMarkup, opts.replyToMessageId);
     let last: TelegramMessage | null = null;

@@ -232,7 +232,7 @@ export class JsonlStreamer {
         if (parsed && parsed.server.toLowerCase() === "playwright" && callId) {
           this.rememberPlaywrightCall(sessionId, callId, parsed.tool);
           if (parsed.tool === "browser_close") {
-            void this.maybeSendPendingPlaywrightScreenshot(sessionId);
+            await this.maybeSendPendingPlaywrightScreenshot(sessionId);
           }
         }
         return;
@@ -280,7 +280,7 @@ export class JsonlStreamer {
     const callId = stringOrEmpty((invocation as { call_id?: unknown }).call_id);
     if (this.hasCapturedPlaywrightCall(sessionId, callId)) return;
     if (tool === "browser_close") {
-      void this.maybeSendPendingPlaywrightScreenshot(sessionId);
+      await this.maybeSendPendingPlaywrightScreenshot(sessionId);
       this.markCapturedPlaywrightCall(sessionId, callId);
       return;
     }
@@ -1252,7 +1252,7 @@ function extractPlaywrightInlineScreenshot(
   }
 
   if (!file || !mimeType) return null;
-  const filename = savedPath ? path.basename(savedPath) : `playwright-${Date.now()}.png`;
+  const filename = savedPath ? path.basename(savedPath) : `playwright-${crypto.randomUUID()}.png`;
   return { file, mimeType, filename, savedPath: savedPath ?? undefined };
 }
 
@@ -1290,7 +1290,7 @@ function extractPlaywrightInlineScreenshotFromMcpResult(
   }
 
   if (!file || !mimeType) return null;
-  const filename = savedPath ? path.basename(savedPath) : `playwright-${Date.now()}.png`;
+  const filename = savedPath ? path.basename(savedPath) : `playwright-${crypto.randomUUID()}.png`;
   return { file, mimeType, filename, savedPath: savedPath ?? undefined };
 }
 

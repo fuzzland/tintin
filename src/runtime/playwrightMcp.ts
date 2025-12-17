@@ -9,6 +9,9 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { PlaywrightMcpSection } from "./config.js";
 import type { Logger } from "./log.js";
 
+const SIGKILL_TIMEOUT_MS = 2_000;
+const MAX_SNIPPET_CHARS = 240;
+
 export interface PlaywrightServerInfo {
   port: number;
   url: string;
@@ -57,7 +60,7 @@ export class PlaywrightMcpManager {
       proc.child.kill("SIGTERM");
       setTimeout(() => {
         if (!proc.child.killed) proc.child.kill("SIGKILL");
-      }, 2_000);
+      }, SIGKILL_TIMEOUT_MS);
     }
   }
 
@@ -65,7 +68,8 @@ export class PlaywrightMcpManager {
     const server = await this.ensureServer();
     const client = await this.ensureClient(server);
     const safeTool = opts.tool ? opts.tool.replace(/[^A-Za-z0-9_-]+/g, "-") : "call";
-    const relFileName = path.join(opts.sessionId, `${safeTool || "call"}-${opts.callId ?? "auto"}-${Date.now()}.png`);
+    const nonce = crypto.randomUUID();
+    const relFileName = path.join(opts.sessionId, `${safeTool || "call"}-${opts.callId ?? "auto"}-${nonce}.png`);
     const expectedPath = path.join(server.outputDir, relFileName);
     await mkdir(path.dirname(expectedPath), { recursive: true });
     try {
@@ -182,7 +186,7 @@ export class PlaywrightMcpManager {
     try {
       await waitForPortOpen(this.config.host, port, this.config.timeout_ms);
     } catch (e) {
-      this.logger.warn(`[playwright-mcp] failed to start on ${this.config.host}:${port}: ${String(e)}`);
+      this.logger.error(`[playwright-mcp] failed to start on ${this.config.host}:${port}: ${String(e)}`);
       try {
         child.kill("SIGTERM");
       } catch {
@@ -194,7 +198,7 @@ export class PlaywrightMcpManager {
         } catch {
           // ignore
         }
-      }, 2_000);
+      }, SIGKILL_TIMEOUT_MS);
       throw e;
     }
     const info: PlaywrightServerInfo = {
@@ -211,7 +215,7 @@ function substituteSessionId(p: string, sessionId: string): string {
   return p.replaceAll("{sessionId}", sessionId);
 }
 
-function safeSnippet(text: string, maxChars = 240): string {
+function safeSnippet(text: string, maxChars = MAX_SNIPPET_CHARS): string {
   const clean = (text ?? "").replace(/\s+/g, " ").trim();
   if (clean.length <= maxChars) return clean;
   return `${clean.slice(0, maxChars)}…`;

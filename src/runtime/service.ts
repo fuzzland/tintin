@@ -50,8 +50,16 @@ function sendJson(res: http.ServerResponse, status: number, body: any) {
 export async function createBotService(deps: BotServiceDeps) {
   const { config, db, logger } = deps;
 
+  /**
+   * Determines whether a session is a Telegram forum topic session.
+   *
+   * In Tintin, Telegram topic-backed sessions are identified by a non-empty `space_emoji`:
+   * it is only set when Tintin successfully creates a forum topic and picks an icon.
+   */
   const isTelegramTopicSession = (session: { platform: string; space_emoji: string | null }): boolean => {
-    return session.platform === "telegram" && typeof session.space_emoji === "string" && session.space_emoji.trim().length > 0;
+    return (
+      session.platform === "telegram" && typeof session.space_emoji === "string" && session.space_emoji.trim().length > 0
+    );
   };
 
   const queue = new TaskQueue(16);
