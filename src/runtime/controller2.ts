@@ -32,7 +32,6 @@ import { nowMs } from "./util.js";
 const REVIEW_PROMPT = "Run codex review";
 const COMMIT_PROMPT = "Stage all current changes and commit them with a clear, meaningful git commit message summarizing the diff.";
 const SESSION_LIST_PAGE_SIZE = 20;
-const TELEGRAM_DM_SESSION_FALLBACK_WINDOW_MS = 15 * 60 * 1000;
 type TelegramReplyContext = { replyToMessageId: number; messageThreadId?: number; chat: TelegramChat };
 
 export class BotController {
@@ -335,54 +334,6 @@ export class BotController {
       return;
     }
 
-    const stopIntent = parseStopIntentFromTelegram(text);
-    if (stopIntent) {
-      const access = await this.telegramAccessDecision(chatId, userId);
-      if (!access.allowed) {
-        this.logger.warn(`[tg] rejected stop chat=${chatId} user=${userId} reason=${access.reason ?? "-"}`);
-        await this.telegram.sendMessage({
-          chatId,
-          messageThreadId: forumThreadId,
-          replyToMessageId: message.message_id,
-          text: "Not authorized.",
-          priority: "user",
-        });
-        return;
-      }
-      const target = stopIntent.sessionId
-        ? await this.db.selectFrom("sessions").selectAll().where("id", "=", stopIntent.sessionId).executeTakeFirst()
-        : await this.findLatestActiveTelegramSession(chatId);
-      if (!target || target.platform !== "telegram" || target.chat_id !== chatId) {
-        await this.telegram.sendMessage({
-          chatId,
-          messageThreadId: forumThreadId,
-          replyToMessageId: message.message_id,
-          text: "No active session found.",
-          priority: "user",
-        });
-        return;
-      }
-      if (target.status !== "starting" && target.status !== "running") {
-        await this.telegram.sendMessage({
-          chatId,
-          messageThreadId: forumThreadId,
-          replyToMessageId: message.message_id,
-          text: "Session already finished.",
-          priority: "user",
-        });
-        return;
-      }
-      await this.telegram.sendMessage({
-        chatId,
-        messageThreadId: forumThreadId,
-        replyToMessageId: message.message_id,
-        text: "Stopping session…",
-        priority: "user",
-      });
-      await this.sessionManager.killSession(target.id, "Stopping session via /stop.");
-      return;
-    }
-
     // Allow "@bot sessions" style listing too.
     const botUsername = this.telegram.botUsername;
     if (botUsername) {
@@ -480,38 +431,6 @@ export class BotController {
       this.logger.debug(`[tg] no session for space=${spaceIds.join(",")} chat=${chatId} user=${userId}`);
     }
 
-    // Messages outside of topics/threads should fall back to the latest active session.
-    if (spaceIds.length === 0) {
-      const chatType = message.chat.type;
-      this.logger.debug(`[tg] fallback check chat=${chatId} type=${chatType}`);
-      if (chatType === "private" || chatType === "group" || chatType === "supergroup") {
-        const fallbackSession = await this.findRecentTelegramSession(chatId);
-        if (fallbackSession) {
-          const access = await this.telegramAccessDecision(chatId, userId);
-          if (!access.allowed) {
-            this.logger.warn(
-              `[tg] rejected fallback chat=${chatId} user=${userId} session=${fallbackSession.id} reason=${access.reason ?? "-"}`,
-            );
-            await this.telegram.sendMessage({
-              chatId,
-              messageThreadId: forumThreadId,
-              replyToMessageId: message.message_id,
-              text: "Not authorized.",
-              priority: "user",
-            });
-            return;
-          }
-          const mode = chatType === "private" ? "dm" : "group";
-          this.logger.debug(
-            `[tg] ${mode} fallback routed session=${fallbackSession.id} status=${fallbackSession.status} chat=${chatId} user=${userId}`,
-          );
-          await updateSession(this.db, fallbackSession.id, { last_user_message_at: nowMs() });
-          await this.handleSessionMessage(fallbackSession, userId, text);
-          return;
-        }
-      }
-    }
-
     // Wizard start.
     if (this.telegram.isMentionOrCommand(message)) {
       const access = await this.telegramAccessDecision(chatId, userId);
@@ -578,41 +497,6 @@ export class BotController {
     const id = message.message_thread_id;
     if (typeof id !== "number" || id <= 0) return undefined;
     return id;
-  }
-
-  private async findRecentTelegramSession(chatId: string): Promise<SessionRow | null> {
-    const candidate = await this.db
-      .selectFrom("sessions")
-      .selectAll()
-      .where("platform", "=", "telegram")
-      .where("chat_id", "=", chatId)
-      .where("status", "in", ["starting", "running", "finished", "error"])
-      .orderBy("created_at", "desc")
-      .limit(1)
-      .executeTakeFirst();
-    if (!candidate) return null;
-    if (candidate.status === "starting" || candidate.status === "running") {
-      return candidate as SessionRow;
-    }
-    if (!candidate.codex_session_id) return null;
-    const lastActivity =
-      candidate.last_user_message_at ?? candidate.finished_at ?? candidate.updated_at ?? candidate.created_at ?? null;
-    if (!lastActivity) return null;
-    if (nowMs() - lastActivity > TELEGRAM_DM_SESSION_FALLBACK_WINDOW_MS) return null;
-    return candidate as SessionRow;
-  }
-
-  private async findLatestActiveTelegramSession(chatId: string): Promise<SessionRow | null> {
-    const candidate = await this.db
-      .selectFrom("sessions")
-      .selectAll()
-      .where("platform", "=", "telegram")
-      .where("chat_id", "=", chatId)
-      .where("status", "in", ["starting", "running"])
-      .orderBy("created_at", "desc")
-      .limit(1)
-      .executeTakeFirst();
-    return candidate ? (candidate as SessionRow) : null;
   }
 
   private async startTelegramWizard(chatId: string, userId: string, replyToMessageId: number, messageThreadId?: number) {
@@ -1690,22 +1574,6 @@ function parseSettingsIntentFromSlack(text: string): SettingsCommand | null {
   if (!m) return null;
   const rest = (m[1] ?? "").trim();
   return parseSettingsArgs(rest);
-}
-
-type StopCommand = { sessionId?: string };
-
-function parseStopIntentFromTelegram(text: string): StopCommand | null {
-  const cmd = parseTelegramCommand(text);
-  if (!cmd) return null;
-  if (cmd.command === "stop") {
-    const id = cmd.args.trim();
-    return id ? { sessionId: id } : {};
-  }
-  if (cmd.command !== "codex") return null;
-  const rest = cmd.args.trim();
-  if (!rest.toLowerCase().startsWith("stop")) return null;
-  const remainder = rest.slice("stop".length).trim();
-  return remainder ? { sessionId: remainder.split(/\s+/)[0] } : {};
 }
 
 function parseSettingsArgs(args: string): SettingsCommand | null {

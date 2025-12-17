@@ -123,11 +123,6 @@ export async function listRunningSessions(db: Db) {
   return db.selectFrom("sessions").selectAll().where("status", "=", "running").execute();
 }
 
-export async function getSessionsByIds(db: Db, ids: string[]) {
-  if (ids.length === 0) return [];
-  return db.selectFrom("sessions").selectAll().where("id", "in", ids).execute();
-}
-
 export interface SessionListPage {
   sessions: SessionRow[];
   page: number;
