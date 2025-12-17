@@ -2,6 +2,7 @@ import { RateLimiter, chunkText, sleep } from "../util.js";
 import type { Logger } from "../log.js";
 import type { ProjectEntry, TelegramSection } from "../config.js";
 import { redactText } from "../redact.js";
+import { fetchWithProxy } from "../httpClient.js";
 
 const TELEGRAM_USER_SEND_RATE_PER_SEC = 10;
 
@@ -171,6 +172,12 @@ export class TelegramClient {
     const parseMode = this.defaultParseMode;
     const sanitized = sanitizeTelegramText(redacted, parseMode, false);
     const chunks = chunkText(sanitized, this.maxChars);
+    // In Telegram supergroups with Topics (forum groups), updates may include a `message_thread_id`.
+    // When replying (`reply_to_message_id`), Telegram already routes the message into the correct topic/thread.
+    // Passing both can fail in some contexts with 400 "message thread not found", so we omit `message_thread_id` when replying.
+    // See: https://core.telegram.org/bots/api#sendmessage (message_thread_id)
+    //      https://core.telegram.org/bots/api#message (message_thread_id field)
+    const messageThreadId = opts.replyToMessageId ? undefined : opts.messageThreadId;
     const usePrimary = this.requirePrimary(opts.forcePrimary, opts.replyMarkup, opts.replyToMessageId);
     let last: TelegramMessage | null = null;
     for (let i = 0; i < chunks.length; i++) {
@@ -179,7 +186,7 @@ export class TelegramClient {
         {
           chat_id: opts.chatId,
           text: chunk,
-          message_thread_id: opts.messageThreadId,
+          message_thread_id: messageThreadId,
           reply_to_message_id: opts.replyToMessageId,
           reply_markup: i === 0 ? opts.replyMarkup : undefined,
           disable_web_page_preview: true,
@@ -208,14 +215,14 @@ export class TelegramClient {
 
     const form = new FormData();
     form.append("chat_id", String(opts.chatId));
-    if (opts.messageThreadId) form.append("message_thread_id", String(opts.messageThreadId));
-    else if (opts.replyToMessageId) form.append("reply_to_message_id", String(opts.replyToMessageId));
+    if (opts.replyToMessageId) form.append("reply_to_message_id", String(opts.replyToMessageId));
+    else if (opts.messageThreadId) form.append("message_thread_id", String(opts.messageThreadId));
     if (opts.caption) form.append("caption", sanitizeTelegramText(redactText(opts.caption), this.defaultParseMode, false));
     const blob = new Blob([opts.file], { type: opts.mimeType ?? "application/octet-stream" });
     form.append("document", blob, opts.filename);
 
     const url = `${this.baseUrl}/sendDocument`;
-    const res = await fetch(url, { method: "POST", body: form });
+    const res = await fetchWithProxy(url, { method: "POST", body: form });
     const json = (await res.json()) as TelegramApiResponse<TelegramMessage>;
     if (!json.ok) throw new TelegramApiError(json.error_code, json.description);
     return json.result;
@@ -236,14 +243,14 @@ export class TelegramClient {
 
     const form = new FormData();
     form.append("chat_id", String(opts.chatId));
-    if (opts.messageThreadId) form.append("message_thread_id", String(opts.messageThreadId));
-    else if (opts.replyToMessageId) form.append("reply_to_message_id", String(opts.replyToMessageId));
+    if (opts.replyToMessageId) form.append("reply_to_message_id", String(opts.replyToMessageId));
+    else if (opts.messageThreadId) form.append("message_thread_id", String(opts.messageThreadId));
     if (opts.caption) form.append("caption", sanitizeTelegramText(redactText(opts.caption), this.defaultParseMode, false));
     const blob = new Blob([opts.file], { type: opts.mimeType ?? "image/png" });
     form.append("photo", blob, opts.filename);
 
     const url = `${this.baseUrl}/sendPhoto`;
-    const res = await fetch(url, { method: "POST", body: form });
+    const res = await fetchWithProxy(url, { method: "POST", body: form });
     const json = (await res.json()) as TelegramApiResponse<TelegramMessage>;
     if (!json.ok) throw new TelegramApiError(json.error_code, json.description);
     return json.result;
@@ -268,12 +275,13 @@ export class TelegramClient {
     const sanitized = sanitizeTelegramText(redacted, parseMode, !!opts.entities);
     if (sanitized.length > this.maxChars) throw new Error("sendMessageSingle text exceeds max_chars");
     const combinable = !opts.replyMarkup && !opts.entities;
+    const messageThreadId = opts.replyToMessageId ? undefined : opts.messageThreadId;
     const usePrimary = this.requirePrimary(opts.forcePrimary, opts.replyMarkup, opts.replyToMessageId);
     return this.enqueueMessageSend(
       {
         chat_id: opts.chatId,
         text: sanitized,
-        message_thread_id: opts.messageThreadId,
+        message_thread_id: messageThreadId,
         reply_to_message_id: opts.replyToMessageId,
         reply_markup: opts.replyMarkup,
         entities: opts.entities,
@@ -301,6 +309,7 @@ export class TelegramClient {
     const sanitized = sanitizeTelegramText(redacted, parseMode, !!opts.entities);
     const chunks = chunkText(sanitized, this.maxChars);
     if (opts.entities) throw new Error("sendMessageStrict does not support entities (use sendMessageSingleStrict)");
+    const messageThreadId = opts.replyToMessageId ? undefined : opts.messageThreadId;
     const usePrimary = this.requirePrimary(opts.forcePrimary, opts.replyMarkup, opts.replyToMessageId);
     let last: TelegramMessage | null = null;
     for (let i = 0; i < chunks.length; i++) {
@@ -309,7 +318,7 @@ export class TelegramClient {
         {
           chat_id: opts.chatId,
           text: chunk,
-          message_thread_id: opts.messageThreadId,
+          message_thread_id: messageThreadId,
           reply_to_message_id: opts.replyToMessageId,
           reply_markup: i === 0 ? opts.replyMarkup : undefined,
           disable_web_page_preview: true,
@@ -342,12 +351,13 @@ export class TelegramClient {
     const sanitized = sanitizeTelegramText(redacted, parseMode, !!opts.entities);
     if (sanitized.length > this.maxChars) throw new Error("sendMessageSingleStrict text exceeds max_chars");
     const combinable = !opts.replyMarkup && !opts.entities;
+    const messageThreadId = opts.replyToMessageId ? undefined : opts.messageThreadId;
     const usePrimary = this.requirePrimary(opts.forcePrimary, opts.replyMarkup, opts.replyToMessageId);
     return this.enqueueMessageSend(
       {
         chat_id: opts.chatId,
         text: sanitized,
-        message_thread_id: opts.messageThreadId,
+        message_thread_id: messageThreadId,
         reply_to_message_id: opts.replyToMessageId,
         reply_markup: opts.replyMarkup,
         entities: opts.entities,
@@ -617,7 +627,7 @@ export class TelegramClient {
 
   private async requestWithToken<T>(token: string, method: string, payload: unknown): Promise<T> {
     const base = token === this.primaryToken ? this.baseUrl : this.buildBaseUrl(token);
-    const res = await fetch(`${base}/${method}`, {
+    const res = await fetchWithProxy(`${base}/${method}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),

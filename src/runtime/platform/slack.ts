@@ -5,6 +5,7 @@ import type { SlackSection } from "../config.js";
 import { redactText } from "../redact.js";
 import { FormData } from "undici";
 import { Blob } from "node:buffer";
+import { fetchWithProxy } from "../httpClient.js";
 
 export function verifySlackSignature(opts: {
   signingSecret: string;
@@ -110,7 +111,7 @@ export class SlackClient {
     if (opts.initial_comment) form.set("initial_comment", redactText(opts.initial_comment));
     const blob = new Blob([opts.file], { type: opts.mimeType ?? "application/octet-stream" });
     form.set("file", blob, opts.filename);
-    const res = await fetch("https://slack.com/api/files.upload", {
+    const res = await fetchWithProxy("https://slack.com/api/files.upload", {
       method: "POST",
       headers: { authorization: `Bearer ${this.config.bot_token}` },
       body: form,
@@ -124,7 +125,7 @@ export class SlackClient {
   }
 
   private async api<T>(method: string, body: unknown): Promise<T> {
-    const res = await fetch(`https://slack.com/api/${method}`, {
+    const res = await fetchWithProxy(`https://slack.com/api/${method}`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${this.config.bot_token}`,
