@@ -1,10 +1,10 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import process from "node:process";
 import type { AppConfig } from "./config.js";
-import type { Db, SessionStatus } from "./db.js";
+import type { Db, SessionAgent, SessionStatus } from "./db.js";
 import type { Logger } from "./log.js";
-import type { SpawnedCodexProcess } from "./codex.js";
-import { ensureSessionsRootExists, findSessionJsonlFiles, resolveCodexHomeFromSessionsRoot, resolveSessionsRoot, spawnCodexExec, spawnCodexResume } from "./codex.js";
+import type { SpawnedAgentProcess } from "./agents.js";
+import { getAgentAdapter } from "./agents.js";
 import type { SendToSessionFn } from "./messaging.js";
 import { redactText } from "./redact.js";
 import { nowMs, sleep } from "./util.js";
@@ -25,7 +25,8 @@ interface RunningProcess {
   child: ChildProcessWithoutNullStreams;
   timeout: ReturnType<typeof setTimeout>;
   kind: "exec" | "resume";
-  codex: SpawnedCodexProcess["debug"];
+  agent: SessionAgent;
+  debug: SpawnedAgentProcess["debug"];
 }
 
 export class SessionManager {
@@ -94,6 +95,7 @@ export class SessionManager {
     projectId: string;
     projectPathResolved: string;
     initialPrompt: string;
+    agent: SessionAgent;
   }): Promise<string> {
     await this.assertCanStartNewSession({ platform: opts.platform, chatId: opts.chatId });
 
@@ -101,6 +103,7 @@ export class SessionManager {
     const now = nowMs();
     const session: SessionRow = {
       id,
+      agent: opts.agent,
       platform: opts.platform,
       workspace_id: opts.workspaceId,
       chat_id: opts.chatId,
@@ -123,49 +126,62 @@ export class SessionManager {
 
     await createSession(this.db, session);
 
-    let spawned: SpawnedCodexProcess | null = null;
+    let childToKill: ChildProcessWithoutNullStreams | null = null;
     try {
-      const sessionsRoot = resolveSessionsRoot(session.codex_cwd, this.config.codex.sessions_dir);
-      const codexHome = resolveCodexHomeFromSessionsRoot(sessionsRoot);
-      await ensureSessionsRootExists(sessionsRoot);
+      const adapter = getAgentAdapter(opts.agent);
+      adapter.requireConfig(this.config);
+
+      const sessionsRoot = adapter.resolveSessionsRoot(session.codex_cwd, this.config);
+      const homeDir = adapter.resolveHomeDir(sessionsRoot);
+      await adapter.ensureSessionsRootExists(sessionsRoot);
 
       this.logger.debug(
-        `[session] spawn codex kind=exec session=${id} project=${opts.projectId} cwd=${session.codex_cwd} sessionsRoot=${sessionsRoot} codexHome=${codexHome}`,
+        `[session] spawn agent=${opts.agent} kind=exec session=${id} project=${opts.projectId} cwd=${session.codex_cwd} sessionsRoot=${sessionsRoot} home=${homeDir}`,
       );
-      const extraArgs = await this.playwrightCodexArgs();
-      spawned = spawnCodexExec({
+      const extraArgs = await this.playwrightCliArgs(opts.agent);
+      const spawnedProc = adapter.spawnExec({
         config: this.config,
         logger: this.logger,
         cwd: session.codex_cwd,
         prompt: opts.initialPrompt,
-        extraEnv: { CODEX_HOME: codexHome },
+        homeDir,
         extraArgs: extraArgs ?? undefined,
       });
+      childToKill = spawnedProc.child;
 
-      await updateSession(this.db, id, { pid: spawned.child.pid ?? null, started_at: nowMs(), status: "starting" });
+      await updateSession(this.db, id, { pid: spawnedProc.child.pid ?? null, started_at: nowMs(), status: "starting" });
 
       const timeout = setTimeout(() => {
         void this.killSession(id, "timed out, terminating…");
-      }, this.config.codex.timeout_seconds * 1000);
+      }, adapter.timeoutSeconds(this.config) * 1000);
 
-      this.processes.set(id, { child: spawned.child, timeout, kind: "exec", codex: spawned.debug });
+      this.processes.set(id, {
+        child: spawnedProc.child,
+        timeout,
+        kind: "exec",
+        agent: opts.agent,
+        debug: spawnedProc.debug,
+      });
 
-      void this.finalizeNewSession(id, spawned.threadId, sessionsRoot).catch(async (e) => {
+      void this.finalizeNewSession(id, spawnedProc.agentSessionId, {
+        agent: opts.agent,
+        cwd: session.codex_cwd,
+        sessionsRoot,
+        homeDir,
+      }).catch(async (e) => {
         this.logger.error("session start error", e);
         await updateSession(this.db, id, { status: "error", finished_at: nowMs() });
         await this.sendToSession(id, { text: `Session error: ${String(e)}`, priority: "user" });
       });
 
-      spawned.child.on("exit", (code, signal) => {
+      spawnedProc.child.on("exit", (code, signal) => {
         void this.handleExit(id, code, signal);
       });
 
       return id;
     } catch (e) {
       try {
-        if (spawned?.child && !spawned.child.killed) {
-          spawned.child.kill("SIGTERM");
-        }
+        if (childToKill && !childToKill.killed) childToKill.kill("SIGTERM");
       } catch {
         // ignore
       }
@@ -184,16 +200,21 @@ export class SessionManager {
 
     await updateSession(this.db, session.id, { status: "starting", exit_code: null, finished_at: null });
 
-    const sessionsRoot = resolveSessionsRoot(session.codex_cwd, this.config.codex.sessions_dir);
-    const codexHome = resolveCodexHomeFromSessionsRoot(sessionsRoot);
-    await ensureSessionsRootExists(sessionsRoot);
+    const adapter = getAgentAdapter(session.agent);
+    adapter.requireConfig(this.config);
+
+    const sessionsRoot = adapter.resolveSessionsRoot(session.codex_cwd, this.config);
+    const homeDir = adapter.resolveHomeDir(sessionsRoot);
+    await adapter.ensureSessionsRootExists(sessionsRoot);
 
     // Ensure offsets exist.
     const existingOffsets = await listSessionOffsets(this.db, session.id);
     if (existingOffsets.length === 0) {
-      const files = await findSessionJsonlFiles({
+      const files = await adapter.findSessionJsonlFiles({
         sessionsRoot,
-        codexSessionId: session.codex_session_id,
+        homeDir,
+        cwd: session.codex_cwd,
+        sessionId: session.codex_session_id,
         timeoutMs: 10_000,
         pollMs: 200,
       });
@@ -208,21 +229,27 @@ export class SessionManager {
       }
     }
 
-    const spawned = spawnCodexResume({
+    const spawned = adapter.spawnResume({
       config: this.config,
       logger: this.logger,
       cwd: session.codex_cwd,
       sessionId: session.codex_session_id,
       prompt,
-      extraEnv: { CODEX_HOME: codexHome },
-      extraArgs: await this.playwrightCodexArgs() ?? undefined,
+      homeDir,
+      extraArgs: (await this.playwrightCliArgs(session.agent)) ?? undefined,
     });
-    void spawned.threadId.catch(() => {});
+    void spawned.agentSessionId.catch(() => {});
 
     const timeout = setTimeout(() => {
       void this.killSession(session.id, "timed out, terminating…");
-    }, this.config.codex.timeout_seconds * 1000);
-    this.processes.set(session.id, { child: spawned.child, timeout, kind: "resume", codex: spawned.debug });
+    }, adapter.timeoutSeconds(this.config) * 1000);
+    this.processes.set(session.id, {
+      child: spawned.child,
+      timeout,
+      kind: "resume",
+      agent: session.agent,
+      debug: spawned.debug,
+    });
 
     await updateSession(this.db, session.id, { pid: spawned.child.pid ?? null, status: "running" });
 
@@ -264,18 +291,25 @@ export class SessionManager {
     return cleaned;
   }
 
-  private async finalizeNewSession(sessionId: string, threadIdPromise: Promise<string>, sessionsRoot: string) {
-    const threadId = await threadIdPromise;
-    await updateSession(this.db, sessionId, { codex_session_id: threadId, status: "running" });
+  private async finalizeNewSession(
+    sessionId: string,
+    agentSessionIdPromise: Promise<string>,
+    opts: { agent: SessionAgent; cwd: string; sessionsRoot: string; homeDir: string },
+  ) {
+    const agentSessionId = await agentSessionIdPromise;
+    await updateSession(this.db, sessionId, { codex_session_id: agentSessionId, status: "running" });
 
-    const files = await findSessionJsonlFiles({
-      sessionsRoot,
-      codexSessionId: threadId,
+    const adapter = getAgentAdapter(opts.agent);
+    const files = await adapter.findSessionJsonlFiles({
+      sessionsRoot: opts.sessionsRoot,
+      homeDir: opts.homeDir,
+      cwd: opts.cwd,
+      sessionId: agentSessionId,
       timeoutMs: 10_000,
       pollMs: 200,
     });
     if (files.length === 0) {
-      await this.sendToSession(sessionId, { text: "Warning: could not locate Codex JSONL logs for streaming yet.", priority: "user" });
+      await this.sendToSession(sessionId, { text: "Warning: could not locate session JSONL logs for streaming yet.", priority: "user" });
       return;
     }
     for (const f of files) {
@@ -303,7 +337,8 @@ export class SessionManager {
     const proc = this.processes.get(sessionId);
     const procKind = proc?.kind ?? "?";
     const procPid = proc?.child.pid ?? null;
-    const codex = proc?.codex ?? null;
+    const agent = proc?.agent ?? null;
+    const debug = proc?.debug ?? null;
     if (proc) {
       clearTimeout(proc.timeout);
       this.processes.delete(sessionId);
@@ -312,7 +347,7 @@ export class SessionManager {
     this.logger.debug(
       `[session] exit session=${sessionId} kind=${procKind} pid=${String(procPid ?? "-")} code=${String(
         code ?? "-",
-      )} signal=${String(signal ?? "-")}`,
+      )} signal=${String(signal ?? "-")} agent=${String(agent ?? "-")}`,
     );
 
     // Drain JSONL one last time before closing out.
@@ -330,21 +365,22 @@ export class SessionManager {
       pid: null,
     });
 
-    if (status === "error" && codex) {
-      const stderrTail = redactText(codex.stderrTail()).trim();
-      const stdoutTail = redactText(codex.stdoutTail()).trim();
+    if (status === "error" && debug) {
+      const stderrTail = redactText(debug.stderrTail()).trim();
+      const stdoutTail = redactText(debug.stdoutTail()).trim();
 
       const maxLogChars = 3000;
       const stderrLog = stderrTail.length > maxLogChars ? `${stderrTail.slice(0, maxLogChars)}…` : stderrTail;
       const stdoutLog = stdoutTail.length > maxLogChars ? `${stdoutTail.slice(0, maxLogChars)}…` : stdoutTail;
 
       this.logger.warn(
-        `[session] codex exited nonzero session=${sessionId} kind=${procKind} pid=${String(procPid ?? "-")} code=${String(
-          code ?? "-",
-        )}`,
+        `[session] agent exited nonzero session=${sessionId} agent=${String(agent ?? "-")} kind=${procKind} pid=${String(
+          procPid ?? "-",
+        )} code=${String(code ?? "-")}`,
       );
-      if (stderrLog) this.logger.warn(`[session] codex stderr tail:\n${stderrLog}`);
-      else if (stdoutLog) this.logger.warn(`[session] codex stdout tail:\n${stdoutLog}`);
+      const agentLabel = String(agent ?? "agent");
+      if (stderrLog) this.logger.warn(`[session] ${agentLabel} stderr tail:\n${stderrLog}`);
+      else if (stdoutLog) this.logger.warn(`[session] ${agentLabel} stdout tail:\n${stdoutLog}`);
     }
 
     // If users queued messages while we were running, resume one-by-one.
@@ -365,13 +401,13 @@ export class SessionManager {
     else if (status === "finished") {
       // Keep the chat quiet on successful completion.
     } else {
-      if (this.config.bot.log_level === "debug" && codex) {
-        const tail = redactText(codex.stderrTail()).trim();
+      if (this.config.bot.log_level === "debug" && debug) {
+        const tail = redactText(debug.stderrTail()).trim();
         if (tail) {
           const maxChars = 1500;
           const snippet = tail.length > maxChars ? `${tail.slice(0, maxChars)}…` : tail;
           await this.sendToSession(sessionId, {
-            text: `Session exited with code ${code ?? "?"}.\n\ncodex stderr (tail):\n${snippet}`,
+            text: `Session exited with code ${code ?? "?"}.\n\n${String(agent ?? "agent")} stderr (tail):\n${snippet}`,
             priority: "user",
           });
         } else {
@@ -386,18 +422,12 @@ export class SessionManager {
     await this.sendToSession(sessionId, { text: "", final: true, priority: "user" });
   }
 
-  private async playwrightCodexArgs(): Promise<string[] | null> {
+  private async playwrightCliArgs(agent: SessionAgent): Promise<string[] | null> {
     if (!this.playwrightMcp || !this.config.playwright_mcp?.enabled) return null;
     const server = await this.playwrightMcp.ensureServer();
     const startupSec = Math.ceil(this.config.playwright_mcp.timeout_ms / 1000);
-    return [
-      "--config",
-      `mcp_servers.playwright.url="${server.url}"`,
-      "--config",
-      `mcp_servers.playwright.enabled=true`,
-      "--config",
-      `mcp_servers.playwright.startup_timeout_sec=${startupSec}`,
-    ];
+    const adapter = getAgentAdapter(agent);
+    return adapter.buildPlaywrightCliArgs({ server, playwrightStartupTimeoutSec: startupSec });
   }
 }
 

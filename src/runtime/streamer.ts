@@ -1,8 +1,9 @@
 import { open } from "node:fs/promises";
 import type { AppConfig } from "./config.js";
 import type { Db } from "./db.js";
+import type { SessionAgent } from "./db.js";
 import type { Logger } from "./log.js";
-import { findSessionJsonlFiles, resolveSessionsRoot } from "./codex.js";
+import { getAgentAdapter } from "./agents.js";
 import type { SendToSessionFn } from "./messaging.js";
 import { redactText } from "./redact.js";
 import { nowMs, sleep } from "./util.js";
@@ -60,6 +61,7 @@ export class JsonlStreamer {
 
   async drainSession(sessionId: string) {
     await this.pollOnce([sessionId]);
+    await this.maybeSendPendingPlaywrightScreenshot(sessionId);
     await this.flushIfNeeded(sessionId, true);
   }
 
@@ -70,8 +72,20 @@ export class JsonlStreamer {
       } catch (e) {
         this.logger.error("streamer loop error", e);
       }
-      await sleep(this.config.codex.poll_interval_ms);
+      await sleep(this.pollIntervalMs());
     }
+  }
+
+  private pollIntervalMs(): number {
+    const intervals: number[] = [];
+    for (const agent of ["codex", "claude_code"] as const) {
+      const adapter = getAgentAdapter(agent);
+      if (!adapter.isConfigured(this.config)) continue;
+      const n = adapter.pollIntervalMs(this.config);
+      if (typeof n === "number" && Number.isFinite(n) && n > 0) intervals.push(n);
+    }
+    if (intervals.length > 0) return Math.min(...intervals);
+    return this.config.codex.poll_interval_ms;
   }
 
   private async pollOnce(onlySessionIds?: string[]) {
@@ -82,19 +96,31 @@ export class JsonlStreamer {
       runningSessionIds.add(session.id);
       this.noteUserActivity(session.id, session.last_user_message_at, session.created_at);
       if (!session.codex_session_id) continue;
+      const adapter = getAgentAdapter(session.agent);
+      let agentConfig: { max_catchup_lines: number } | null = null;
+      try {
+        agentConfig = adapter.requireConfig(this.config) as { max_catchup_lines: number };
+      } catch (e) {
+        this.logger.warn(`[streamer] agent not configured, skipping session=${session.id} agent=${session.agent}: ${String(e)}`);
+        continue;
+      }
+
+      const sessionsRoot = adapter.resolveSessionsRoot(session.codex_cwd, this.config);
+      const homeDir = adapter.resolveHomeDir(sessionsRoot);
 
       const offsets = await listSessionOffsets(this.db, session.id);
       if (offsets.length === 0) {
-        const sessionsRoot = resolveSessionsRoot(session.codex_cwd, this.config.codex.sessions_dir);
-        const files = await findSessionJsonlFiles({
+        const files = await adapter.findSessionJsonlFiles({
           sessionsRoot,
-          codexSessionId: session.codex_session_id,
+          homeDir,
+          cwd: session.codex_cwd,
+          sessionId: session.codex_session_id,
           timeoutMs: 1,
           pollMs: 1,
         });
         if (files.length === 0) continue;
         for (const f of files) {
-          const initialOffset = await computeCatchupOffsetBytes(f, this.config.codex.max_catchup_lines).catch(() => 0);
+          const initialOffset = await computeCatchupOffsetBytes(f, agentConfig.max_catchup_lines).catch(() => 0);
           await upsertSessionOffset(this.db, {
             id: crypto.randomUUID(),
             session_id: session.id,
@@ -129,11 +155,7 @@ export class JsonlStreamer {
           if (!trimmed) continue;
           try {
             const obj = JSON.parse(trimmed) as unknown;
-
-            const objType = (obj as { type?: unknown }).type;
-            if (objType === "mcp_tool_call_end" || objType === "response_item") {
-              void this.maybeCapturePlaywrightScreenshot(session.id, obj as Record<string, unknown>);
-            }
+            void this.maybeCapturePlaywrightScreenshot(session.id, obj as Record<string, unknown>);
 
             const planFragment = this.parsePlanUpdate(obj, session.id);
             if (planFragment) {
@@ -143,8 +165,9 @@ export class JsonlStreamer {
 
             if (this.shouldSuppressPlanOutput(obj, session.id)) continue;
 
+            const mapper = EVENT_MAPPERS[session.agent];
             fragments.push(
-              ...mapCodexEventToFragments(obj, {
+              ...mapper(obj, {
                 includeUserMessages: session.platform !== "telegram",
                 verbosity: this.config.bot.message_verbosity,
               }),
@@ -221,6 +244,73 @@ export class JsonlStreamer {
     if (!this.playwrightMcp || !this.config.playwright_mcp?.enabled) return;
     const turnKey = this.currentTurnKey(sessionId);
     const type = (obj as { type?: unknown }).type;
+
+    // Claude Code JSONL stream: tool calls and results are embedded in message.content blocks.
+    if (type === "assistant" || type === "user") {
+      const message = (obj as { message?: unknown }).message;
+      if (!message || typeof message !== "object") return;
+      const content = (message as { content?: unknown }).content;
+      if (!Array.isArray(content)) return;
+
+      for (const block of content) {
+        if (!block || typeof block !== "object") continue;
+        const blockType = stringOrEmpty((block as { type?: unknown }).type);
+
+        if (type === "assistant" && blockType === "tool_use") {
+          const name = stringOrEmpty((block as { name?: unknown }).name);
+          const parsed = parseMcpFunctionName(name);
+          if (!parsed || parsed.server.toLowerCase() !== "playwright") continue;
+          const callId = stringOrEmpty((block as { id?: unknown }).id);
+          if (!callId) continue;
+          this.rememberPlaywrightCall(sessionId, callId, parsed.tool);
+          if (parsed.tool === "browser_close") {
+            await this.maybeSendPendingPlaywrightScreenshot(sessionId);
+          }
+          continue;
+        }
+
+        if (type === "user" && blockType === "tool_result") {
+          const callId = stringOrEmpty((block as { tool_use_id?: unknown }).tool_use_id);
+          if (!callId) continue;
+          if (this.hasCapturedPlaywrightCall(sessionId, callId)) continue;
+
+          const tool = this.consumePlaywrightCall(sessionId, callId);
+          if (!tool) continue;
+
+          if (turnKey !== null && this.playwrightScreenshotSentTurn.get(sessionId) === turnKey) {
+            this.markCapturedPlaywrightCall(sessionId, callId);
+            continue;
+          }
+
+          if (tool === "browser_close") {
+            await this.maybeSendPendingPlaywrightScreenshot(sessionId);
+            this.markCapturedPlaywrightCall(sessionId, callId);
+            continue;
+          }
+
+          if (tool === "browser_take_screenshot" && turnKey !== null) {
+            const extracted = extractPlaywrightInlineScreenshotFromClaudeToolResult((block as { content?: unknown }).content);
+            if (extracted) {
+              const ok = await this.sendPlaywrightScreenshotFromToolOutput(sessionId, turnKey, extracted);
+              if (ok) {
+                this.markCapturedPlaywrightCall(sessionId, callId);
+                continue;
+              }
+            }
+            this.markPlaywrightPendingScreenshot(sessionId, turnKey);
+            this.markCapturedPlaywrightCall(sessionId, callId);
+            continue;
+          }
+
+          // Any other Playwright tool call: mark a screenshot for this turn.
+          this.markPlaywrightPendingScreenshot(sessionId, turnKey);
+          this.markCapturedPlaywrightCall(sessionId, callId);
+        }
+      }
+
+      return;
+    }
+
     if (type === "response_item") {
       const payload = (obj as { payload?: unknown }).payload;
       if (!payload || typeof payload !== "object") return;
@@ -749,6 +839,150 @@ function mapCodexEventToFragments(
 
   return [];
 }
+
+function mapClaudeEventToFragments(
+  obj: unknown,
+  opts?: { includeUserMessages?: boolean; verbosity?: MessageVerbosity },
+): StreamFragment[] {
+  if (!obj || typeof obj !== "object") return [];
+  const verbosity = normalizeMessageVerbosity(opts?.verbosity);
+  const includeUserMessages = opts?.includeUserMessages !== false;
+  const includeEvents = verbosity >= 2;
+  const includeTools = verbosity >= 3;
+
+  const type = stringOrEmpty((obj as { type?: unknown }).type);
+
+  if (type === "result") {
+    // Non-interactive print mode emits a final result event; treat this as flush boundary.
+    // Keep chat quiet on success unless verbosity requests events.
+    const subtype = stringOrEmpty((obj as { subtype?: unknown }).subtype);
+    const isError = Boolean((obj as { is_error?: unknown }).is_error);
+    const msg =
+      includeEvents && (isError || (subtype && subtype !== "success"))
+        ? formatTitledText("Result", `${subtype || "unknown"}${isError ? " (error)" : ""}`.trim())
+        : null;
+    const prefix = msg ? [{ kind: "text" as const, text: msg }] : [];
+    return [...prefix, { kind: "final" }];
+  }
+
+  if (type === "assistant" || type === "user") {
+    const message = (obj as { message?: unknown }).message;
+    if (!message || typeof message !== "object") return [];
+    const content = (message as { content?: unknown }).content;
+
+    const fragments: StreamFragment[] = [];
+
+    const pushText = (text: string, continuous = false) => {
+      const t = text.trimEnd();
+      if (!t) return;
+      fragments.push({ kind: "text", text: t, continuous });
+    };
+
+    if (typeof content === "string") {
+      if (type === "user") {
+        if (includeUserMessages) pushText(`User: ${content}`);
+      } else {
+        pushText(content);
+      }
+      return fragments;
+    }
+
+    if (!Array.isArray(content)) return fragments;
+
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue;
+      const blockType = stringOrEmpty((block as { type?: unknown }).type);
+
+      if (blockType === "text" && typeof (block as { text?: unknown }).text === "string") {
+        if (type === "user" && !includeUserMessages) continue;
+        pushText((block as { text: string }).text);
+        continue;
+      }
+
+      if (blockType === "tool_use") {
+        if (!includeTools) continue;
+        const name = stringOrEmpty((block as { name?: unknown }).name);
+        const input = (block as { input?: unknown }).input;
+        const formatted = formatClaudeToolUse(name, input);
+        if (formatted) fragments.push({ kind: "tool_call", text: formatted });
+        continue;
+      }
+
+      if (blockType === "tool_result") {
+        if (!includeTools) continue;
+        const output = formatClaudeToolResult(block as Record<string, unknown>);
+        if (output) fragments.push({ kind: "tool_output", text: output });
+        continue;
+      }
+    }
+
+    return fragments;
+  }
+
+  if (type === "system") {
+    if (!includeEvents) return [];
+    const subtype = stringOrEmpty((obj as { subtype?: unknown }).subtype);
+    const text = subtype ? formatTitledText("System", subtype) : null;
+    return text ? [{ kind: "text", text }] : [];
+  }
+
+  if (type === "tool_progress") {
+    if (!includeEvents) return [];
+    const tool = stringOrEmpty((obj as { tool_name?: unknown }).tool_name);
+    const elapsed = numberOrNull((obj as { elapsed_time_seconds?: unknown }).elapsed_time_seconds);
+    const suffix = tool ? `${tool}${elapsed !== null ? ` (${elapsed}s)` : ""}` : "tool";
+    return [{ kind: "text", text: formatTitledText("Tool progress", suffix) }];
+  }
+
+  return [];
+}
+
+function formatClaudeToolUse(name: string, input: unknown): string | null {
+  if (!name) return null;
+
+  if (name === "Bash") {
+    const cmd =
+      input && typeof input === "object" ? ((input as { command?: unknown }).command as unknown) : undefined;
+    if (typeof cmd === "string" && cmd.trim().length > 0) return `$ ${cmd.trim()}`;
+    return "Tool: Bash";
+  }
+
+  const parsed = parseMcpFunctionName(name);
+  if (parsed) return `MCP: ${parsed.server}.${parsed.tool}`;
+  return `Tool: ${name}`;
+}
+
+function formatClaudeToolResult(block: Record<string, unknown>): string | null {
+  const content = block.content;
+  if (typeof content === "string") return content;
+
+  if (Array.isArray(content)) {
+    const out: string[] = [];
+    for (const item of content) {
+      if (!item || typeof item !== "object") continue;
+      const t = stringOrEmpty((item as { type?: unknown }).type);
+      if (t === "text" && typeof (item as { text?: unknown }).text === "string") {
+        const text = (item as { text: string }).text.trimEnd();
+        if (text) out.push(text);
+        continue;
+      }
+      out.push(truncateJson(item, 200));
+    }
+    const joined = out.join("\n").trim();
+    return joined.length > 0 ? joined : null;
+  }
+
+  if (content && typeof content === "object") return truncateJson(content, 800);
+  return null;
+}
+
+const EVENT_MAPPERS: Record<
+  SessionAgent,
+  (obj: unknown, opts?: { includeUserMessages?: boolean; verbosity?: MessageVerbosity }) => StreamFragment[]
+> = {
+  codex: mapCodexEventToFragments,
+  claude_code: mapClaudeEventToFragments,
+};
 
 function extractTitleFromPayload(
   payload: Record<string, unknown>,
@@ -1285,6 +1519,63 @@ function extractPlaywrightInlineScreenshotFromMcpResult(
         mimeType = (item as { mimeType: string }).mimeType;
       } catch {
         // ignore
+      }
+    }
+  }
+
+  if (!file || !mimeType) return null;
+  const filename = savedPath ? path.basename(savedPath) : `playwright-${crypto.randomUUID()}.png`;
+  return { file, mimeType, filename, savedPath: savedPath ?? undefined };
+}
+
+function extractPlaywrightInlineScreenshotFromClaudeToolResult(
+  content: unknown,
+): { file: Buffer; mimeType: string; filename: string; savedPath?: string } | null {
+  if (!Array.isArray(content)) return null;
+
+  let mimeType: string | null = null;
+  let file: Buffer | null = null;
+  let savedPath: string | null = null;
+
+  for (const item of content) {
+    if (!item || typeof item !== "object") continue;
+    const type = stringOrEmpty((item as { type?: unknown }).type);
+
+    if (type === "text" && typeof (item as { text?: unknown }).text === "string") {
+      const text = (item as { text: string }).text;
+      const linked = extractFirstMarkdownLinkPath(text);
+      if (linked) savedPath = linked;
+      const saved = extractSavedPathFromText(text);
+      if (saved) savedPath = saved;
+      continue;
+    }
+
+    if (type === "image") {
+      // MCP-style: { type: "image", data: "<base64>", mimeType: "image/png" }
+      if (typeof (item as { data?: unknown }).data === "string" && typeof (item as { mimeType?: unknown }).mimeType === "string") {
+        try {
+          file = Buffer.from((item as { data: string }).data, "base64");
+          mimeType = (item as { mimeType: string }).mimeType;
+        } catch {
+          // ignore
+        }
+        continue;
+      }
+
+      // Anthropic-style: { type: "image", source: { type: "base64", media_type: "image/png", data: "<base64>" } }
+      const source = (item as { source?: unknown }).source;
+      if (source && typeof source === "object") {
+        const st = stringOrEmpty((source as { type?: unknown }).type);
+        const mediaType = stringOrEmpty((source as { media_type?: unknown }).media_type);
+        const data = (source as { data?: unknown }).data;
+        if (st === "base64" && mediaType && typeof data === "string") {
+          try {
+            file = Buffer.from(data, "base64");
+            mimeType = mediaType;
+          } catch {
+            // ignore
+          }
+        }
       }
     }
   }

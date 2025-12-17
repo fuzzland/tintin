@@ -1,8 +1,9 @@
-import type { Db, SessionStatus, WizardState } from "./db.js";
+import type { Db, SessionAgent, SessionStatus, WizardState } from "./db.js";
 import { nowMs } from "./util.js";
 
 export interface WizardStateRow {
   id: string;
+  agent: SessionAgent;
   platform: string;
   chat_id: string;
   user_id: string;
@@ -59,6 +60,7 @@ export async function clearWizardState(db: Db, platform: string, chatId: string,
 
 export interface SessionRow {
   id: string;
+  agent: SessionAgent;
   platform: string;
   workspace_id: string | null;
   chat_id: string;

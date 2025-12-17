@@ -34,6 +34,7 @@ data
 config.toml
 config2.toml
 .codex
+.claude
 
 # IntelliJ based IDEs
 .idea

@@ -46,6 +46,8 @@ export interface CodexSection {
   skip_git_repo_check: boolean;
 }
 
+export type ClaudeCodeSection = CodexSection;
+
 export interface ProjectEntry {
   id: string;
   name: string;
@@ -104,6 +106,7 @@ export interface AppConfig {
   db: DbSection;
   security: SecuritySection;
   codex: CodexSection;
+  claude_code?: ClaudeCodeSection | null;
   projects: ProjectEntry[];
   telegram?: TelegramSection;
   slack?: SlackSection;
@@ -265,6 +268,31 @@ function normalizePlaywrightMcpSection(
   };
 }
 
+function normalizeCodexSection(value: unknown, defaults: { binary: string; sessionsDir: string; env: Record<string, string> }): CodexSection {
+  assert(isRecord(value), "section must be a table");
+
+  const envRaw = (isRecord((value as any).env) ? (value as any).env : {}) as Record<string, unknown>;
+  const env: Record<string, string> = { ...defaults.env };
+  for (const [k, v] of Object.entries(envRaw)) {
+    if (typeof v === "string") env[k] = v;
+  }
+
+  return {
+    binary: typeof (value as any).binary === "string" ? (value as any).binary : defaults.binary,
+    sessions_dir: typeof (value as any).sessions_dir === "string" ? (value as any).sessions_dir : defaults.sessionsDir,
+    poll_interval_ms: typeof (value as any).poll_interval_ms === "number" ? (value as any).poll_interval_ms : 500,
+    max_catchup_lines: typeof (value as any).max_catchup_lines === "number" ? (value as any).max_catchup_lines : 2000,
+    timeout_seconds: typeof (value as any).timeout_seconds === "number" ? (value as any).timeout_seconds : 3600,
+    env,
+    full_auto: typeof (value as any).full_auto === "boolean" ? (value as any).full_auto : true,
+    dangerously_bypass_approvals_and_sandbox:
+      typeof (value as any).dangerously_bypass_approvals_and_sandbox === "boolean"
+        ? (value as any).dangerously_bypass_approvals_and_sandbox
+        : true,
+    skip_git_repo_check: typeof (value as any).skip_git_repo_check === "boolean" ? (value as any).skip_git_repo_check : true,
+  };
+}
+
 export async function loadConfig(configPath: string): Promise<AppConfig> {
   const absPath = path.resolve(configPath);
   const configDir = path.dirname(absPath);
@@ -278,6 +306,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
   const db = resolved.db;
   const security = resolved.security;
   const codex = resolved.codex;
+  const claudeCode = (resolved as any).claude_code as unknown;
   const projects = resolved.projects;
 
   assert(isRecord(bot), "[bot] section is required");
@@ -336,29 +365,26 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     assert(securitySection.allow_roots.length > 0, "[security].allow_roots must be non-empty when restrict_paths=true");
   }
 
-  const codexEnv = (isRecord(codex.env) ? codex.env : {}) as Record<string, unknown>;
-  const codexEnvStr: Record<string, string> = {};
-  for (const [k, v] of Object.entries(codexEnv)) {
-    if (typeof v === "string") codexEnvStr[k] = v;
-  }
-
-  const codexSection: CodexSection = {
-    binary: typeof codex.binary === "string" ? codex.binary : "codex",
-    sessions_dir: typeof codex.sessions_dir === "string" ? codex.sessions_dir : ".codex/sessions",
-    poll_interval_ms: typeof codex.poll_interval_ms === "number" ? codex.poll_interval_ms : 500,
-    max_catchup_lines: typeof codex.max_catchup_lines === "number" ? codex.max_catchup_lines : 2000,
-    timeout_seconds: typeof codex.timeout_seconds === "number" ? codex.timeout_seconds : 3600,
-    env: codexEnvStr,
-    full_auto: typeof codex.full_auto === "boolean" ? codex.full_auto : true,
-    dangerously_bypass_approvals_and_sandbox:
-      typeof codex.dangerously_bypass_approvals_and_sandbox === "boolean"
-        ? codex.dangerously_bypass_approvals_and_sandbox
-        : true,
-    skip_git_repo_check: typeof codex.skip_git_repo_check === "boolean" ? codex.skip_git_repo_check : true,
-  };
+  const codexSection = normalizeCodexSection(codex, {
+    binary: "codex",
+    sessionsDir: ".codex/sessions",
+    env: {},
+  });
 
   assert(codexSection.poll_interval_ms >= 100, "[codex].poll_interval_ms must be >= 100");
   assert(codexSection.timeout_seconds >= 10, "[codex].timeout_seconds must be >= 10");
+
+  let claudeCodeSection: ClaudeCodeSection | null = null;
+  if (claudeCode !== undefined) {
+    if (!isRecord(claudeCode)) throw new Error("[claude_code] must be a table");
+    claudeCodeSection = normalizeCodexSection(claudeCode, {
+      binary: "claude",
+      sessionsDir: ".claude/sessions",
+      env: {},
+    });
+    assert(claudeCodeSection.poll_interval_ms >= 100, "[claude_code].poll_interval_ms must be >= 100");
+    assert(claudeCodeSection.timeout_seconds >= 10, "[claude_code].timeout_seconds must be >= 10");
+  }
 
   const projectEntries: ProjectEntry[] = projects.map((p, idx) => {
     assert(isRecord(p), `projects[${idx}] must be a table`);
@@ -460,6 +486,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     db: dbSection,
     security: securitySection,
     codex: codexSection,
+    claude_code: claudeCodeSection,
     projects: projectEntries,
     telegram: telegramSection,
     slack: slackSection,

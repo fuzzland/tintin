@@ -8,9 +8,11 @@ import type { Logger } from "./log.js";
 import type { AppConfig } from "./config.js";
 
 export type SessionStatus = "wizard" | "starting" | "running" | "finished" | "error" | "killed";
+export type SessionAgent = "codex" | "claude_code";
 
 export interface SessionsTable {
   id: string;
+  agent: SessionAgent;
   platform: string;
   workspace_id: string | null;
   chat_id: string;
@@ -43,6 +45,7 @@ export type WizardState = "await_project" | "await_custom_path" | "await_initial
 
 export interface WizardStatesTable {
   id: string;
+  agent: SessionAgent;
   platform: string;
   chat_id: string;
   user_id: string;

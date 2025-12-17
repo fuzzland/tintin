@@ -1,5 +1,5 @@
 [bot]
-name = "codexbot"
+name = "tintin-bot"
 host = "0.0.0.0"
 port = 8787
 data_dir = "./data"
@@ -11,7 +11,7 @@ message_verbosity = 2
 
 [db]
 # sqlite (SQLAlchemy-style URL):
-url = "sqlite+aiosqlite:///./data/codexbot.db"
+url = "sqlite+aiosqlite:///./data/tintin-bot.db"
 echo = false
 
 [security]
@@ -36,6 +36,15 @@ max_catchup_lines = 2000
 timeout_seconds = 3600
 env = { "CODEX_TELEMETRY" = "0" }
 
+# Optional: enable Claude Code sessions via Telegram `/cc`
+[claude_code]
+binary = "claude"
+sessions_dir = ".claude/sessions"
+poll_interval_ms = 500
+max_catchup_lines = 2000
+timeout_seconds = 3600
+env = {}
+
 [[projects]]
 id = "api"
 name = "API Service"
@@ -50,7 +59,7 @@ path = "*"
 token = "<FILL ME TELEGRAM BOT TOKEN>"
 # Optional extra bots used only for sending to reduce rate limiting; first token above is still used for updates/webhooks.
 # additional_bot_tokens = ["env:TELEGRAM_TOKEN_2", "env:TELEGRAM_TOKEN_3"]
-mode = "poll" # webhook | poll
+mode = "poll"                    # webhook | poll
 poll_timeout_seconds = 30
 use_topics = true
 max_chars = 3500

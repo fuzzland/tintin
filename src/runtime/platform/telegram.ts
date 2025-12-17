@@ -408,7 +408,7 @@ export class TelegramClient {
 
   isMentionOrCommand(message: TelegramMessage): boolean {
     const text = message.text ?? "";
-    if (text.startsWith("/codex")) return true;
+    if (text.startsWith("/codex") || text.startsWith("/cc")) return true;
     const username = this.username;
     if (!username) return false;
     if (text.includes(`@${username}`)) return true;

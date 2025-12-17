@@ -1,9 +1,8 @@
 import type { AppConfig, ProjectEntry } from "./config.js";
-import type { Db } from "./db.js";
-import type { SessionStatus } from "./db.js";
+import type { Db, SessionAgent, SessionStatus } from "./db.js";
 import type { Logger } from "./log.js";
 import type { SessionManager } from "./sessionManager.js";
-import { generateCodexTitle } from "./codex.js";
+import { getAgentAdapter } from "./agents.js";
 import {
   TelegramClient,
   type TelegramCallbackQuery,
@@ -323,7 +322,7 @@ export class BotController {
         });
         return;
       }
-      const result = applySettingsCommand(this.config, settingsIntent);
+      const result = applySettingsCommand(this.config, settingsIntent.cmd, settingsIntent.defaultAgent);
       await this.telegram.sendMessage({
         chatId,
         messageThreadId: forumThreadId,
@@ -389,7 +388,8 @@ export class BotController {
             });
             return;
           }
-          const result = applySettingsCommand(this.config, parseSettingsArgs(rest.slice("settings".length)) ?? { kind: "list" });
+          const parsed = parseSettingsArgs(rest.slice("settings".length)) ?? { kind: "list" };
+          const result = applySettingsCommand(this.config, parsed, "codex");
           await this.telegram.sendMessage({
             chatId,
             messageThreadId: forumThreadId,
@@ -444,9 +444,23 @@ export class BotController {
 	          priority: "user",
 	        });
 	        return;
-	      }
+      }
       this.logger.debug(`[tg] starting wizard chat=${chatId} user=${userId}`);
-      await this.startTelegramWizard(chatId, userId, message.message_id, forumThreadId);
+      const agent = detectAgentFromTelegramMessageText(text);
+      try {
+        getAgentAdapter(agent).requireConfig(this.config);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        await this.telegram.sendMessage({
+          chatId,
+          messageThreadId: forumThreadId,
+          replyToMessageId: message.message_id,
+          text: `Error: ${redactText(msg)}`,
+          priority: "user",
+        });
+        return;
+      }
+      await this.startTelegramWizard(chatId, userId, message.message_id, forumThreadId, agent);
       return;
     }
 
@@ -499,10 +513,17 @@ export class BotController {
     return id;
   }
 
-  private async startTelegramWizard(chatId: string, userId: string, replyToMessageId: number, messageThreadId?: number) {
+  private async startTelegramWizard(
+    chatId: string,
+    userId: string,
+    replyToMessageId: number,
+    messageThreadId: number | undefined,
+    agent: SessionAgent,
+  ) {
     if (!this.telegram) return;
     await setWizardState(this.db, {
       id: crypto.randomUUID(),
+      agent,
       platform: "telegram",
       chat_id: chatId,
       user_id: userId,
@@ -513,7 +534,7 @@ export class BotController {
       updated_at: nowMs(),
     });
 
-    const menuText = buildMenuText("telegram");
+    const menuText = buildMenuText("telegram", agent);
     await this.telegram.sendMessage({
       chatId,
       text: menuText,
@@ -694,8 +715,12 @@ export class BotController {
       return;
     }
 
+    const existing = await getWizardState(this.db, "telegram", chatId, userId);
+    const agent: SessionAgent = existing?.agent ?? "codex";
+
     await setWizardState(this.db, {
       id: crypto.randomUUID(),
+      agent,
       platform: "telegram",
       chat_id: chatId,
       user_id: userId,
@@ -790,6 +815,7 @@ export class BotController {
         projectName: resolved.project_name,
         anchorMessageId: ctx.replyToMessageId,
         anchorMessageThreadId: ctx.messageThreadId,
+        agent: wizard.agent,
       });
 
       let sessionId: string;
@@ -804,6 +830,7 @@ export class BotController {
           projectId: resolved.project_id,
           projectPathResolved: resolved.project_path_resolved,
           initialPrompt: text,
+          agent: wizard.agent,
         });
       } catch (e) {
         await clearWizardState(this.db, "telegram", wizard.chat_id, wizard.user_id);
@@ -877,6 +904,7 @@ export class BotController {
           projectName: resolved.project_name,
           projectPathResolved: resolved.project_path_resolved,
           initialPrompt: text,
+          agent: wizard.agent,
         });
       }
     }
@@ -887,6 +915,7 @@ export class BotController {
     projectName: string;
     anchorMessageId: number;
     anchorMessageThreadId?: number;
+    agent: SessionAgent;
   }): Promise<{ spaceId: string; announce: boolean; topicId?: number; topicEmoji?: string; topicCustomEmojiId?: string }> {
     if (!this.telegram) throw new Error("Telegram not configured");
     const chatId = String(opts.chat.id);
@@ -907,7 +936,7 @@ export class BotController {
       const topicEmoji = picked.emoji;
       const topicCustomEmojiId = picked.customEmojiId;
       try {
-        const initialName = clipForumTopicName(`${topicEmoji} Codex: ${opts.projectName}`);
+        const initialName = clipForumTopicName(`${topicEmoji} ${agentShortName(opts.agent)}: ${opts.projectName}`);
         const topicId = await this.telegram.createForumTopic(chatId, initialName, topicCustomEmojiId);
         return { spaceId: String(topicId), announce: true, topicId, topicEmoji, topicCustomEmojiId };
       } catch (e) {
@@ -1011,6 +1040,7 @@ export class BotController {
     projectName: string;
     projectPathResolved: string;
     initialPrompt: string;
+    agent: SessionAgent;
   }) {
     if (!this.telegram) return;
     try {
@@ -1018,14 +1048,18 @@ export class BotController {
       const maxNameChars = 128;
       const maxTitleChars = Math.max(16, maxNameChars - emojiPrefix.length);
 
-      const title = await generateCodexTitle({
+      const adapter = getAgentAdapter(opts.agent);
+      adapter.requireConfig(this.config);
+      const sessionsRoot = adapter.resolveSessionsRoot(opts.projectPathResolved, this.config);
+      const homeDir = adapter.resolveHomeDir(sessionsRoot);
+      const title = await adapter.generateTitle({
         config: this.config,
         logger: this.logger,
         cwd: opts.projectPathResolved,
         projectName: opts.projectName,
         initialPrompt: opts.initialPrompt,
         maxTitleChars,
-        timeoutMs: 20_000,
+        homeDir,
       });
       if (!title) return;
 
@@ -1084,7 +1118,7 @@ export class BotController {
 
       const settingsIntent = parseSettingsIntentFromSlack(text);
       if (settingsIntent) {
-        const result = applySettingsCommand(this.config, settingsIntent);
+        const result = applySettingsCommand(this.config, settingsIntent.cmd, settingsIntent.defaultAgent);
         await this.slack.postEphemeral({
           channel: channelId,
           user: userId,
@@ -1168,6 +1202,7 @@ export class BotController {
     if (!this.slack) return;
     await setWizardState(this.db, {
       id: crypto.randomUUID(),
+      agent: "codex",
       platform: "slack",
       chat_id: channelId,
       user_id: userId,
@@ -1183,7 +1218,7 @@ export class BotController {
       value: p.id,
     }));
 
-    const menuText = buildMenuText("slack");
+    const menuText = buildMenuText("slack", "codex");
     const commandExamples = buildCommandExamples("slack");
 
     await this.slack.postEphemeral({
@@ -1357,6 +1392,7 @@ export class BotController {
 
     await setWizardState(this.db, {
       id: crypto.randomUUID(),
+      agent: "codex",
       platform: "slack",
       chat_id: channelId,
       user_id: userId,
@@ -1443,6 +1479,7 @@ export class BotController {
       projectId: resolved.project_id,
       projectPathResolved: resolved.project_path_resolved,
       initialPrompt: prompt,
+      agent: "codex",
     });
   }
 
@@ -1522,11 +1559,13 @@ function parseListSessionsArgs(text: string): SessionListIntent {
   return { statuses, page: page ?? 1 };
 }
 
+const TELEGRAM_COMMAND_AGENT: Record<string, SessionAgent> = { codex: "codex", cc: "claude_code" };
+
 function parseListSessionsIntentFromTelegram(text: string): SessionListIntent | null {
   const cmd = parseTelegramCommand(text);
   if (!cmd) return null;
   if (cmd.command === "sessions") return parseListSessionsArgs(cmd.args);
-  if (cmd.command === "codex") {
+  if (cmd.command === "codex" || cmd.command === "cc") {
     const rest = cmd.args.trim();
     if (!rest.toLowerCase().startsWith("sessions")) return null;
     return parseListSessionsArgs(rest.slice("sessions".length).trim());
@@ -1559,21 +1598,30 @@ type SettingsCommand =
   | { kind: "set"; target: string; value: string }
   | { kind: "unset"; target: string };
 
-function parseSettingsIntentFromTelegram(text: string): SettingsCommand | null {
+type SettingsIntent = { cmd: SettingsCommand; defaultAgent: SessionAgent };
+
+function parseSettingsIntentFromTelegram(text: string): SettingsIntent | null {
   const cmd = parseTelegramCommand(text);
   if (!cmd) return null;
-  if (cmd.command === "settings") return parseSettingsArgs(cmd.args);
-  if (cmd.command !== "codex") return null;
+  if (cmd.command === "settings") {
+    const parsed = parseSettingsArgs(cmd.args);
+    return parsed ? { cmd: parsed, defaultAgent: "codex" } : null;
+  }
+  const defaultAgent = TELEGRAM_COMMAND_AGENT[cmd.command];
+  if (!defaultAgent) return null;
   const rest = cmd.args.trim();
   if (!rest.toLowerCase().startsWith("settings")) return null;
-  return parseSettingsArgs(rest.slice("settings".length));
+  const parsed = parseSettingsArgs(rest.slice("settings".length));
+  if (!parsed) return null;
+  return { cmd: parsed, defaultAgent };
 }
 
-function parseSettingsIntentFromSlack(text: string): SettingsCommand | null {
+function parseSettingsIntentFromSlack(text: string): SettingsIntent | null {
   const m = text.match(/\bsettings\b(.*)$/i);
   if (!m) return null;
   const rest = (m[1] ?? "").trim();
-  return parseSettingsArgs(rest);
+  const parsed = parseSettingsArgs(rest);
+  return parsed ? { cmd: parsed, defaultAgent: "codex" } : null;
 }
 
 function parseSettingsArgs(args: string): SettingsCommand | null {
@@ -1610,19 +1658,31 @@ function parseSettingsArgs(args: string): SettingsCommand | null {
   return { kind: "list" };
 }
 
-function applySettingsCommand(config: AppConfig, cmd: SettingsCommand): string {
-  if (cmd.kind === "list") return formatSettingsSummary(config);
+const AGENT_PREFIX: Record<SessionAgent, string> = { codex: "codex", claude_code: "claude_code" };
 
-  const parsed = resolveSettingTarget(cmd.target);
+function applySettingsCommand(config: AppConfig, cmd: SettingsCommand, defaultAgent: SessionAgent): string {
+  if (cmd.kind === "list") return formatSettingsSummary(config, defaultAgent);
+
+  const parsed = resolveSettingTarget(cmd.target, defaultAgent);
   if (!parsed) return `Unknown setting "${cmd.target}".\nSupported: ${formatSupportedSettingKeys()}`;
+
+  const adapter = getAgentAdapter(parsed.agent);
+  let agentConfig;
+  try {
+    agentConfig = adapter.requireConfig(config);
+  } catch (e) {
+    return `Error: ${String(e)}`;
+  }
+
+  const prefix = AGENT_PREFIX[parsed.agent];
 
   if (parsed.type === "bool") {
     if (cmd.kind !== "set") return `Use "settings set ${parsed.label} <on|off>" to change it.`;
     const value = parseBool(cmd.value);
     if (value === null) return `Expected true/false value for ${parsed.label}.`;
-    const prev = config.codex[parsed.key];
-    (config.codex as any)[parsed.key] = value;
-    return `${parsed.label} updated (${String(prev)} -> ${String(value)}). Runtime-only; affects new Codex runs. Use "settings" to view current values.`;
+    const prev = agentConfig[parsed.key];
+    (agentConfig as any)[parsed.key] = value;
+    return `${parsed.label} updated (${String(prev)} -> ${String(value)}). Runtime-only; affects new ${adapter.displayName} runs. Use "settings" to view current values.`;
   }
 
   if (parsed.type === "number") {
@@ -1631,34 +1691,34 @@ function applySettingsCommand(config: AppConfig, cmd: SettingsCommand): string {
     if (!Number.isFinite(n)) return `Expected a number for ${parsed.label}.`;
     const next = Math.floor(n);
     if (next < parsed.min) return `${parsed.label} must be >= ${parsed.min}.`;
-    const prev = config.codex[parsed.key];
-    (config.codex as any)[parsed.key] = next;
-    return `${parsed.label} updated (${String(prev)} -> ${String(next)}). Runtime-only; affects new Codex runs. Use "settings" to view current values.`;
+    const prev = agentConfig[parsed.key];
+    (agentConfig as any)[parsed.key] = next;
+    return `${parsed.label} updated (${String(prev)} -> ${String(next)}). Runtime-only; affects new ${adapter.displayName} runs. Use "settings" to view current values.`;
   }
 
   if (parsed.type === "string") {
     if (cmd.kind !== "set") return `Use "settings set ${parsed.label} <value>" to change it.`;
     const next = cmd.value.trim();
     if (!next) return `${parsed.label} cannot be empty.`;
-    const prev = config.codex[parsed.key];
-    (config.codex as any)[parsed.key] = next;
-    return `${parsed.label} updated (${prev ?? "(empty)"} -> ${next}). Runtime-only; affects new Codex runs. Use "settings" to view current values.`;
+    const prev = agentConfig[parsed.key];
+    (agentConfig as any)[parsed.key] = next;
+    return `${parsed.label} updated (${prev ?? "(empty)"} -> ${next}). Runtime-only; affects new ${adapter.displayName} runs. Use "settings" to view current values.`;
   }
 
   if (parsed.type === "env") {
     const key = parsed.envKey;
     if (cmd.kind === "unset") {
-      if (!(key in config.codex.env)) return `Env \`${key}\` is already unset.`;
-      delete config.codex.env[key];
-      return `${parsed.label} removed. Runtime-only; affects new Codex runs. Use "settings" to view current values.`;
+      if (!(key in agentConfig.env)) return `Env \`${key}\` is already unset for ${prefix}.`;
+      delete agentConfig.env[key];
+      return `${parsed.label} removed. Runtime-only; affects new ${adapter.displayName} runs. Use "settings" to view current values.`;
     }
     const value = cmd.value.trim();
     if (!value) return `${parsed.label} cannot be empty.`;
-    const prev = config.codex.env[key];
-    config.codex.env[key] = value;
+    const prev = agentConfig.env[key];
+    agentConfig.env[key] = value;
     const current = formatEnvValue(value);
     const suffix = prev ? ` (was ${formatEnvValue(prev)})` : "";
-    return `${parsed.label} set to ${current}${suffix}. Runtime-only; affects new Codex runs. Use "settings" to view current values.`;
+    return `${parsed.label} set to ${current}${suffix}. Runtime-only; affects new ${adapter.displayName} runs. Use "settings" to view current values.`;
   }
 
   return "Unsupported settings command.";
@@ -1684,19 +1744,33 @@ function formatSessionFilterLabel(statuses?: SessionStatus[]): string | undefine
   return undefined;
 }
 
-function buildMenuText(platform: "telegram" | "slack"): string {
+function agentDisplayName(agent: SessionAgent): string {
+  return getAgentAdapter(agent).displayName;
+}
+
+function agentShortName(agent: SessionAgent): string {
+  return getAgentAdapter(agent).shortName;
+}
+
+function detectAgentFromTelegramMessageText(text: string): SessionAgent {
+  const cmd = parseTelegramCommand(text);
+  const mapped = cmd ? TELEGRAM_COMMAND_AGENT[cmd.command] : undefined;
+  return mapped ?? "codex";
+}
+
+function buildMenuText(platform: "telegram" | "slack", agent: SessionAgent): string {
   const commands =
     platform === "telegram"
       ? [
           "- /sessions - list recent sessions (add 'active' to filter, 'page 2' for older ones)",
-          "- /settings - list/tweak Codex + MCP config",
+          "- /settings - list/tweak runtime settings (agent + MCP)",
         ]
       : [
           '- Mention me with "sessions" to list recent sessions (add "active" or "page 2")',
-          '- Mention me with "settings" to list/tweak Codex + MCP config',
+          '- Mention me with "settings" to list/tweak runtime settings (agent + MCP)',
         ];
   const examples = buildCommandExamples(platform);
-  const lines = [`Choose a project to start a Codex session.`, ...commands, "", examples];
+  const lines = [`Choose a project to start a ${agentDisplayName(agent)} session.`, ...commands, "", examples];
   return lines.join("\n");
 }
 
@@ -1724,51 +1798,57 @@ type StringSettingKey = "binary" | "sessions_dir";
 
 function resolveSettingTarget(
   raw: string,
+  defaultAgent: SessionAgent,
 ):
-  | { type: "bool"; key: BoolSettingKey; label: string }
-  | { type: "number"; key: NumberSettingKey; label: string; min: number }
-  | { type: "string"; key: StringSettingKey; label: string }
-  | { type: "env"; envKey: string; label: string }
+  | { type: "bool"; agent: SessionAgent; key: BoolSettingKey; label: string }
+  | { type: "number"; agent: SessionAgent; key: NumberSettingKey; label: string; min: number }
+  | { type: "string"; agent: SessionAgent; key: StringSettingKey; label: string }
+  | { type: "env"; agent: SessionAgent; envKey: string; label: string }
   | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
   const lower = trimmed.toLowerCase();
 
-  if (lower === "full_auto" || lower === "codex.full_auto") return { type: "bool", key: "full_auto", label: "`codex.full_auto`" };
-  if (lower === "dangerously_bypass_approvals_and_sandbox" || lower === "codex.dangerously_bypass_approvals_and_sandbox")
-    return { type: "bool", key: "dangerously_bypass_approvals_and_sandbox", label: "`codex.dangerously_bypass_approvals_and_sandbox`" };
-  if (lower === "skip_git_repo_check" || lower === "codex.skip_git_repo_check")
-    return { type: "bool", key: "skip_git_repo_check", label: "`codex.skip_git_repo_check`" };
+  const agentPrefix = lower.startsWith("codex.")
+    ? ("codex" as const)
+    : lower.startsWith("claude_code.")
+      ? ("claude_code" as const)
+      : null;
 
-  if (lower === "timeout_seconds" || lower === "codex.timeout_seconds")
-    return { type: "number", key: "timeout_seconds", label: "`codex.timeout_seconds`", min: 10 };
-  if (lower === "poll_interval_ms" || lower === "codex.poll_interval_ms")
-    return { type: "number", key: "poll_interval_ms", label: "`codex.poll_interval_ms`", min: 100 };
-  if (lower === "max_catchup_lines" || lower === "codex.max_catchup_lines")
-    return { type: "number", key: "max_catchup_lines", label: "`codex.max_catchup_lines`", min: 1 };
+  const agent: SessionAgent = agentPrefix ?? defaultAgent;
+  const prefix = AGENT_PREFIX[agent];
+  const rest = agentPrefix ? trimmed.slice(`${agentPrefix}.`.length) : trimmed;
+  const restLower = rest.toLowerCase();
 
-  if (lower === "binary" || lower === "codex.binary") return { type: "string", key: "binary", label: "`codex.binary`" };
-  if (lower === "sessions_dir" || lower === "codex.sessions_dir")
-    return { type: "string", key: "sessions_dir", label: "`codex.sessions_dir`" };
+  if (restLower === "full_auto") return { type: "bool", agent, key: "full_auto", label: `\`${prefix}.full_auto\`` };
+  if (restLower === "dangerously_bypass_approvals_and_sandbox")
+    return {
+      type: "bool",
+      agent,
+      key: "dangerously_bypass_approvals_and_sandbox",
+      label: `\`${prefix}.dangerously_bypass_approvals_and_sandbox\``,
+    };
+  if (restLower === "skip_git_repo_check") return { type: "bool", agent, key: "skip_git_repo_check", label: `\`${prefix}.skip_git_repo_check\`` };
 
-  if (lower.startsWith("codex.env.")) {
-    const key = trimmed.slice("codex.env.".length).trim();
+  if (restLower === "timeout_seconds") return { type: "number", agent, key: "timeout_seconds", label: `\`${prefix}.timeout_seconds\``, min: 10 };
+  if (restLower === "poll_interval_ms") return { type: "number", agent, key: "poll_interval_ms", label: `\`${prefix}.poll_interval_ms\``, min: 100 };
+  if (restLower === "max_catchup_lines") return { type: "number", agent, key: "max_catchup_lines", label: `\`${prefix}.max_catchup_lines\``, min: 1 };
+
+  if (restLower === "binary") return { type: "string", agent, key: "binary", label: `\`${prefix}.binary\`` };
+  if (restLower === "sessions_dir") return { type: "string", agent, key: "sessions_dir", label: `\`${prefix}.sessions_dir\`` };
+
+  if (restLower.startsWith("env.")) {
+    const key = rest.slice("env.".length).trim();
     if (!key) return null;
-    return { type: "env", envKey: key, label: `Env \`${key}\`` };
+    return { type: "env", agent, envKey: key, label: `Env \`${key}\`` };
   }
 
-  if (lower.startsWith("env.")) {
-    const key = trimmed.slice("env.".length).trim();
-    if (!key) return null;
-    return { type: "env", envKey: key, label: `Env \`${key}\`` };
-  }
-
-  if (lower.startsWith("mcp.")) {
-    const key = trimmed.slice("mcp.".length).trim();
+  if (restLower.startsWith("mcp.")) {
+    const key = rest.slice("mcp.".length).trim();
     if (!key) return null;
     const envKey = normalizeEnvKey(key, { forceMcp: true });
     if (!envKey) return null;
-    return { type: "env", envKey, label: `MCP \`${envKey}\`` };
+    return { type: "env", agent, envKey, label: `MCP \`${envKey}\`` };
   }
 
   return null;
@@ -1777,32 +1857,50 @@ function resolveSettingTarget(
 function formatSupportedSettingKeys(): string {
   return [
     "`codex.full_auto`",
+    "`claude_code.full_auto`",
     "`codex.dangerously_bypass_approvals_and_sandbox`",
+    "`claude_code.dangerously_bypass_approvals_and_sandbox`",
     "`codex.skip_git_repo_check`",
+    "`claude_code.skip_git_repo_check`",
     "`codex.timeout_seconds`",
+    "`claude_code.timeout_seconds`",
     "`codex.poll_interval_ms`",
+    "`claude_code.poll_interval_ms`",
     "`codex.max_catchup_lines`",
+    "`claude_code.max_catchup_lines`",
     "`codex.binary`",
+    "`claude_code.binary`",
     "`codex.sessions_dir`",
     "`codex.env.<KEY>`",
+    "`claude_code.sessions_dir`",
+    "`claude_code.env.<KEY>`",
     "`mcp.<NAME>`",
   ].join(", ");
 }
 
-function formatSettingsSummary(config: AppConfig): string {
+function formatSettingsSummary(config: AppConfig, agent: SessionAgent): string {
+  const adapter = getAgentAdapter(agent);
+  let section;
+  try {
+    section = adapter.requireConfig(config);
+  } catch (e) {
+    return `Error: ${String(e)}`;
+  }
+  const prefix = AGENT_PREFIX[agent];
+
   const lines = [
-    "Settings (runtime only; not saved to config.toml):",
-    `- \`codex.binary\`: ${config.codex.binary}`,
-    `- \`codex.sessions_dir\`: ${config.codex.sessions_dir}`,
-    `- \`codex.timeout_seconds\`: ${String(config.codex.timeout_seconds)}`,
-    `- \`codex.poll_interval_ms\`: ${String(config.codex.poll_interval_ms)}`,
-    `- \`codex.max_catchup_lines\`: ${String(config.codex.max_catchup_lines)}`,
-    `- \`codex.full_auto\`: ${String(config.codex.full_auto)}`,
-    `- \`codex.dangerously_bypass_approvals_and_sandbox\`: ${String(config.codex.dangerously_bypass_approvals_and_sandbox)}`,
-    `- \`codex.skip_git_repo_check\`: ${String(config.codex.skip_git_repo_check)}`,
+    `Settings for ${adapter.displayName} (runtime only; not saved to config.toml):`,
+    `- \`${prefix}.binary\`: ${section.binary}`,
+    `- \`${prefix}.sessions_dir\`: ${section.sessions_dir}`,
+    `- \`${prefix}.timeout_seconds\`: ${String(section.timeout_seconds)}`,
+    `- \`${prefix}.poll_interval_ms\`: ${String(section.poll_interval_ms)}`,
+    `- \`${prefix}.max_catchup_lines\`: ${String(section.max_catchup_lines)}`,
+    `- \`${prefix}.full_auto\`: ${String(section.full_auto)}`,
+    `- \`${prefix}.dangerously_bypass_approvals_and_sandbox\`: ${String(section.dangerously_bypass_approvals_and_sandbox)}`,
+    `- \`${prefix}.skip_git_repo_check\`: ${String(section.skip_git_repo_check)}`,
   ];
 
-  const envEntries = Object.entries(config.codex.env);
+  const envEntries = Object.entries(section.env);
   if (envEntries.length === 0) lines.push("- env overrides: (none)");
   else {
     lines.push("- env overrides:");
@@ -1816,7 +1914,13 @@ function formatSettingsSummary(config: AppConfig): string {
     for (const [k, v] of mcpEntries) lines.push(`  - \`${k}\` = ${formatEnvValue(v)}`);
   }
 
-  lines.push("", "Examples:", "- settings set codex.timeout_seconds 1800", "- settings set mcp.SEARCH http://localhost:3000", "- settings unset mcp.SEARCH");
+  lines.push(
+    "",
+    "Examples:",
+    `- settings set ${prefix}.timeout_seconds 1800`,
+    "- settings set mcp.SEARCH http://localhost:3000",
+    "- settings unset mcp.SEARCH",
+  );
   return lines.join("\n");
 }
 
@@ -1981,7 +2085,7 @@ function formatSessionLine(platform: "telegram" | "slack", s: SessionRow): strin
   const url = formatSessionLink(platform, s);
   const emojiLabel = url ? formatEmojiLink(platform, emoji, url) : emoji;
   const age = formatRelativeAge(s.created_at);
-  return `${emojiLabel} ${s.status} ${s.project_id} ${age}`;
+  return `${emojiLabel} ${s.status} ${agentShortName(s.agent)} ${s.project_id} ${age}`;
 }
 
 function formatSessionEmoji(platform: "telegram" | "slack", s: SessionRow): string {
