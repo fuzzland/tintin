@@ -681,15 +681,15 @@ export class BotController {
             if (existing) {
               const meta = parseGithubAppMetadata(existing.metadata_json);
               const connectedAt = existing.updated_at ? new Date(existing.updated_at).toISOString() : null;
-              const lines = ["Already connected to GitHub."];
+              const lines = ["*GitHub already connected*"];
               if (meta?.account_login) {
                 const accountType = meta.account_type ?? "unknown";
-                lines.push(`- Account: ${meta.account_login} (${accountType})`);
+                lines.push(`- *Account:* \`${meta.account_login}\` (${accountType})`);
               } else {
-                lines.push("- Account: (unknown; reconnect to refresh)");
+                lines.push("- *Account:* _(unknown; reconnect to refresh)_");
               }
-              if (meta?.installation_id) lines.push(`- Installation ID: ${meta.installation_id}`);
-              if (connectedAt) lines.push(`- Connected at: ${connectedAt}`);
+              if (meta?.installation_id) lines.push(`- *Installation ID:* \`${meta.installation_id}\``);
+              if (connectedAt) lines.push(`- *Connected at:* \`${connectedAt}\``);
               await reply(lines.join("\n"), true);
               return true;
             }
