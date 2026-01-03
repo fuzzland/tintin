@@ -60,8 +60,11 @@ const REVIEW_PROMPT = "Run codex review";
 const COMMIT_PROMPT = "Stage all current changes and commit them with a clear, meaningful git commit message summarizing the diff.";
 const SESSION_LIST_PAGE_SIZE = 20;
 type TelegramReplyContext = { replyToMessageId: number; messageThreadId?: number; chat: TelegramChat };
+type IdentityRepo = Awaited<ReturnType<typeof listReposForIdentity>>[number];
 
 export class BotController {
+  private readonly lastRepoListByIdentity = new Map<string, string[]>();
+
   constructor(
     private readonly config: AppConfig,
     private readonly db: Db,
@@ -277,6 +280,7 @@ export class BotController {
     const chatId = String(message.chat.id);
     const forumThreadId = this.telegramForumThreadIdFromMessage(message);
     const text = (message.text ?? "").trim();
+    const cloudEnabled = Boolean(this.config.cloud?.enabled);
     this.logger.debug(
       `[tg] message received chat=${chatId} user=${userId} message_id=${String(message.message_id)} thread=${String(
         message.message_thread_id ?? "-",
@@ -351,7 +355,7 @@ export class BotController {
         });
         return;
       }
-      const result = applySettingsCommand(this.config, settingsIntent.cmd, settingsIntent.defaultAgent);
+      const result = applySettingsCommand(this.config, settingsIntent.cmd, settingsIntent.defaultAgent, "telegram");
       await this.telegram.sendMessage({
         chatId,
         messageThreadId: forumThreadId,
@@ -362,7 +366,7 @@ export class BotController {
       return;
     }
 
-    const cloudCmd = parseCloudCommand(text);
+    const cloudCmd = text.startsWith("/") ? parseCloudCommand(text) : null;
     if (cloudCmd) {
       await this.handleCloudCommand({
         platform: "telegram",
@@ -376,75 +380,6 @@ export class BotController {
         messageThreadId: forumThreadId,
       });
       return;
-    }
-
-    // Allow "@bot sessions" style listing too.
-    const botUsername = this.telegram.botUsername;
-    if (botUsername) {
-      const mention = `@${botUsername}`.toLowerCase();
-      const lower = text.toLowerCase();
-      if (lower.startsWith(mention)) {
-        const rest = text.slice(mention.length).trim();
-        if (rest.toLowerCase().startsWith("sessions")) {
-          const access = await this.telegramAccessDecision(chatId, userId);
-          if (!access.allowed) {
-            this.logger.warn(`[tg] rejected list sessions chat=${chatId} user=${userId} reason=${access.reason ?? "-"}`);
-	            await this.telegram.sendMessage({
-	              chatId,
-	              messageThreadId: forumThreadId,
-	              replyToMessageId: message.message_id,
-	              text: "Not authorized.",
-	              priority: "user",
-	            });
-	        return;
-	      }
-          const args = parseListSessionsArgs(rest.slice("sessions".length).trim());
-          const sessionPage = await listSessionsForChat({
-            db: this.db,
-            platform: "telegram",
-            chatId,
-            statuses: args.statuses,
-            limit: SESSION_LIST_PAGE_SIZE,
-            page: args.page,
-          });
-	          await this.telegram.sendMessage({
-	            chatId,
-	            messageThreadId: forumThreadId,
-	            replyToMessageId: message.message_id,
-            text: formatSessionList("telegram", {
-              ...sessionPage,
-              filterLabel: formatSessionFilterLabel(args.statuses),
-            }),
-            priority: "user",
-          });
-          return;
-        }
-
-        if (rest.toLowerCase().startsWith("settings")) {
-          const access = await this.telegramAccessDecision(chatId, userId);
-          if (!access.allowed) {
-            this.logger.warn(`[tg] rejected mention settings chat=${chatId} user=${userId} reason=${access.reason ?? "-"}`);
-            await this.telegram.sendMessage({
-              chatId,
-              messageThreadId: forumThreadId,
-              replyToMessageId: message.message_id,
-              text: "Not authorized.",
-              priority: "user",
-            });
-            return;
-          }
-          const parsed = parseSettingsArgs(rest.slice("settings".length)) ?? { kind: "list" };
-          const result = applySettingsCommand(this.config, parsed, "codex");
-          await this.telegram.sendMessage({
-            chatId,
-            messageThreadId: forumThreadId,
-            replyToMessageId: message.message_id,
-            text: result,
-            priority: "user",
-          });
-          return;
-        }
-      }
     }
 
     // Session routing.
@@ -476,8 +411,19 @@ export class BotController {
       this.logger.debug(`[tg] no session for space=${spaceIds.join(",")} chat=${chatId} user=${userId}`);
     }
 
+    if (cloudEnabled && text.startsWith("/")) {
+      await this.sendCloudHelp({
+        platform: "telegram",
+        chatId,
+        userId,
+        replyToMessageId: message.message_id,
+        messageThreadId: forumThreadId,
+      });
+      return;
+    }
+
     // Wizard start.
-    if (this.telegram.isMentionOrCommand(message)) {
+    if (text.startsWith("/") && this.telegram.isMentionOrCommand(message)) {
       const access = await this.telegramAccessDecision(chatId, userId);
       if (!access.allowed) {
         this.logger.warn(`[tg] rejected wizard start chat=${chatId} user=${userId} reason=${access.reason ?? "-"}`);
@@ -593,6 +539,34 @@ export class BotController {
     });
   }
 
+  private async sendCloudHelp(opts: {
+    platform: "telegram" | "slack";
+    chatId: string;
+    userId: string;
+    replyToMessageId?: number;
+    messageThreadId?: number;
+    slackThreadTs?: string;
+  }) {
+    await this.sendCloudMessage({
+      ...opts,
+      text: buildCloudHelpText(opts.platform),
+    });
+  }
+
+  private resolveRepoTarget(identityId: string, repos: IdentityRepo[], rawTarget: string): IdentityRepo | null {
+    const target = rawTarget.trim();
+    const index = parseRepoIndex(target);
+    if (index !== null) {
+      const list = this.lastRepoListByIdentity.get(identityId) ?? repos.map((r) => r.id);
+      const repoId = list[index - 1];
+      if (repoId) {
+        const match = repos.find((r) => r.id === repoId);
+        if (match) return match;
+      }
+    }
+    return repos.find((r) => r.id === target || r.name === target) ?? null;
+  }
+
   private async handleCloudCommand(opts: {
     platform: "telegram" | "slack";
     command: CloudCommand;
@@ -649,6 +623,8 @@ export class BotController {
         ephemeral,
       });
     };
+    const cmdPrefix = opts.platform === "telegram" ? "/" : "";
+    const formatCmd = (value: string) => `\`${cmdPrefix}${value}\``;
 
     const cloud = this.config.cloud;
     if (!cloud) {
@@ -659,7 +635,7 @@ export class BotController {
     switch (opts.command.kind) {
       case "connect": {
         if (!opts.isDirect) {
-          await reply("Run `connect` in a 1:1 chat with the bot.");
+          await reply(`Run ${formatCmd("connect")} in a 1:1 chat with the bot.`);
           return true;
         }
         if (!cloud?.public_base_url) {
@@ -839,7 +815,10 @@ export class BotController {
           await reply("No repos found.");
           return true;
         }
-        const lines = repos.map((r) => `- ${r.name} (id=${r.id})`);
+        this.lastRepoListByIdentity.set(identity.id, repos.map((r) => r.id));
+        const title = "*Repos*";
+        const selectHint = `Select with ${formatCmd("repo select <number>")}.`;
+        const lines = [title, ...repos.map((r, i) => `${i + 1}. \`${r.name}\``), "", selectHint];
         await reply(lines.join("\n"));
         return true;
       }
@@ -847,9 +826,9 @@ export class BotController {
         const repos = await listReposForIdentity(this.db, identity.id);
         const cmd = opts.command as Extract<CloudCommand, { kind: "repo_select" }>;
         const target = cmd.target.trim();
-        const repo = repos.find((r) => r.id === target || r.name === target);
+        const repo = this.resolveRepoTarget(identity.id, repos, target);
         if (!repo) {
-          await reply("Repo not found. Use `repos` to list.");
+          await reply(`Repo not found. Use ${formatCmd("repos")} to list.`);
           return true;
         }
         await setIdentityActiveRepo(this.db, identity.id, repo.id);
@@ -858,13 +837,13 @@ export class BotController {
       }
       case "repo_current": {
         if (!identity.active_repo_id) {
-          await reply("No active repo. Use `repo select <id>`.");
+          await reply(`No active repo. Use ${formatCmd("repo select <number>")}.`);
           return true;
         }
         const repos = await listReposForIdentity(this.db, identity.id);
         const repo = repos.find((r) => r.id === identity.active_repo_id);
         if (!repo) {
-          await reply("Active repo not found. Use `repo select` again.");
+          await reply(`Active repo not found. Use ${formatCmd("repo select <number>")} again.`);
           return true;
         }
         await reply(`Active repo: ${repo.name} (id=${repo.id}).`);
@@ -872,14 +851,14 @@ export class BotController {
       }
       case "repo_share": {
         if (opts.isDirect) {
-          await reply("Use `repo share` in a group chat.");
+          await reply(`Use ${formatCmd("repo share <number>")} in a group chat.`);
           return true;
         }
         const repos = await listReposForIdentity(this.db, identity.id);
         const cmd = opts.command as Extract<CloudCommand, { kind: "repo_share" }>;
-        const repo = repos.find((r) => r.id === cmd.target || r.name === cmd.target);
+        const repo = this.resolveRepoTarget(identity.id, repos, cmd.target);
         if (!repo) {
-          await reply("Repo not found. Use `repos` to list.");
+          await reply(`Repo not found. Use ${formatCmd("repos")} to list.`);
           return true;
         }
         const result = await shareRepo(this.db, {
@@ -898,12 +877,12 @@ export class BotController {
       }
       case "repo_unshare": {
         if (opts.isDirect) {
-          await reply("Use `repo unshare` in a group chat.");
+          await reply(`Use ${formatCmd("repo unshare <number>")} in a group chat.`);
           return true;
         }
         const repos = await listReposForIdentity(this.db, identity.id);
         const cmd = opts.command as Extract<CloudCommand, { kind: "repo_unshare" }>;
-        const repo = repos.find((r) => r.id === cmd.target || r.name === cmd.target);
+        const repo = this.resolveRepoTarget(identity.id, repos, cmd.target);
         if (!repo) {
           await reply("Repo not found.");
           return true;
@@ -933,7 +912,7 @@ export class BotController {
       }
       case "actions_list": {
         if (!identity.active_repo_id) {
-          await reply("No active repo. Use `repo select`.");
+          await reply(`No active repo. Use ${formatCmd("repo select <number>")}.`);
           return true;
         }
         const runs = await listCloudRunsForRepo(this.db, identity.active_repo_id, 10);
@@ -971,7 +950,7 @@ export class BotController {
         let repoIds = cmd.repoIds;
         if (repoIds.length === 0) {
           if (!identity.active_repo_id) {
-            await reply("No active repo. Use `repo select` or pass --repos.");
+            await reply(`No active repo. Use ${formatCmd("repo select <number>")} or pass --repos.`);
             return true;
           }
           repoIds = [identity.active_repo_id];
@@ -1029,7 +1008,7 @@ export class BotController {
         }
         const spec = await getLatestSetupSpec(this.db, identity.active_repo_id);
         if (!spec) {
-          await reply("No setup spec yet. Use `setup lift`.");
+          await reply(`No setup spec yet. Use ${formatCmd("setup lift")}.`);
           return true;
         }
         await reply("Setup spec is configured.");
@@ -1067,12 +1046,12 @@ export class BotController {
       }
       case "secrets_set": {
         if (!opts.isDirect) {
-          await reply("Use `secrets set` in a 1:1 chat.");
+          await reply(`Use ${formatCmd("secrets set")} in a 1:1 chat.`);
           return true;
         }
         const cmd = opts.command as Extract<CloudCommand, { kind: "secrets_set" }>;
         if (!cmd.value) {
-          await reply("Usage: `secrets set NAME VALUE` (or use `tinc secrets set NAME --from-stdin`).");
+          await reply(`Usage: ${formatCmd("secrets set NAME VALUE")} (or use \`tinc secrets set NAME --from-stdin\`).`);
           return true;
         }
         try {
@@ -1707,7 +1686,7 @@ export class BotController {
 
       const settingsIntent = parseSettingsIntentFromSlack(text);
       if (settingsIntent) {
-        const result = applySettingsCommand(this.config, settingsIntent.cmd, settingsIntent.defaultAgent);
+        const result = applySettingsCommand(this.config, settingsIntent.cmd, settingsIntent.defaultAgent, "slack");
         await this.slack.postEphemeral({
           channel: channelId,
           user: userId,
@@ -2193,6 +2172,14 @@ function parseListSessionsArgs(text: string): SessionListIntent {
   return { statuses, page: page ?? 1 };
 }
 
+function parseRepoIndex(target: string): number | null {
+  const cleaned = target.trim().replace(/[.)]$/, "");
+  if (!/^\d+$/.test(cleaned)) return null;
+  const n = Number(cleaned);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
+
 const TELEGRAM_COMMAND_AGENT: Record<string, SessionAgent> = { codex: "codex", cc: "claude_code" };
 
 function parseListSessionsIntentFromTelegram(text: string): SessionListIntent | null {
@@ -2411,8 +2398,13 @@ function parseSettingsArgs(args: string): SettingsCommand | null {
 
 const AGENT_PREFIX: Record<SessionAgent, string> = { codex: "codex", claude_code: "claude_code" };
 
-function applySettingsCommand(config: AppConfig, cmd: SettingsCommand, defaultAgent: SessionAgent): string {
-  if (cmd.kind === "list") return formatSettingsSummary(config, defaultAgent);
+function applySettingsCommand(
+  config: AppConfig,
+  cmd: SettingsCommand,
+  defaultAgent: SessionAgent,
+  platform: "telegram" | "slack",
+): string {
+  if (cmd.kind === "list") return formatSettingsSummary(config, defaultAgent, platform);
 
   const parsed = resolveSettingTarget(cmd.target, defaultAgent);
   if (!parsed) return `Unknown setting "${cmd.target}".\nSupported: ${formatSupportedSettingKeys()}`;
@@ -2525,11 +2517,50 @@ function buildMenuText(platform: "telegram" | "slack", agent: SessionAgent): str
   return lines.join("\n");
 }
 
+function buildCloudHelpText(platform: "telegram" | "slack"): string {
+  const title = platform === "slack" ? "*Cloud mode help*" : "Cloud mode help";
+  const cmdPrefix = platform === "telegram" ? "/" : "";
+  const cmd = (value: string) => `${cmdPrefix}${value}`;
+  const repoShareCmd = `\`${cmd("repo share <number>")}\``;
+  const notes = [
+    `- In group chats, finish connect + repo select in DM first, then use ${repoShareCmd}.`,
+  ];
+  if (platform === "slack") {
+    notes.push("- In Slack channels, mention the bot before the command (for example, `@bot connect github`).");
+  }
+  const lines = [
+    title,
+    "Cloud mode is enabled. Project selection is disabled.",
+    "",
+    "Quick start",
+    "1) Connect (do this in a 1:1 chat with the bot)",
+    `- \`${cmd("connect github")}\` (or \`${cmd("connect gitlab")}\`, \`${cmd("connect local")}\`)`,
+    "2) Pick repos",
+    `- \`${cmd("repos")}\` (optional: \`${cmd("repos --provider github --search <term>")}\`)`,
+    `- \`${cmd("repo select <number>")}\``,
+    "3) Share to a group (optional)",
+    `- ${repoShareCmd}`,
+    "4) Run an action",
+    `- \`${cmd("action run <prompt>")}\` (multi-repo: \`--repos id1,id2\`)`,
+    "5) Check results",
+    `- \`${cmd("action status <runId>")}\``,
+    `- \`${cmd("action pull <runId>")}\``,
+    "6) Secrets (optional)",
+    `- \`${cmd("secrets set NAME VALUE")}\``,
+    `- \`${cmd("secrets list")}\``,
+    `- \`${cmd("secrets delete NAME")}\``,
+    "",
+    "Notes",
+    ...notes,
+  ];
+  return lines.join("\n");
+}
+
 function buildCommandExamples(platform: "telegram" | "slack"): string {
   const sessions = platform === "telegram" ? "/sessions active" : "@bot sessions active";
   const sessionsPage = platform === "telegram" ? "/sessions page 2" : "@bot sessions page 2";
   const settings = platform === "telegram" ? "/settings" : "@bot settings";
-  const prefix = platform === "telegram" ? "" : "@bot ";
+  const prefix = platform === "telegram" ? "/" : "@bot ";
   const envSet = `${prefix}settings set mcp.SEARCH http://localhost:3000`;
   const envUnset = `${prefix}settings unset mcp.SEARCH`;
   return [
@@ -2629,7 +2660,7 @@ function formatSupportedSettingKeys(): string {
   ].join(", ");
 }
 
-function formatSettingsSummary(config: AppConfig, agent: SessionAgent): string {
+function formatSettingsSummary(config: AppConfig, agent: SessionAgent, platform: "telegram" | "slack"): string {
   const adapter = getAgentAdapter(agent);
   let section;
   try {
@@ -2637,6 +2668,7 @@ function formatSettingsSummary(config: AppConfig, agent: SessionAgent): string {
   } catch (e) {
     return `Error: ${String(e)}`;
   }
+  const cmdPrefix = platform === "telegram" ? "/" : "@bot ";
   const prefix = AGENT_PREFIX[agent];
 
   const lines = [
@@ -2668,9 +2700,9 @@ function formatSettingsSummary(config: AppConfig, agent: SessionAgent): string {
   lines.push(
     "",
     "Examples:",
-    `- settings set ${prefix}.timeout_seconds 1800`,
-    "- settings set mcp.SEARCH http://localhost:3000",
-    "- settings unset mcp.SEARCH",
+    `- ${cmdPrefix}settings set ${prefix}.timeout_seconds 1800`,
+    `- ${cmdPrefix}settings set mcp.SEARCH http://localhost:3000`,
+    `- ${cmdPrefix}settings unset mcp.SEARCH`,
   );
   return lines.join("\n");
 }
