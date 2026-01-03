@@ -55,6 +55,7 @@ export interface AgentAdapter {
     cwd: string;
     prompt: string;
     homeDir: string;
+    extraEnv?: Record<string, string>;
     extraArgs?: string[];
   }): SpawnedAgentProcess;
 
@@ -65,6 +66,7 @@ export interface AgentAdapter {
     sessionId: string;
     prompt: string;
     homeDir: string;
+    extraEnv?: Record<string, string>;
     extraArgs?: string[];
   }): SpawnedAgentProcess;
 
@@ -111,7 +113,7 @@ const CodexAgent: AgentAdapter = {
       logger: opts.logger,
       cwd: opts.cwd,
       prompt: opts.prompt,
-      extraEnv: { CODEX_HOME: opts.homeDir },
+      extraEnv: { CODEX_HOME: opts.homeDir, ...(opts.extraEnv ?? {}) },
       extraArgs: opts.extraArgs,
     });
     return { child: spawned.child, agentSessionId: spawned.threadId, debug: spawned.debug };
@@ -124,7 +126,7 @@ const CodexAgent: AgentAdapter = {
       cwd: opts.cwd,
       sessionId: opts.sessionId,
       prompt: opts.prompt,
-      extraEnv: { CODEX_HOME: opts.homeDir },
+      extraEnv: { CODEX_HOME: opts.homeDir, ...(opts.extraEnv ?? {}) },
       extraArgs: opts.extraArgs,
     });
     return { child: spawned.child, agentSessionId: spawned.threadId, debug: spawned.debug };
@@ -195,7 +197,7 @@ const ClaudeCodeAgent: AgentAdapter = {
       cwd: opts.cwd,
       sessionId,
       prompt: opts.prompt,
-      extraEnv: { CLAUDE_CONFIG_DIR: opts.homeDir },
+      extraEnv: { CLAUDE_CONFIG_DIR: opts.homeDir, ...(opts.extraEnv ?? {}) },
       extraArgs: opts.extraArgs,
     });
     return { child: spawned.child, agentSessionId: spawned.sessionId, debug: spawned.debug };
@@ -209,7 +211,7 @@ const ClaudeCodeAgent: AgentAdapter = {
       cwd: opts.cwd,
       sessionId: opts.sessionId,
       prompt: opts.prompt,
-      extraEnv: { CLAUDE_CONFIG_DIR: opts.homeDir },
+      extraEnv: { CLAUDE_CONFIG_DIR: opts.homeDir, ...(opts.extraEnv ?? {}) },
       extraArgs: opts.extraArgs,
     });
     return { child: spawned.child, agentSessionId: spawned.sessionId, debug: spawned.debug };
@@ -260,4 +262,3 @@ const AGENTS: Record<SessionAgent, AgentAdapter> = {
 export function getAgentAdapter(agent: SessionAgent): AgentAdapter {
   return AGENTS[agent];
 }
-

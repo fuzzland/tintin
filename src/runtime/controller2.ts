@@ -1,7 +1,10 @@
+import crypto from "node:crypto";
+import path from "node:path";
 import type { AppConfig, ProjectEntry } from "./config.js";
 import type { Db, SessionAgent, SessionStatus } from "./db.js";
 import type { Logger } from "./log.js";
 import type { SessionManager } from "./sessionManager.js";
+import type { CloudManager } from "./cloud/manager.js";
 import { getAgentAdapter } from "./agents.js";
 import {
   TelegramClient,
@@ -15,6 +18,31 @@ import { SlackClient } from "./platform/slack.js";
 import { redactText } from "./redact.js";
 import type { SendToSessionFn } from "./messaging.js";
 import { validateAndResolveProjectPath } from "./security.js";
+import { startOAuthFlow } from "./cloud/oauth.js";
+import { ensureGithubAppToken, startGithubAppFlow } from "./cloud/githubApp.js";
+import { fetchGithubInstallationRepos, fetchGithubRepos, fetchGitlabRepos } from "./cloud/repos.js";
+import { encryptSecret } from "./cloud/secrets.js";
+import { generateSetupSpecFromPath } from "./cloud/lift.js";
+import { hashSetupSpec, stringifySetupSpec } from "./cloud/setupSpec.js";
+import { buildCloneUrl, runGitClone } from "./cloud/git.js";
+import { LocalCloudProvider } from "./cloud/localProvider.js";
+import {
+  getCloudRun,
+  getLatestSetupSpec,
+  getOrCreateIdentity,
+  getSharedRepo,
+  listCloudRunsForRepo,
+  listConnections,
+  listReposForIdentity,
+  listSecrets,
+  listSharedRepos,
+  setIdentityActiveRepo,
+  setSecret,
+  shareRepo,
+  unshareRepo,
+  deleteSecret,
+  putSetupSpec,
+} from "./cloud/store.js";
 import {
   clearWizardState,
   countPendingMessages,
@@ -43,6 +71,7 @@ export class BotController {
     private readonly slack: SlackClient | null,
     private readonly sendToSession: SendToSessionFn,
     private readonly reviewCommitDisabled: Set<string>,
+    private readonly cloudManager: CloudManager | null,
   ) {}
 
   private markReviewCommitDisabled(sessionId: string) {
@@ -333,6 +362,22 @@ export class BotController {
       return;
     }
 
+    const cloudCmd = parseCloudCommand(text);
+    if (cloudCmd) {
+      await this.handleCloudCommand({
+        platform: "telegram",
+        command: cloudCmd,
+        chatId,
+        workspaceId: null,
+        userId,
+        isDirect: message.chat.type === "private",
+        spaceId: String(message.message_id),
+        replyToMessageId: message.message_id,
+        messageThreadId: forumThreadId,
+      });
+      return;
+    }
+
     // Allow "@bot sessions" style listing too.
     const botUsername = this.telegram.botUsername;
     if (botUsername) {
@@ -511,6 +556,520 @@ export class BotController {
     const id = message.message_thread_id;
     if (typeof id !== "number" || id <= 0) return undefined;
     return id;
+  }
+
+  private async sendCloudMessage(opts: {
+    platform: "telegram" | "slack";
+    chatId: string;
+    userId: string;
+    text: string;
+    replyToMessageId?: number;
+    messageThreadId?: number;
+    slackThreadTs?: string;
+    ephemeral?: boolean;
+  }) {
+    if (opts.platform === "telegram") {
+      if (!this.telegram) return;
+      await this.telegram.sendMessage({
+        chatId: Number(opts.chatId),
+        text: opts.text,
+        replyToMessageId: opts.replyToMessageId,
+        messageThreadId: opts.messageThreadId,
+        priority: "user",
+      });
+      return;
+    }
+    if (!this.slack) return;
+    const isDm = opts.chatId.startsWith("D");
+    const ephemeral = opts.ephemeral ?? !isDm;
+    if (ephemeral && !isDm) {
+      await this.slack.postEphemeral({ channel: opts.chatId, user: opts.userId, text: opts.text });
+      return;
+    }
+    await this.slack.postMessageDetailed({
+      channel: opts.chatId,
+      thread_ts: opts.slackThreadTs,
+      text: opts.text,
+    });
+  }
+
+  private async handleCloudCommand(opts: {
+    platform: "telegram" | "slack";
+    command: CloudCommand;
+    chatId: string;
+    workspaceId: string | null;
+    userId: string;
+    isDirect: boolean;
+    spaceId: string;
+    replyToMessageId?: number;
+    messageThreadId?: number;
+    slackThreadTs?: string;
+  }): Promise<boolean> {
+    if (!this.cloudManager || !this.config.cloud?.enabled) {
+      await this.sendCloudMessage({
+        platform: opts.platform,
+        chatId: opts.chatId,
+        userId: opts.userId,
+        text: "Cloud mode is disabled.",
+        replyToMessageId: opts.replyToMessageId,
+        messageThreadId: opts.messageThreadId,
+        slackThreadTs: opts.slackThreadTs,
+      });
+      return true;
+    }
+
+    const identity = await getOrCreateIdentity(this.db, {
+      platform: opts.platform,
+      workspaceId: opts.workspaceId,
+      userId: opts.userId,
+    });
+
+    if (!opts.isDirect && !identity.onboarded_at) {
+      await this.sendCloudMessage({
+        platform: opts.platform,
+        chatId: opts.chatId,
+        userId: opts.userId,
+        text: "Please complete setup in a 1:1 chat with the bot before using cloud mode in groups.",
+        replyToMessageId: opts.replyToMessageId,
+        messageThreadId: opts.messageThreadId,
+        slackThreadTs: opts.slackThreadTs,
+      });
+      return true;
+    }
+
+    const reply = async (text: string, ephemeral?: boolean) => {
+      await this.sendCloudMessage({
+        platform: opts.platform,
+        chatId: opts.chatId,
+        userId: opts.userId,
+        text,
+        replyToMessageId: opts.replyToMessageId,
+        messageThreadId: opts.messageThreadId,
+        slackThreadTs: opts.slackThreadTs,
+        ephemeral,
+      });
+    };
+
+    const cloud = this.config.cloud;
+    if (!cloud) {
+      await reply("Cloud configuration is missing.");
+      return true;
+    }
+
+    switch (opts.command.kind) {
+      case "connect": {
+        if (!opts.isDirect) {
+          await reply("Run `connect` in a 1:1 chat with the bot.");
+          return true;
+        }
+        if (!cloud?.public_base_url) {
+          await reply("Missing [cloud].public_base_url configuration.");
+          return true;
+        }
+        const cmd = opts.command as Extract<CloudCommand, { kind: "connect" }>;
+        const provider = cmd.provider;
+        try {
+          if (provider === "github") {
+            if (!cloud.github_app) {
+              await reply("Missing [cloud].github_app configuration.");
+              return true;
+            }
+            const { authorizeUrl } = await startGithubAppFlow({
+              db: this.db,
+              cloud,
+              identityId: identity.id,
+              redirectBase: cloud.public_base_url,
+            });
+            await reply(`Install the GitHub App here:\n${authorizeUrl}`, true);
+            return true;
+          }
+          const { authorizeUrl } = await startOAuthFlow({
+            db: this.db,
+            cloud,
+            provider,
+            identityId: identity.id,
+            redirectBase: cloud.public_base_url,
+          });
+          await reply(`Authorize ${provider} here:\n${authorizeUrl}`, true);
+        } catch (e) {
+          await reply(`Connect failed: ${String(e)}`);
+        }
+        return true;
+      }
+      case "connections": {
+        const conns = await listConnections(this.db, identity.id);
+        if (conns.length === 0) {
+          await reply("No connections yet.");
+          return true;
+        }
+        const lines = conns.map((c) => `- ${c.type} (connected)`);
+        await reply(lines.join("\n"));
+        return true;
+      }
+      case "repos": {
+        const cmd = opts.command as Extract<CloudCommand, { kind: "repos" }>;
+        const conns = await listConnections(this.db, identity.id);
+        for (const conn of conns) {
+          try {
+            if (conn.type === "github") {
+              if (cloud.github_app) {
+                const token = await ensureGithubAppToken({ db: this.db, config: cloud.github_app, connection: conn });
+                const repos = await fetchGithubInstallationRepos({ token: token.token, apiBaseUrl: cloud.github_app.api_base_url });
+                for (const r of repos) {
+                  await this.db
+                    .selectFrom("repos")
+                    .select(["id"])
+                    .where("connection_id", "=", conn.id)
+                    .where("provider_repo_id", "=", r.providerRepoId)
+                    .executeTakeFirst()
+                    .then(async (existing) => {
+                      if (existing) return;
+                      await this.db.insertInto("repos").values({
+                        id: crypto.randomUUID(),
+                        connection_id: conn.id,
+                        provider: "github",
+                        provider_repo_id: r.providerRepoId,
+                        name: r.name,
+                        url: r.url,
+                        default_branch: r.defaultBranch,
+                        fingerprint: null,
+                        created_at: nowMs(),
+                        updated_at: nowMs(),
+                      }).execute();
+                    });
+                }
+              } else if (cloud.oauth.github) {
+                const repos = await fetchGithubRepos({ token: conn.access_token, apiBaseUrl: cloud.oauth.github.api_base_url });
+                for (const r of repos) {
+                  await this.db
+                    .selectFrom("repos")
+                    .select(["id"])
+                    .where("connection_id", "=", conn.id)
+                    .where("provider_repo_id", "=", r.providerRepoId)
+                    .executeTakeFirst()
+                    .then(async (existing) => {
+                      if (existing) return;
+                      await this.db.insertInto("repos").values({
+                        id: crypto.randomUUID(),
+                        connection_id: conn.id,
+                        provider: "github",
+                        provider_repo_id: r.providerRepoId,
+                        name: r.name,
+                        url: r.url,
+                        default_branch: r.defaultBranch,
+                        fingerprint: null,
+                        created_at: nowMs(),
+                        updated_at: nowMs(),
+                      }).execute();
+                    });
+                }
+              } else {
+                this.logger.warn("[cloud] github_app not configured; cannot refresh repos.");
+              }
+            }
+            if (conn.type === "gitlab" && cloud.oauth.gitlab) {
+              const repos = await fetchGitlabRepos({ token: conn.access_token, apiBaseUrl: cloud.oauth.gitlab.api_base_url });
+              for (const r of repos) {
+                await this.db
+                  .selectFrom("repos")
+                  .select(["id"])
+                  .where("connection_id", "=", conn.id)
+                  .where("provider_repo_id", "=", r.providerRepoId)
+                  .executeTakeFirst()
+                  .then(async (existing) => {
+                    if (existing) return;
+                    await this.db.insertInto("repos").values({
+                      id: crypto.randomUUID(),
+                      connection_id: conn.id,
+                      provider: "gitlab",
+                      provider_repo_id: r.providerRepoId,
+                      name: r.name,
+                      url: r.url,
+                      default_branch: r.defaultBranch,
+                      fingerprint: null,
+                      created_at: nowMs(),
+                      updated_at: nowMs(),
+                    }).execute();
+                  });
+              }
+            }
+          } catch (e) {
+            this.logger.warn(`[cloud] repo refresh failed ${conn.type}: ${String(e)}`);
+          }
+        }
+        let repos = await listReposForIdentity(this.db, identity.id);
+        if (cmd.provider) {
+          repos = repos.filter((r) => r.provider === cmd.provider);
+        }
+        if (cmd.search) {
+          const needle = cmd.search.toLowerCase();
+          repos = repos.filter((r) => r.name.toLowerCase().includes(needle));
+        }
+        if (repos.length === 0) {
+          await reply("No repos found.");
+          return true;
+        }
+        const lines = repos.map((r) => `- ${r.name} (id=${r.id})`);
+        await reply(lines.join("\n"));
+        return true;
+      }
+      case "repo_select": {
+        const repos = await listReposForIdentity(this.db, identity.id);
+        const cmd = opts.command as Extract<CloudCommand, { kind: "repo_select" }>;
+        const target = cmd.target.trim();
+        const repo = repos.find((r) => r.id === target || r.name === target);
+        if (!repo) {
+          await reply("Repo not found. Use `repos` to list.");
+          return true;
+        }
+        await setIdentityActiveRepo(this.db, identity.id, repo.id);
+        await reply(`Active repo set to ${repo.name} (id=${repo.id}).`);
+        return true;
+      }
+      case "repo_current": {
+        if (!identity.active_repo_id) {
+          await reply("No active repo. Use `repo select <id>`.");
+          return true;
+        }
+        const repos = await listReposForIdentity(this.db, identity.id);
+        const repo = repos.find((r) => r.id === identity.active_repo_id);
+        if (!repo) {
+          await reply("Active repo not found. Use `repo select` again.");
+          return true;
+        }
+        await reply(`Active repo: ${repo.name} (id=${repo.id}).`);
+        return true;
+      }
+      case "repo_share": {
+        if (opts.isDirect) {
+          await reply("Use `repo share` in a group chat.");
+          return true;
+        }
+        const repos = await listReposForIdentity(this.db, identity.id);
+        const cmd = opts.command as Extract<CloudCommand, { kind: "repo_share" }>;
+        const repo = repos.find((r) => r.id === cmd.target || r.name === cmd.target);
+        if (!repo) {
+          await reply("Repo not found. Use `repos` to list.");
+          return true;
+        }
+        const result = await shareRepo(this.db, {
+          platform: opts.platform,
+          workspaceId: opts.workspaceId,
+          chatId: opts.chatId,
+          repoId: repo.id,
+          sharedByIdentityId: identity.id,
+        });
+        if (result.alreadyShared) {
+          await reply("Repo already shared in this chat.");
+          return true;
+        }
+        await reply(`Shared ${repo.name} into this chat.`);
+        return true;
+      }
+      case "repo_unshare": {
+        if (opts.isDirect) {
+          await reply("Use `repo unshare` in a group chat.");
+          return true;
+        }
+        const repos = await listReposForIdentity(this.db, identity.id);
+        const cmd = opts.command as Extract<CloudCommand, { kind: "repo_unshare" }>;
+        const repo = repos.find((r) => r.id === cmd.target || r.name === cmd.target);
+        if (!repo) {
+          await reply("Repo not found.");
+          return true;
+        }
+        const shared = await getSharedRepo(this.db, {
+          platform: opts.platform,
+          workspaceId: opts.workspaceId,
+          chatId: opts.chatId,
+          repoId: repo.id,
+        });
+        if (!shared) {
+          await reply("Repo is not shared in this chat.");
+          return true;
+        }
+        if (shared.shared_by_identity_id !== identity.id) {
+          await reply("Only the sharer can unshare this repo.");
+          return true;
+        }
+        await unshareRepo(this.db, {
+          platform: opts.platform,
+          workspaceId: opts.workspaceId,
+          chatId: opts.chatId,
+          repoId: repo.id,
+        });
+        await reply(`Unshared ${repo.name}.`);
+        return true;
+      }
+      case "actions_list": {
+        if (!identity.active_repo_id) {
+          await reply("No active repo. Use `repo select`.");
+          return true;
+        }
+        const runs = await listCloudRunsForRepo(this.db, identity.active_repo_id, 10);
+        if (runs.length === 0) {
+          await reply("No runs yet.");
+          return true;
+        }
+        const lines = runs.map((r) => `- ${r.id} (${r.status})`);
+        await reply(lines.join("\n"));
+        return true;
+      }
+      case "action_status": {
+        const cmd = opts.command as Extract<CloudCommand, { kind: "action_status" }>;
+        const run = await getCloudRun(this.db, cmd.runId);
+        if (!run || run.identity_id !== identity.id) {
+          await reply("Run not found.");
+          return true;
+        }
+        await reply(`Run ${run.id}: ${run.status}`);
+        return true;
+      }
+      case "action_pull": {
+        const cmd = opts.command as Extract<CloudCommand, { kind: "action_pull" }>;
+        const run = await getCloudRun(this.db, cmd.runId);
+        if (!run || run.identity_id !== identity.id) {
+          await reply("Run not found.");
+          return true;
+        }
+        const summary = run.diff_summary ?? "No diff available.";
+        await reply(`Diff summary for ${run.id}:\n${summary}\n\nUse \`tinc pull --run ${run.id}\` for full diff.`);
+        return true;
+      }
+      case "action_run": {
+        const cmd = opts.command as Extract<CloudCommand, { kind: "action_run" }>;
+        let repoIds = cmd.repoIds;
+        if (repoIds.length === 0) {
+          if (!identity.active_repo_id) {
+            await reply("No active repo. Use `repo select` or pass --repos.");
+            return true;
+          }
+          repoIds = [identity.active_repo_id];
+        }
+        const repos = await listReposForIdentity(this.db, identity.id);
+        const repoIdSet = new Set(repos.map((r) => r.id));
+        for (const id of repoIds) {
+          if (!repoIdSet.has(id)) {
+            await reply(`Repo not found or not accessible: ${id}`);
+            return true;
+          }
+        }
+        if (!opts.isDirect) {
+          const shared = await listSharedRepos(this.db, { platform: opts.platform, workspaceId: opts.workspaceId, chatId: opts.chatId });
+          const sharedIds = new Set(shared.map((s) => s.repo_id));
+          for (const id of repoIds) {
+            if (!sharedIds.has(id)) {
+              await reply(`Repo not shared in this chat: ${id}`);
+              return true;
+            }
+          }
+        }
+        const agent = cloud.default_agent === "claude_code" ? "claude_code" : "codex";
+        if (agent === "claude_code" && !this.config.claude_code) {
+          await reply("Claude Code not configured. Use codex or configure [claude_code].");
+          return true;
+        }
+        const prompt = cmd.prompt.trim();
+        if (!prompt) {
+          await reply("Provide a prompt for the action.");
+          return true;
+        }
+        try {
+          const result = await this.cloudManager.startRun({
+            identityId: identity.id,
+            platform: opts.platform,
+            workspaceId: opts.workspaceId,
+            chatId: opts.chatId,
+            spaceId: opts.spaceId,
+            userId: opts.userId,
+            prompt,
+            repoIds,
+            agent,
+          });
+          await reply(`Started run ${result.runId}.`, false);
+        } catch (e) {
+          await reply(`Run failed: ${String(e)}`);
+        }
+        return true;
+      }
+      case "setup_status": {
+        if (!identity.active_repo_id) {
+          await reply("No active repo.");
+          return true;
+        }
+        const spec = await getLatestSetupSpec(this.db, identity.active_repo_id);
+        if (!spec) {
+          await reply("No setup spec yet. Use `setup lift`.");
+          return true;
+        }
+        await reply("Setup spec is configured.");
+        return true;
+      }
+      case "setup_lift": {
+        if (!identity.active_repo_id) {
+          await reply("No active repo.");
+          return true;
+        }
+        try {
+          const repo = await this.db.selectFrom("repos").selectAll().where("id", "=", identity.active_repo_id).executeTakeFirstOrThrow();
+          const conn = await this.db.selectFrom("connections").selectAll().where("id", "=", repo.connection_id).executeTakeFirstOrThrow();
+          const provider = new LocalCloudProvider(cloud.workspaces_dir, this.logger);
+          const workspace = await provider.createWorkspace({ prefix: "lift" });
+          let cloneToken = conn.access_token;
+          let cloneUser: string | undefined;
+          if (conn.type === "github" && cloud.github_app) {
+            const token = await ensureGithubAppToken({ db: this.db, config: cloud.github_app, connection: conn });
+            cloneToken = token.token;
+            cloneUser = "x-access-token";
+          }
+          const clone = buildCloneUrl(repo.url, cloneToken, cloneUser ? { username: cloneUser } : undefined);
+          await runGitClone({ url: clone.url, cwd: workspace.rootPath, targetDir: path.join(workspace.rootPath, "repo"), logger: this.logger });
+          const spec = await generateSetupSpecFromPath(path.join(workspace.rootPath, "repo"));
+          const yml = stringifySetupSpec(spec);
+          const hash = hashSetupSpec(yml);
+          await putSetupSpec(this.db, { repoId: repo.id, ymlBlob: yml, hash });
+          await provider.terminateWorkspace(workspace);
+          await reply("Setup spec generated and saved.");
+        } catch (e) {
+          await reply(`Setup lift failed: ${String(e)}`);
+        }
+        return true;
+      }
+      case "secrets_set": {
+        if (!opts.isDirect) {
+          await reply("Use `secrets set` in a 1:1 chat.");
+          return true;
+        }
+        const cmd = opts.command as Extract<CloudCommand, { kind: "secrets_set" }>;
+        if (!cmd.value) {
+          await reply("Usage: `secrets set NAME VALUE` (or use `tinc secrets set NAME --from-stdin`).");
+          return true;
+        }
+        try {
+          const encrypted = encryptSecret(cmd.value, cloud.secrets_key);
+          await setSecret(this.db, { identityId: identity.id, name: cmd.name, encryptedValue: encrypted });
+          await reply(`Secret ${cmd.name} saved.`);
+        } catch (e) {
+          await reply(`Failed to save secret: ${String(e)}`);
+        }
+        return true;
+      }
+      case "secrets_list": {
+        const secrets = await listSecrets(this.db, identity.id);
+        if (secrets.length === 0) {
+          await reply("No secrets.");
+          return true;
+        }
+        await reply(secrets.map((s) => `- ${s.name}`).join("\n"));
+        return true;
+      }
+      case "secrets_delete": {
+        const cmd = opts.command as Extract<CloudCommand, { kind: "secrets_delete" }>;
+        const ok = await deleteSecret(this.db, identity.id, cmd.name);
+        await reply(ok ? `Deleted ${cmd.name}.` : "Secret not found.");
+        return true;
+      }
+    }
   }
 
   private async startTelegramWizard(
@@ -1127,6 +1686,27 @@ export class BotController {
         return;
       }
 
+      const cloudCmd = parseCloudCommand(text);
+      if (cloudCmd) {
+        const spaceId =
+          this.config.slack?.session_mode === "thread"
+            ? typeof ev.ts === "string"
+              ? ev.ts
+              : channelId
+            : channelId;
+        await this.handleCloudCommand({
+          platform: "slack",
+          command: cloudCmd,
+          chatId: channelId,
+          workspaceId: teamId,
+          userId,
+          isDirect: channelId.startsWith("D"),
+          spaceId,
+          slackThreadTs: spaceId,
+        });
+        return;
+      }
+
       await this.startSlackWizard(teamId, channelId, userId);
       return;
     }
@@ -1143,6 +1723,36 @@ export class BotController {
         return;
       }
 
+      const cmdSpaceId =
+        this.config.slack?.session_mode === "thread"
+          ? typeof ev.thread_ts === "string"
+            ? ev.thread_ts
+            : typeof ev.ts === "string"
+              ? ev.ts
+              : channelId
+          : channelId;
+
+      this.logger.debug(
+        `[slack] message received workspace=${String(teamId ?? "-")} channel=${channelId} user=${userId} space=${cmdSpaceId} text=${JSON.stringify(
+          safeSnippet(text),
+        )}`,
+      );
+
+      const cloudCmd = parseCloudCommand(text);
+      if (cloudCmd) {
+        await this.handleCloudCommand({
+          platform: "slack",
+          command: cloudCmd,
+          chatId: channelId,
+          workspaceId: teamId,
+          userId,
+          isDirect: channelId.startsWith("D"),
+          spaceId: cmdSpaceId,
+          slackThreadTs: cmdSpaceId,
+        });
+        return;
+      }
+
       const spaceId =
         this.config.slack?.session_mode === "thread"
           ? typeof ev.thread_ts === "string"
@@ -1150,12 +1760,6 @@ export class BotController {
             : null
           : channelId;
       if (!spaceId) return;
-
-      this.logger.debug(
-        `[slack] message received workspace=${String(teamId ?? "-")} channel=${channelId} user=${userId} space=${spaceId} text=${JSON.stringify(
-          safeSnippet(text),
-        )}`,
-      );
 
       const session = await getSessionBySpace(this.db, "slack", channelId, spaceId);
       if (!session) {
@@ -1622,6 +2226,123 @@ function parseSettingsIntentFromSlack(text: string): SettingsIntent | null {
   const rest = (m[1] ?? "").trim();
   const parsed = parseSettingsArgs(rest);
   return parsed ? { cmd: parsed, defaultAgent: "codex" } : null;
+}
+
+type CloudCommand =
+  | { kind: "connect"; provider: string }
+  | { kind: "connections" }
+  | { kind: "repos"; provider?: string; search?: string }
+  | { kind: "repo_select"; target: string }
+  | { kind: "repo_current" }
+  | { kind: "repo_share"; target: string }
+  | { kind: "repo_unshare"; target: string }
+  | { kind: "actions_list" }
+  | { kind: "action_run"; prompt: string; repoIds: string[] }
+  | { kind: "action_status"; runId: string }
+  | { kind: "action_pull"; runId: string }
+  | { kind: "setup_status" }
+  | { kind: "setup_lift" }
+  | { kind: "secrets_set"; name: string; value: string | null }
+  | { kind: "secrets_list" }
+  | { kind: "secrets_delete"; name: string };
+
+function normalizeCloudText(text: string): string {
+  let out = text.trim();
+  out = out.replace(/<@[^>]+>/g, "").trim();
+  if (out.startsWith("/")) {
+    const parts = out.slice(1).split(/\s+/);
+    const head = parts.shift() ?? "";
+    const cleanHead = head.includes("@") ? head.split("@")[0] ?? "" : head;
+    out = [cleanHead, ...parts].join(" ").trim();
+  }
+  return out;
+}
+
+function parseCloudCommand(text: string): CloudCommand | null {
+  const normalized = normalizeCloudText(text);
+  if (!normalized) return null;
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return null;
+  const head = tokens.shift()!.toLowerCase();
+
+  if (head === "connect" && tokens.length >= 1) {
+    return { kind: "connect", provider: tokens[0]!.toLowerCase() };
+  }
+  if (head === "connections") return { kind: "connections" };
+  if (head === "repos") {
+    let provider: string | undefined;
+    let search: string | undefined;
+    for (let i = 0; i < tokens.length; i++) {
+      const t = tokens[i]!;
+      if (t.startsWith("--provider=")) {
+        provider = t.split("=", 2)[1];
+        continue;
+      }
+      if (t === "--provider" && tokens[i + 1]) {
+        provider = tokens[i + 1]!;
+        i++;
+        continue;
+      }
+      if (t.startsWith("--search=")) {
+        search = t.split("=", 2)[1];
+        continue;
+      }
+      if (t === "--search" && tokens[i + 1]) {
+        search = tokens[i + 1]!;
+        i++;
+        continue;
+      }
+      if (!search) search = t;
+    }
+    return { kind: "repos", provider, search };
+  }
+  if (head === "repo" && tokens.length >= 1) {
+    const sub = tokens.shift()!.toLowerCase();
+    if (sub === "select" && tokens.length >= 1) return { kind: "repo_select", target: tokens.join(" ") };
+    if (sub === "current") return { kind: "repo_current" };
+    if (sub === "share" && tokens.length >= 1) return { kind: "repo_share", target: tokens.join(" ") };
+    if (sub === "unshare" && tokens.length >= 1) return { kind: "repo_unshare", target: tokens.join(" ") };
+  }
+  if (head === "actions") return { kind: "actions_list" };
+  if (head === "action" && tokens.length >= 1) {
+    const sub = tokens.shift()!.toLowerCase();
+    if (sub === "run") {
+      const repoIds: string[] = [];
+      const promptParts: string[] = [];
+      for (let i = 0; i < tokens.length; i++) {
+        const t = tokens[i]!;
+        if (t.startsWith("--repos=")) {
+          repoIds.push(...t.split("=", 2)[1]!.split(",").map((v) => v.trim()).filter(Boolean));
+          continue;
+        }
+        if (t === "--repos" && tokens[i + 1]) {
+          repoIds.push(...tokens[i + 1]!.split(",").map((v) => v.trim()).filter(Boolean));
+          i++;
+          continue;
+        }
+        promptParts.push(t);
+      }
+      return { kind: "action_run", prompt: promptParts.join(" "), repoIds };
+    }
+    if (sub === "status" && tokens.length >= 1) return { kind: "action_status", runId: tokens[0]! };
+    if (sub === "pull" && tokens.length >= 1) return { kind: "action_pull", runId: tokens[0]! };
+  }
+  if (head === "setup" && tokens.length >= 1) {
+    const sub = tokens.shift()!.toLowerCase();
+    if (sub === "status") return { kind: "setup_status" };
+    if (sub === "lift") return { kind: "setup_lift" };
+  }
+  if (head === "secrets" && tokens.length >= 1) {
+    const sub = tokens.shift()!.toLowerCase();
+    if (sub === "list") return { kind: "secrets_list" };
+    if (sub === "set" && tokens.length >= 1) {
+      const name = tokens.shift()!;
+      const value = tokens.length > 0 ? tokens.join(" ") : null;
+      return { kind: "secrets_set", name, value };
+    }
+    if (sub === "delete" && tokens.length >= 1) return { kind: "secrets_delete", name: tokens[0]! };
+  }
+  return null;
 }
 
 function parseSettingsArgs(args: string): SettingsCommand | null {

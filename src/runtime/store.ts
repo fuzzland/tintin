@@ -196,10 +196,30 @@ export async function upsertSessionOffset(db: Db, row: SessionStreamOffsetRow) {
     .execute();
 }
 
-export async function writeAuditEvent(db: Db, row: { id: string; session_id: string | null; kind: string; payload_json: string }) {
+export async function writeAuditEvent(
+  db: Db,
+  row: {
+    id: string;
+    session_id?: string | null;
+    kind: string;
+    payload_json: string;
+    identity_id?: string | null;
+    action?: string | null;
+    metadata_json?: string | null;
+  },
+) {
   await db
     .insertInto("audit_events")
-    .values({ ...row, created_at: nowMs() })
+    .values({
+      id: row.id,
+      session_id: row.session_id ?? null,
+      kind: row.kind,
+      payload_json: row.payload_json,
+      identity_id: row.identity_id ?? null,
+      action: row.action ?? null,
+      metadata_json: row.metadata_json ?? null,
+      created_at: nowMs(),
+    })
     .execute();
 }
 

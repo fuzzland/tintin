@@ -61,6 +61,9 @@ export interface AuditEventsTable {
   session_id: string | null;
   kind: string;
   payload_json: string;
+  identity_id: string | null;
+  action: string | null;
+  metadata_json: string | null;
   created_at: number;
 }
 
@@ -73,12 +76,124 @@ export interface SessionPendingMessagesTable {
   consumed_at: number | null;
 }
 
+export interface IdentitiesTable {
+  id: string;
+  platform: string;
+  workspace_id: string | null;
+  user_id: string;
+  active_repo_id: string | null;
+  onboarded_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface ConnectionsTable {
+  id: string;
+  identity_id: string;
+  type: string;
+  access_token: string;
+  refresh_token: string | null;
+  scope: string | null;
+  token_expires_at: number | null;
+  metadata_json: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface ReposTable {
+  id: string;
+  connection_id: string;
+  provider: string;
+  provider_repo_id: string | null;
+  name: string;
+  url: string;
+  default_branch: string | null;
+  fingerprint: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export type CloudRunStatus = "queued" | "running" | "finished" | "error" | "killed";
+
+export interface CloudRunsTable {
+  id: string;
+  identity_id: string;
+  primary_repo_id: string | null;
+  provider: string;
+  workspace_id: string;
+  status: CloudRunStatus;
+  session_id: string | null;
+  snapshot_id: string | null;
+  diff_summary: string | null;
+  diff_patch: string | null;
+  started_at: number | null;
+  finished_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface CloudRunReposTable {
+  id: string;
+  run_id: string;
+  repo_id: string;
+  mount_path: string;
+}
+
+export interface SecretsTable {
+  id: string;
+  identity_id: string;
+  name: string;
+  encrypted_value: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface SetupSpecsTable {
+  id: string;
+  repo_id: string;
+  yml_blob: string;
+  hash: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface SharedReposTable {
+  id: string;
+  platform: string;
+  workspace_id: string | null;
+  chat_id: string;
+  repo_id: string;
+  shared_by_identity_id: string;
+  shared_at: number;
+}
+
+export interface OAuthStatesTable {
+  id: string;
+  provider: string;
+  state: string;
+  code_verifier: string;
+  redirect_url: string;
+  identity_id: string | null;
+  metadata_json: string | null;
+  created_at: number;
+  expires_at: number;
+}
+
 export interface DatabaseSchema {
   sessions: SessionsTable;
   session_stream_offsets: SessionStreamOffsetsTable;
   wizard_states: WizardStatesTable;
   audit_events: AuditEventsTable;
   session_pending_messages: SessionPendingMessagesTable;
+  identities: IdentitiesTable;
+  connections: ConnectionsTable;
+  repos: ReposTable;
+  cloud_runs: CloudRunsTable;
+  cloud_run_repos: CloudRunReposTable;
+  secrets: SecretsTable;
+  setup_specs: SetupSpecsTable;
+  shared_repos: SharedReposTable;
+  oauth_states: OAuthStatesTable;
 }
 
 export type Db = Kysely<DatabaseSchema>;

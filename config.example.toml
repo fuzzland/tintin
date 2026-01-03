@@ -75,6 +75,67 @@ session_mode = "thread"
 max_chars = 3000
 rate_limit_msgs_per_sec = 1.0
 
+[cloud]
+enabled = false
+provider = "local" # local | e2b
+public_base_url = "https://tintin.example.com"
+workspaces_dir = "./data/cloud/workspaces"
+default_agent = "codex"
+# 32+ bytes recommended; use env:VAR to keep secrets out of config.toml
+secrets_key = "env:TINTIN_CLOUD_SECRETS_KEY"
+
+[cloud.e2b]
+# Optional E2B settings (used when provider = "e2b")
+api_key = "env:E2B_API_KEY"
+# Template should include Playwright + Codex + Claude Code preinstalled.
+template_id = "tintin-playwright"
+domain = "" # optional override, e.g. "e2b.app"
+timeout_ms = 300000
+request_timeout_ms = 60000
+command_timeout_ms = 60000
+secure = true
+allow_internet_access = true
+workspace_root = "/home/user/tintin"
+codex_binary = "codex" # command inside the E2B template
+claude_binary = "claude" # command inside the E2B template
+
+[cloud.proxy]
+# When users do not provide their own API keys/endpoints, Tintin uses this proxy.
+enabled = false
+shared_secret = "env:TINTIN_CLOUD_PROXY_SECRET"
+token_ttl_ms = 3600000
+openai_api_key = "env:TINTIN_OPENAI_API_KEY"
+openai_base_url = "https://api.openai.com"
+anthropic_api_key = "env:TINTIN_ANTHROPIC_API_KEY"
+anthropic_base_url = "https://api.anthropic.com"
+anthropic_version = "2023-06-01"
+openai_path = "/cloud/proxy/openai"
+anthropic_path = "/cloud/proxy/anthropic"
+
+[cloud.oauth]
+callback_path = "/oauth/callback"
+
+# GitHub App integration (installation-based auth).
+# private_key must be base64-encoded PEM (not raw PEM).
+# Example: export GITHUB_APP_PRIVATE_KEY_B64="$(base64 -w 0 < private-key.pem)"
+[cloud.github_app]
+app_id = "env:GITHUB_APP_ID"
+app_slug = "your-app-slug"
+private_key = "env:GITHUB_APP_PRIVATE_KEY_B64"
+# api_base_url = "https://api.github.com"
+# app_base_url = "https://github.com"
+
+[cloud.oauth.gitlab]
+client_id = "env:GITLAB_OAUTH_CLIENT_ID"
+client_secret = "env:GITLAB_OAUTH_CLIENT_SECRET"
+# scopes = ["read_api"]
+
+[cloud.oauth.local]
+authorize_url = "https://local-tintin.example.com/oauth/authorize"
+token_url = "https://local-tintin.example.com/oauth/token"
+api_base_url = "https://local-tintin.example.com/api"
+scopes = ["repo:read"]
+
 [playwright_mcp]
 enabled = true
 package = "@playwright/mcp@latest"

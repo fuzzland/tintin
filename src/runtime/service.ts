@@ -5,6 +5,10 @@ import { sleep, TaskQueue } from "./util.js";
 import { TelegramClient } from "./platform/telegram.js";
 import { SlackClient, verifySlackSignature } from "./platform/slack.js";
 import { BotController } from "./controller2.js";
+import { CloudManager } from "./cloud/manager.js";
+import { handleOAuthCallback } from "./cloud/oauth.js";
+import { handleGithubAppCallback } from "./cloud/githubApp.js";
+import { handleProxyRequest } from "./cloud/proxy.js";
 import { JsonlStreamer } from "./streamer.js";
 import { SessionManager } from "./sessionManager.js";
 import type { SendToSessionFn } from "./messaging.js";
@@ -555,6 +559,7 @@ export async function createBotService(deps: BotServiceDeps) {
   const streamer = new JsonlStreamer(config, db, logger, sendToSession, playwrightMcp);
   streamer.start();
 
+  const cloudManager = config.cloud?.enabled ? new CloudManager(config, db, logger, null) : null;
   const sessionManager = new SessionManager(
     config,
     db,
@@ -562,7 +567,9 @@ export async function createBotService(deps: BotServiceDeps) {
     sendToSession,
     async (id) => streamer.drainSession(id),
     playwrightMcp,
+    cloudManager ? async (sessionId, status) => cloudManager.handleSessionFinished(sessionId, status) : undefined,
   );
+  if (cloudManager) cloudManager.attachSessionManager(sessionManager);
   await sessionManager.reconcileStaleSessions();
   const controller = new BotController(
     config,
@@ -573,6 +580,7 @@ export async function createBotService(deps: BotServiceDeps) {
     slack,
     sendToSession,
     reviewCommitDisabled,
+    cloudManager,
   );
 
   if (telegram && config.telegram?.mode === "poll") {
@@ -614,6 +622,66 @@ export async function createBotService(deps: BotServiceDeps) {
     try {
       if (req.method === "GET" && pathname === "/healthz") {
         sendText(res, 200, "ok");
+        return;
+      }
+
+      if (config.cloud?.proxy?.enabled) {
+        if (pathname.startsWith(config.cloud.proxy.openai_path)) {
+          await handleProxyRequest({
+            req,
+            res,
+            config,
+            db,
+            logger,
+            kind: "openai",
+            pathPrefix: config.cloud.proxy.openai_path,
+            url,
+          });
+          return;
+        }
+        if (pathname.startsWith(config.cloud.proxy.anthropic_path)) {
+          await handleProxyRequest({
+            req,
+            res,
+            config,
+            db,
+            logger,
+            kind: "anthropic",
+            pathPrefix: config.cloud.proxy.anthropic_path,
+            url,
+          });
+          return;
+        }
+      }
+
+      if (config.cloud?.enabled && req.method === "GET" && pathname === config.cloud.oauth.callback_path) {
+        const installationId = url.searchParams.get("installation_id");
+        const state = url.searchParams.get("state") ?? "";
+        if (installationId) {
+          if (!state) {
+            sendText(res, 400, "Missing GitHub App state");
+            return;
+          }
+          try {
+            await handleGithubAppCallback({ db, cloud: config.cloud, installationId, state });
+            sendText(res, 200, "Connected. Return to the chat.");
+          } catch (e) {
+            sendText(res, 400, `GitHub App connect failed: ${String(e)}`);
+          }
+          return;
+        }
+        const provider = url.searchParams.get("provider") ?? "";
+        const code = url.searchParams.get("code") ?? "";
+        if (!provider || !code || !state) {
+          sendText(res, 400, "Missing OAuth parameters");
+          return;
+        }
+        try {
+          await handleOAuthCallback({ db, cloud: config.cloud, provider, code, state });
+          sendText(res, 200, "Connected. Return to the chat.");
+        } catch (e) {
+          sendText(res, 400, `OAuth failed: ${String(e)}`);
+        }
         return;
       }
 

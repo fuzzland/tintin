@@ -54,6 +54,73 @@ export interface ProjectEntry {
   path: string;
 }
 
+export type CloudProvider = "local" | "e2b";
+export type CloudDefaultAgent = "codex" | "claude_code";
+
+export interface CloudE2BSection {
+  api_key: string;
+  template_id: string;
+  domain: string;
+  timeout_ms: number;
+  request_timeout_ms: number;
+  command_timeout_ms: number;
+  secure: boolean;
+  allow_internet_access: boolean;
+  workspace_root: string;
+  codex_binary: string;
+  claude_binary: string;
+}
+
+export interface CloudProxySection {
+  enabled: boolean;
+  shared_secret: string;
+  token_ttl_ms: number;
+  openai_api_key: string;
+  openai_base_url: string;
+  anthropic_api_key: string;
+  anthropic_base_url: string;
+  anthropic_version: string;
+  openai_path: string;
+  anthropic_path: string;
+}
+
+export interface CloudOAuthProviderSection {
+  client_id: string;
+  client_secret: string;
+  authorize_url: string;
+  token_url: string;
+  api_base_url: string;
+  scopes: string[];
+}
+
+export interface CloudOAuthSection {
+  callback_path: string;
+  github?: CloudOAuthProviderSection;
+  gitlab?: CloudOAuthProviderSection;
+  local?: CloudOAuthProviderSection;
+}
+
+export interface CloudGithubAppSection {
+  app_id: string;
+  app_slug: string;
+  private_key: string;
+  api_base_url: string;
+  app_base_url: string;
+}
+
+export interface CloudSection {
+  enabled: boolean;
+  provider: CloudProvider;
+  public_base_url: string;
+  workspaces_dir: string;
+  default_agent: CloudDefaultAgent;
+  secrets_key: string;
+  oauth: CloudOAuthSection;
+  github_app?: CloudGithubAppSection | null;
+  e2b?: CloudE2BSection | null;
+  proxy?: CloudProxySection | null;
+}
+
 export interface TelegramSection {
   token: string;
   additional_bot_tokens: string[];
@@ -111,6 +178,7 @@ export interface AppConfig {
   telegram?: TelegramSection;
   slack?: SlackSection;
   playwright_mcp?: PlaywrightMcpSection | null;
+  cloud?: CloudSection | null;
   config_dir: string;
 }
 
@@ -290,6 +358,251 @@ function normalizeCodexSection(value: unknown, defaults: { binary: string; sessi
         ? (value as any).dangerously_bypass_approvals_and_sandbox
         : true,
     skip_git_repo_check: typeof (value as any).skip_git_repo_check === "boolean" ? (value as any).skip_git_repo_check : true,
+  };
+}
+
+function normalizeCloudDefaultAgent(value: unknown): CloudDefaultAgent {
+  const raw = typeof value === "string" ? value.toLowerCase() : "";
+  if (raw === "claude_code") return "claude_code";
+  return "codex";
+}
+
+function normalizeCloudOAuthProvider(
+  value: unknown,
+  defaults: { authorize_url: string; token_url: string; api_base_url: string; scopes: string[] },
+): CloudOAuthProviderSection {
+  assert(isRecord(value), "oauth provider must be a table");
+  const scopes = isStringArray((value as any).scopes) ? ((value as any).scopes as string[]) : defaults.scopes;
+  return {
+    client_id: typeof (value as any).client_id === "string" ? (value as any).client_id : "",
+    client_secret: typeof (value as any).client_secret === "string" ? (value as any).client_secret : "",
+    authorize_url:
+      typeof (value as any).authorize_url === "string" && (value as any).authorize_url.length > 0
+        ? (value as any).authorize_url
+        : defaults.authorize_url,
+    token_url:
+      typeof (value as any).token_url === "string" && (value as any).token_url.length > 0
+        ? (value as any).token_url
+        : defaults.token_url,
+    api_base_url:
+      typeof (value as any).api_base_url === "string" && (value as any).api_base_url.length > 0
+        ? (value as any).api_base_url
+        : defaults.api_base_url,
+    scopes,
+  };
+}
+
+function normalizeCloudE2BSection(value: unknown): CloudE2BSection {
+  const raw = value ?? {};
+  assert(isRecord(raw), "[cloud].e2b must be a table");
+  const api_key = typeof (raw as any).api_key === "string" ? (raw as any).api_key : "";
+  const template_id =
+    typeof (raw as any).template_id === "string" && (raw as any).template_id.length > 0
+      ? (raw as any).template_id
+      : "tintin-playwright";
+  const domain = typeof (raw as any).domain === "string" ? (raw as any).domain : "";
+  const timeout_ms =
+    typeof (raw as any).timeout_ms === "number" && Number.isFinite((raw as any).timeout_ms) && (raw as any).timeout_ms > 0
+      ? Math.floor((raw as any).timeout_ms)
+      : 300_000;
+  const request_timeout_ms =
+    typeof (raw as any).request_timeout_ms === "number" &&
+    Number.isFinite((raw as any).request_timeout_ms) &&
+    (raw as any).request_timeout_ms > 0
+      ? Math.floor((raw as any).request_timeout_ms)
+      : 60_000;
+  const command_timeout_ms =
+    typeof (raw as any).command_timeout_ms === "number" &&
+    Number.isFinite((raw as any).command_timeout_ms) &&
+    (raw as any).command_timeout_ms > 0
+      ? Math.floor((raw as any).command_timeout_ms)
+      : 60_000;
+  const secure = typeof (raw as any).secure === "boolean" ? (raw as any).secure : true;
+  const allow_internet_access = typeof (raw as any).allow_internet_access === "boolean" ? (raw as any).allow_internet_access : true;
+  const workspace_root =
+    typeof (raw as any).workspace_root === "string" && (raw as any).workspace_root.length > 0
+      ? (raw as any).workspace_root
+      : "/home/user/tintin";
+  const codex_binary = typeof (raw as any).codex_binary === "string" && (raw as any).codex_binary.length > 0 ? (raw as any).codex_binary : "codex";
+  const claude_binary =
+    typeof (raw as any).claude_binary === "string" && (raw as any).claude_binary.length > 0 ? (raw as any).claude_binary : "claude";
+
+  return {
+    api_key,
+    template_id,
+    domain,
+    timeout_ms,
+    request_timeout_ms,
+    command_timeout_ms,
+    secure,
+    allow_internet_access,
+    workspace_root,
+    codex_binary,
+    claude_binary,
+  };
+}
+
+function normalizeCloudProxySection(value: unknown): CloudProxySection {
+  const raw = value ?? {};
+  assert(isRecord(raw), "[cloud].proxy must be a table");
+  const enabled = typeof (raw as any).enabled === "boolean" ? (raw as any).enabled : true;
+  const shared_secret = typeof (raw as any).shared_secret === "string" ? (raw as any).shared_secret : "";
+  const token_ttl_ms =
+    typeof (raw as any).token_ttl_ms === "number" && Number.isFinite((raw as any).token_ttl_ms) && (raw as any).token_ttl_ms > 0
+      ? Math.floor((raw as any).token_ttl_ms)
+      : 60 * 60 * 1000;
+  const openai_api_key = typeof (raw as any).openai_api_key === "string" ? (raw as any).openai_api_key : "";
+  const openai_base_url =
+    typeof (raw as any).openai_base_url === "string" && (raw as any).openai_base_url.length > 0
+      ? (raw as any).openai_base_url
+      : "https://api.openai.com";
+  const anthropic_api_key = typeof (raw as any).anthropic_api_key === "string" ? (raw as any).anthropic_api_key : "";
+  const anthropic_base_url =
+    typeof (raw as any).anthropic_base_url === "string" && (raw as any).anthropic_base_url.length > 0
+      ? (raw as any).anthropic_base_url
+      : "https://api.anthropic.com";
+  const anthropic_version =
+    typeof (raw as any).anthropic_version === "string" && (raw as any).anthropic_version.length > 0
+      ? (raw as any).anthropic_version
+      : "2023-06-01";
+  const openai_path =
+    typeof (raw as any).openai_path === "string" && (raw as any).openai_path.length > 0
+      ? normalizeHttpPath((raw as any).openai_path, "[cloud].proxy.openai_path")
+      : "/cloud/proxy/openai";
+  const anthropic_path =
+    typeof (raw as any).anthropic_path === "string" && (raw as any).anthropic_path.length > 0
+      ? normalizeHttpPath((raw as any).anthropic_path, "[cloud].proxy.anthropic_path")
+      : "/cloud/proxy/anthropic";
+
+  return {
+    enabled,
+    shared_secret,
+    token_ttl_ms,
+    openai_api_key,
+    openai_base_url,
+    anthropic_api_key,
+    anthropic_base_url,
+    anthropic_version,
+    openai_path,
+    anthropic_path,
+  };
+}
+
+function decodeBase64PrivateKey(value: string, label: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (trimmed.includes("BEGIN") && trimmed.includes("PRIVATE KEY")) {
+    throw new Error(`${label} must be base64-encoded PEM (not raw PEM)`);
+  }
+  const normalized = trimmed.replace(/\s+/g, "");
+  if (!/^[A-Za-z0-9+/=]+$/.test(normalized)) {
+    throw new Error(`${label} must be base64-encoded PEM`);
+  }
+  let decoded = "";
+  try {
+    decoded = Buffer.from(normalized, "base64").toString("utf8");
+  } catch {
+    throw new Error(`${label} must be base64-encoded PEM`);
+  }
+  if (!decoded.includes("PRIVATE KEY") || !decoded.includes("BEGIN")) {
+    throw new Error(`${label} must decode to a PEM private key`);
+  }
+  return decoded;
+}
+
+function normalizeCloudGithubAppSection(value: unknown): CloudGithubAppSection {
+  const raw = value ?? {};
+  assert(isRecord(raw), "[cloud].github_app must be a table");
+  const app_id = typeof (raw as any).app_id === "string" ? (raw as any).app_id : "";
+  const app_slug = typeof (raw as any).app_slug === "string" ? (raw as any).app_slug : "";
+  const private_key_raw = typeof (raw as any).private_key === "string" ? (raw as any).private_key : "";
+  const private_key = decodeBase64PrivateKey(private_key_raw, "[cloud].github_app.private_key");
+  const api_base_url =
+    typeof (raw as any).api_base_url === "string" && (raw as any).api_base_url.length > 0
+      ? (raw as any).api_base_url
+      : "https://api.github.com";
+  const app_base_url =
+    typeof (raw as any).app_base_url === "string" && (raw as any).app_base_url.length > 0
+      ? (raw as any).app_base_url
+      : "https://github.com";
+  return {
+    app_id,
+    app_slug,
+    private_key,
+    api_base_url,
+    app_base_url,
+  };
+}
+
+function normalizeCloudSection(value: unknown, opts: { configDir: string; dataDir: string }): CloudSection | null {
+  if (value === undefined) return null;
+  assert(isRecord(value), "[cloud] must be a table");
+
+  const enabled = typeof (value as any).enabled === "boolean" ? (value as any).enabled : true;
+  const providerRaw = typeof (value as any).provider === "string" ? (value as any).provider.toLowerCase() : "local";
+  const provider: CloudProvider = providerRaw === "e2b" ? "e2b" : "local";
+  const publicBaseUrl = typeof (value as any).public_base_url === "string" ? (value as any).public_base_url : "";
+
+  const workspacesDirRaw =
+    typeof (value as any).workspaces_dir === "string" && (value as any).workspaces_dir.length > 0
+      ? (value as any).workspaces_dir
+      : path.join(opts.dataDir, "cloud", "workspaces");
+  const workspaces_dir = path.isAbsolute(workspacesDirRaw) ? workspacesDirRaw : path.resolve(opts.configDir, workspacesDirRaw);
+
+  const default_agent = normalizeCloudDefaultAgent((value as any).default_agent);
+  const secrets_key = typeof (value as any).secrets_key === "string" ? (value as any).secrets_key : "";
+
+  const oauthRaw = isRecord((value as any).oauth) ? ((value as any).oauth as Record<string, unknown>) : {};
+  const callback_path =
+    typeof oauthRaw.callback_path === "string" && oauthRaw.callback_path.length > 0
+      ? normalizeHttpPath(oauthRaw.callback_path, "[cloud].oauth.callback_path")
+      : "/oauth/callback";
+
+  const oauth: CloudOAuthSection = { callback_path };
+  if (oauthRaw.github !== undefined) {
+    oauth.github = normalizeCloudOAuthProvider(oauthRaw.github, {
+      authorize_url: "https://github.com/login/oauth/authorize",
+      token_url: "https://github.com/login/oauth/access_token",
+      api_base_url: "https://api.github.com",
+      scopes: ["repo", "read:user"],
+    });
+  }
+  if (oauthRaw.gitlab !== undefined) {
+    oauth.gitlab = normalizeCloudOAuthProvider(oauthRaw.gitlab, {
+      authorize_url: "https://gitlab.com/oauth/authorize",
+      token_url: "https://gitlab.com/oauth/token",
+      api_base_url: "https://gitlab.com/api/v4",
+      scopes: ["read_api"],
+    });
+  }
+  if (oauthRaw.local !== undefined) {
+    oauth.local = normalizeCloudOAuthProvider(oauthRaw.local, {
+      authorize_url: "",
+      token_url: "",
+      api_base_url: "",
+      scopes: [],
+    });
+  }
+
+  if (enabled && publicBaseUrl.length > 0) {
+    normalizeUrl(publicBaseUrl, "[cloud].public_base_url");
+  }
+
+  const github_app = (value as any).github_app !== undefined ? normalizeCloudGithubAppSection((value as any).github_app) : null;
+  const e2b = (value as any).e2b !== undefined || provider === "e2b" ? normalizeCloudE2BSection((value as any).e2b) : null;
+  const proxy = (value as any).proxy !== undefined ? normalizeCloudProxySection((value as any).proxy) : null;
+
+  return {
+    enabled,
+    provider,
+    public_base_url: publicBaseUrl,
+    workspaces_dir,
+    default_agent,
+    secrets_key,
+    oauth,
+    github_app,
+    e2b,
+    proxy,
   };
 }
 
@@ -479,6 +792,18 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     dataDir: botSection.data_dir,
   });
 
+  const cloud = normalizeCloudSection((resolved as any).cloud, { configDir, dataDir: botSection.data_dir });
+  if (cloud?.enabled && cloud.public_base_url.length > 0) {
+    cloud.public_base_url = normalizeUrl(cloud.public_base_url, "[cloud].public_base_url");
+  }
+  if (cloud?.proxy?.enabled) {
+    assert(cloud.public_base_url.length > 0, "[cloud].public_base_url is required when proxy is enabled");
+    cloud.public_base_url = normalizeUrl(cloud.public_base_url, "[cloud].public_base_url");
+    assert(cloud.proxy.shared_secret.length > 0, "[cloud].proxy.shared_secret is required when proxy is enabled");
+    cloud.proxy.openai_base_url = normalizeUrl(cloud.proxy.openai_base_url, "[cloud].proxy.openai_base_url");
+    cloud.proxy.anthropic_base_url = normalizeUrl(cloud.proxy.anthropic_base_url, "[cloud].proxy.anthropic_base_url");
+  }
+
   assert(telegramSection || slackSection, "At least one of [telegram] or [slack] must be configured");
 
   return {
@@ -491,6 +816,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     telegram: telegramSection,
     slack: slackSection,
     playwright_mcp: playwrightMcp,
+    cloud,
     config_dir: configDir,
   };
 }

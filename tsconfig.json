@@ -26,6 +26,6 @@
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
   },
-  "include": ["src/**/*.ts", "index.ts", "tintin.ts"],
+  "include": ["src/**/*.ts", "index.ts", "tintin.ts", "tinc.ts", "tests/**/*.ts"],
   "exclude": ["references", "node_modules"]
 }

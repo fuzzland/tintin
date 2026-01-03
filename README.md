@@ -23,6 +23,7 @@ Tintin is your girlfriend and engineer. It allows you to control Codex and other
   - Create a [Slack bot and channel](https://github.com/fuzzland/tintin/tree/master/setup_docs/slack_bot_setup.md) or create a [Telegram bot and a group](https://github.com/fuzzland/tintin/tree/master/setup_docs/telegram_bot_setup.md)
   - Set `[telegram]` and/or `[slack]` secrets (supports `env:VAR`).
   - Optional: set `[security].*` allowlists to allow only certain users to use the bot in defined set of group chats.
+  - Optional: configure `[cloud]` to enable cloud mode (GitHub App + OAuth connections, shared repos, and `tinc` CLI).
 
 - Run `tintin start`.
 
@@ -35,6 +36,29 @@ Quick start (Chinese): `docs/quick-start.md`
 - Stop: `tintin stop`
 - Restart: `tintin restart`
 - Status: `tintin status`
+
+## Cloud mode (tinc)
+
+Cloud mode lets users run actions via Slack/Telegram without pre-registering projects. Users connect GitHub (via a GitHub App install flow) or GitLab/local (via OAuth), share repos into a chat, and run cloud actions. The cloud server must be reachable on a public IP for the GitHub App and OAuth callbacks.
+
+GitHub App setup: configure `[cloud.github_app]` (app_id, app_slug, private_key as base64-encoded PEM) and set the app callback URL to `${cloud.public_base_url}${cloud.oauth.callback_path}`.
+
+To run on E2B, set `[cloud].provider = "e2b"` and configure `[cloud.e2b]` (API key, template ID, timeouts). The E2B template should include Playwright + browser and the agent binaries (`codex` and/or `claude`) or adjust `cloud.e2b.codex_binary` / `cloud.e2b.claude_binary` to match.
+
+API access in cloud mode:
+- Users can provide their own `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` (and optional `*_BASE_URL`) via `tintin secrets`.
+- If not provided, Tintin can route through the built-in metered proxy (`[cloud.proxy]`), which must be enabled and configured.
+
+Key commands (chat):
+- `connect github|gitlab|local`
+- `repos`, `repo select <id>`, `repo share <id>`
+- `action run <prompt>` / `action status <runId>` / `action pull <runId>`
+- `secrets set|list|delete`
+
+CLI (cloud binary): `tinc`
+- `tinc lift` generates `tintin-setup.yml`
+- `tinc pull --run <id>` fetches a diff artifact
+- `tinc attach --run <id>` streams JSONL logs to your terminal
 
 ### Playwright MCP
 

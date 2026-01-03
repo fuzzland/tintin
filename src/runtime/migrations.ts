@@ -5,6 +5,7 @@ import * as init0001 from "./migrations/0001_init.js";
 import * as pending0002 from "./migrations/0002_pending_messages.js";
 import * as spaceEmoji0003 from "./migrations/0003_space_emoji.js";
 import * as sessionAgent0004 from "./migrations/0004_session_agent.js";
+import * as cloud0005 from "./migrations/0005_cloud_mode.js";
 
 const provider = {
   async getMigrations() {
@@ -13,6 +14,7 @@ const provider = {
       "0002_pending_messages": pending0002,
       "0003_space_emoji": spaceEmoji0003,
       "0004_session_agent": sessionAgent0004,
+      "0005_cloud_mode": cloud0005,
     };
   },
 };
