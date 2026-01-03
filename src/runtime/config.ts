@@ -115,6 +115,7 @@ export interface CloudSection {
   workspaces_dir: string;
   default_agent: CloudDefaultAgent;
   secrets_key: string;
+  keepalive_minutes: number;
   oauth: CloudOAuthSection;
   github_app?: CloudGithubAppSection | null;
   e2b?: CloudE2BSection | null;
@@ -551,6 +552,12 @@ function normalizeCloudSection(value: unknown, opts: { configDir: string; dataDi
 
   const default_agent = normalizeCloudDefaultAgent((value as any).default_agent);
   const secrets_key = typeof (value as any).secrets_key === "string" ? (value as any).secrets_key : "";
+  const keepalive_minutes =
+    typeof (value as any).keepalive_minutes === "number" &&
+    Number.isFinite((value as any).keepalive_minutes) &&
+    (value as any).keepalive_minutes >= 0
+      ? Math.floor((value as any).keepalive_minutes)
+      : 10;
 
   const oauthRaw = isRecord((value as any).oauth) ? ((value as any).oauth as Record<string, unknown>) : {};
   const callback_path =
@@ -599,6 +606,7 @@ function normalizeCloudSection(value: unknown, opts: { configDir: string; dataDi
     workspaces_dir,
     default_agent,
     secrets_key,
+    keepalive_minutes,
     oauth,
     github_app,
     e2b,

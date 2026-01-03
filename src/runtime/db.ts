@@ -83,6 +83,7 @@ export interface IdentitiesTable {
   user_id: string;
   active_repo_id: string | null;
   onboarded_at: number | null;
+  keepalive_minutes: number | null;
   created_at: number;
   updated_at: number;
 }

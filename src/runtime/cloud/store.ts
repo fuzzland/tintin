@@ -9,6 +9,7 @@ export interface IdentityRow {
   user_id: string;
   active_repo_id: string | null;
   onboarded_at: number | null;
+  keepalive_minutes: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -39,11 +40,20 @@ export async function getOrCreateIdentity(
     user_id: opts.userId,
     active_repo_id: null,
     onboarded_at: null,
+    keepalive_minutes: null,
     created_at: now,
     updated_at: now,
   };
   await db.insertInto("identities").values(row).execute();
   return row;
+}
+
+export async function setIdentityKeepaliveMinutes(db: Db, identityId: string, minutes: number | null): Promise<void> {
+  await db
+    .updateTable("identities")
+    .set({ keepalive_minutes: minutes, updated_at: nowMs() })
+    .where("id", "=", identityId)
+    .execute();
 }
 
 export async function markIdentityOnboarded(db: Db, identityId: string): Promise<void> {

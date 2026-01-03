@@ -15,7 +15,7 @@ import { hashSetupSpec, parseSetupSpec } from "./setupSpec.js";
 import { decryptSecret, interpolateSecrets } from "./secrets.js";
 import { buildCloneUrl } from "./git.js";
 import { ensureGithubAppToken } from "./githubApp.js";
-import { findRemoteJsonlFiles, RemoteLogSync } from "./e2bLogs.js";
+import { findRemoteJsonlFiles, getRemoteFileSize, RemoteLogSync } from "./e2bLogs.js";
 import { createProxyToken } from "./proxy.js";
 import {
   addRunRepo,
@@ -26,7 +26,7 @@ import {
   putSetupSpec,
   updateCloudRun,
 } from "./store.js";
-import { createSession, updateSession, upsertSessionOffset } from "../store.js";
+import { createSession, updateSession, upsertSessionOffset, type SessionRow } from "../store.js";
 
 function toPosix(p: string): string {
   return p.replace(/\\/g, "/");
@@ -40,6 +40,7 @@ function shellQuote(value: string): string {
 export class CloudManager {
   private readonly provider: CloudProvider;
   private sessionManager: SessionManager | null;
+  private readonly workspaceTerminateTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(
     private readonly config: AppConfig,
@@ -73,6 +74,45 @@ export class CloudManager {
     }
     const rootPath = path.join(this.config.cloud!.workspaces_dir, workspaceId);
     return { id: workspaceId, rootPath };
+  }
+
+  private async keepaliveMs(identityId: string | null): Promise<number> {
+    let minutes = this.config.cloud?.keepalive_minutes ?? 10;
+    if (identityId) {
+      const row = await this.db
+        .selectFrom("identities")
+        .select(["keepalive_minutes"])
+        .where("id", "=", identityId)
+        .executeTakeFirst();
+      if (row && typeof row.keepalive_minutes === "number") minutes = row.keepalive_minutes;
+    }
+    const clamped = Math.max(0, Math.floor(minutes));
+    const keepalive = clamped * 60_000;
+    const e2bTimeout = this.config.cloud?.e2b?.timeout_ms;
+    if (typeof e2bTimeout === "number" && Number.isFinite(e2bTimeout) && e2bTimeout > 0) {
+      return Math.min(keepalive, e2bTimeout);
+    }
+    return keepalive;
+  }
+
+  private clearWorkspaceTermination(workspaceId: string) {
+    const existing = this.workspaceTerminateTimers.get(workspaceId);
+    if (existing) clearTimeout(existing);
+    this.workspaceTerminateTimers.delete(workspaceId);
+  }
+
+  private async scheduleWorkspaceTermination(workspaceId: string, identityId: string | null) {
+    const delay = await this.keepaliveMs(identityId);
+    if (delay <= 0) {
+      void this.provider.terminateWorkspace({ id: workspaceId, rootPath: this.workspaceFromId(workspaceId).rootPath }).catch(() => {});
+      return;
+    }
+    this.clearWorkspaceTermination(workspaceId);
+    const timer = setTimeout(() => {
+      this.workspaceTerminateTimers.delete(workspaceId);
+      void this.provider.terminateWorkspace({ id: workspaceId, rootPath: this.workspaceFromId(workspaceId).rootPath }).catch(() => {});
+    }, delay);
+    this.workspaceTerminateTimers.set(workspaceId, timer);
   }
 
   async startRun(opts: {
@@ -278,6 +318,13 @@ export class CloudManager {
     return args;
   }
 
+  private buildClaudeResumeArgs(sessionId: string): string[] {
+    if (!this.config.claude_code) throw new Error("Claude Code is not configured.");
+    const args = ["--print", "--output-format", "stream-json", "--verbose", "--resume", sessionId];
+    if (this.config.claude_code.dangerously_bypass_approvals_and_sandbox) args.push("--dangerously-skip-permissions");
+    return args;
+  }
+
   private async startRemoteSession(opts: {
     identityId: string;
     platform: string;
@@ -478,12 +525,128 @@ export class CloudManager {
         byte_offset: 0,
         updated_at: nowMs(),
       });
-      const syncer = new RemoteLogSync(sandbox, remotePath, localPath, this.logger, 500, e2bCfg.command_timeout_ms);
+      const syncer = new RemoteLogSync(sandbox, remotePath, localPath, this.logger, 500, e2bCfg.command_timeout_ms, 0);
       syncer.start();
       logSyncers.push(syncer);
     }
 
     return { handle, agentSessionId, logSyncers };
+  }
+
+  private async spawnRemoteResume(opts: {
+    sessionId: string;
+    agentSessionId: string;
+    prompt: string;
+    cwd: string;
+    agent: SessionAgent;
+    workspace: CloudWorkspace;
+    envOverrides: Record<string, string>;
+  }): Promise<{ handle: CommandHandle; logSyncers: RemoteLogSync[] }> {
+    const e2b = this.getE2BProvider();
+    const sandbox = e2b.getSandbox(opts.workspace.id);
+    const e2bCfg = this.config.cloud?.e2b;
+    if (!e2bCfg) throw new Error("cloud.e2b is required for remote runs.");
+
+    const promptFile = `/tmp/tintin-prompt-${opts.sessionId}.txt`;
+    const promptText = opts.prompt.endsWith("\n") ? opts.prompt : `${opts.prompt}\n`;
+    await sandbox.files.write(promptFile, promptText, { requestTimeoutMs: e2bCfg.request_timeout_ms });
+
+    let sessionsRoot = "";
+    let configDir: string | null = null;
+    let cmd = "";
+    let env: Record<string, string> = {};
+
+    if (opts.agent === "claude_code") {
+      if (!this.config.claude_code) throw new Error("Claude Code is not configured.");
+      sessionsRoot = resolveSessionsRoot(opts.cwd, this.config.claude_code.sessions_dir);
+      configDir = resolveClaudeConfigDirFromSessionsRoot(sessionsRoot);
+      await sandbox.files.makeDir(toPosix(sessionsRoot), { requestTimeoutMs: e2bCfg.request_timeout_ms }).catch(() => {});
+      await sandbox.files.makeDir(toPosix(configDir), { requestTimeoutMs: e2bCfg.request_timeout_ms }).catch(() => {});
+      await sandbox.files
+        .makeDir(path.posix.join(toPosix(configDir), "projects"), { requestTimeoutMs: e2bCfg.request_timeout_ms })
+        .catch(() => {});
+      const args = this.buildClaudeResumeArgs(opts.agentSessionId);
+      cmd = `${e2bCfg.claude_binary} ${args.map(shellQuote).join(" ")} < ${shellQuote(promptFile)}`;
+      env = {
+        ...this.config.claude_code.env,
+        ...opts.envOverrides,
+        CLAUDE_CONFIG_DIR: toPosix(configDir),
+      };
+    } else {
+      sessionsRoot = resolveSessionsRoot(opts.cwd, this.config.codex.sessions_dir);
+      const homeDir = resolveCodexHomeFromSessionsRoot(sessionsRoot);
+      await sandbox.files.makeDir(toPosix(sessionsRoot), { requestTimeoutMs: e2bCfg.request_timeout_ms }).catch(() => {});
+      await sandbox.files.makeDir(toPosix(homeDir), { requestTimeoutMs: e2bCfg.request_timeout_ms }).catch(() => {});
+      const args = this.buildCodexArgs(opts.cwd);
+      args.push("resume", opts.agentSessionId);
+      cmd = `${e2bCfg.codex_binary} ${args.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
+      env = {
+        ...this.config.codex.env,
+        ...opts.envOverrides,
+        CODEX_HOME: toPosix(homeDir),
+      };
+    }
+
+    let remoteFiles: string[] = [];
+    if (opts.agent === "claude_code") {
+      if (!configDir) throw new Error("Claude config dir not resolved.");
+      remoteFiles = [toPosix(resolveClaudeSessionJsonlPath(configDir, opts.cwd, opts.agentSessionId))];
+    } else {
+      remoteFiles = await findRemoteJsonlFiles({
+        sandbox,
+        sessionsRoot: toPosix(sessionsRoot),
+        sessionId: opts.agentSessionId,
+        timeoutMs: 10_000,
+        pollMs: 200,
+      });
+    }
+
+    if (remoteFiles.length === 0) {
+      this.logger.warn(`[cloud] could not locate remote JSONL logs for session ${opts.sessionId}.`);
+    }
+
+    const initialOffsets: number[] = [];
+    for (const remotePath of remoteFiles) {
+      initialOffsets.push(
+        await getRemoteFileSize({
+          sandbox,
+          remotePath,
+          timeoutMs: e2bCfg.command_timeout_ms,
+        }),
+      );
+    }
+
+    const handle = (await sandbox.commands.run(cmd, {
+      cwd: toPosix(opts.cwd),
+      envs: env,
+      timeoutMs: e2bCfg.command_timeout_ms,
+      background: true,
+      onStdout: (data) => this.logger.debug(`[cloud][agent] ${data.trimEnd()}`),
+      onStderr: (data) => this.logger.debug(`[cloud][agent] ${data.trimEnd()}`),
+    })) as CommandHandle;
+
+    const logsDir = path.join(this.config.cloud!.workspaces_dir, "logs", opts.sessionId);
+    await mkdir(logsDir, { recursive: true });
+    const logSyncers: RemoteLogSync[] = [];
+    for (let i = 0; i < remoteFiles.length; i++) {
+      const remotePath = remoteFiles[i]!;
+      const base = path.posix.basename(remotePath);
+      const localPath = path.join(logsDir, `${Date.now()}-${i}-${base}`);
+      await writeFile(localPath, "", "utf8");
+      await upsertSessionOffset(this.db, {
+        id: crypto.randomUUID(),
+        session_id: opts.sessionId,
+        jsonl_path: localPath,
+        byte_offset: 0,
+        updated_at: nowMs(),
+      });
+      const initialOffset = initialOffsets[i] ?? 0;
+      const syncer = new RemoteLogSync(sandbox, remotePath, localPath, this.logger, 500, e2bCfg.command_timeout_ms, initialOffset);
+      syncer.start();
+      logSyncers.push(syncer);
+    }
+
+    return { handle, logSyncers };
   }
 
   private async monitorRemoteSession(opts: {
@@ -512,10 +675,48 @@ export class CloudManager {
         pid: null,
       });
       await this.handleSessionFinished(opts.sessionId, status);
-      if (this.provider.id === "e2b") {
-        await this.provider.terminateWorkspace(opts.workspace).catch(() => {});
-      }
     }
+  }
+
+  async resumeCloudSession(session: SessionRow, prompt: string): Promise<"resumed" | "expired" | "not_cloud"> {
+    if (this.provider.id !== "e2b") return "not_cloud";
+    const run = await getCloudRunBySession(this.db, session.id);
+    if (!run || run.provider !== "e2b") return "not_cloud";
+    if (!session.codex_session_id) throw new Error("Session missing codex_session_id");
+
+    try {
+      this.getE2BProvider().getSandbox(run.workspace_id);
+    } catch {
+      return "expired";
+    }
+
+    this.clearWorkspaceTermination(run.workspace_id);
+
+    await updateSession(this.db, session.id, { status: "starting", exit_code: null, finished_at: null });
+    await updateCloudRun(this.db, run.id, { status: "running", finished_at: null, diff_patch: null, diff_summary: null });
+
+    const workspace = this.workspaceFromId(run.workspace_id);
+    const envOverrides = this.applyProxyEnv(await this.buildAgentEnv(run.identity_id), run.identity_id, session.agent);
+    const { handle, logSyncers } = await this.spawnRemoteResume({
+      sessionId: session.id,
+      agentSessionId: session.codex_session_id,
+      prompt,
+      cwd: session.codex_cwd,
+      agent: session.agent,
+      workspace,
+      envOverrides,
+    });
+
+    await updateSession(this.db, session.id, { pid: handle.pid ?? null, status: "running", started_at: nowMs() });
+
+    void this.monitorRemoteSession({
+      sessionId: session.id,
+      handle,
+      logSyncers,
+      workspace,
+    });
+
+    return "resumed";
   }
 
   async handleSessionFinished(sessionId: string, status: SessionStatus): Promise<void> {
@@ -540,5 +741,8 @@ export class CloudManager {
       diff_summary: summary,
       finished_at: nowMs(),
     });
+    if (this.provider.id === "e2b") {
+      void this.scheduleWorkspaceTermination(run.workspace_id, run.identity_id);
+    }
   }
 }

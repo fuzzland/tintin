@@ -83,6 +83,7 @@ workspaces_dir = "./data/cloud/workspaces"
 default_agent = "codex"
 # 32+ bytes recommended; use env:VAR to keep secrets out of config.toml
 secrets_key = "env:TINTIN_CLOUD_SECRETS_KEY"
+keepalive_minutes = 10
 
 [cloud.e2b]
 # Optional E2B settings (used when provider = "e2b")

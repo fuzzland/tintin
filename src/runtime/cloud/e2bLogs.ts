@@ -9,6 +9,18 @@ function shellQuote(value: string): string {
   return JSON.stringify(value);
 }
 
+export async function getRemoteFileSize(opts: { sandbox: Sandbox; remotePath: string; timeoutMs: number }): Promise<number> {
+  const cmd = `wc -c < ${shellQuote(opts.remotePath)}`;
+  try {
+    const result = await opts.sandbox.commands.run(cmd, { timeoutMs: opts.timeoutMs });
+    const raw = String(result.stdout ?? "").trim();
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
 export async function findRemoteJsonlFiles(opts: {
   sandbox: Sandbox;
   sessionsRoot: string;
@@ -55,6 +67,7 @@ async function listRemoteFiles(sandbox: Sandbox, root: string): Promise<string[]
 export class RemoteLogSync {
   private running = false;
   private offset = 0;
+  private readonly initialOffset: number;
 
   constructor(
     private readonly sandbox: Sandbox,
@@ -63,10 +76,14 @@ export class RemoteLogSync {
     private readonly logger: Logger,
     private readonly pollMs: number,
     private readonly commandTimeoutMs: number,
-  ) {}
+    initialOffset = 0,
+  ) {
+    this.initialOffset = initialOffset;
+  }
 
   start() {
     if (this.running) return;
+    this.offset = Math.max(0, Math.floor(this.initialOffset));
     this.running = true;
     void this.loop();
   }
