@@ -37,6 +37,7 @@ import {
   listSecrets,
   listSharedRepos,
   setIdentityActiveRepo,
+  setIdentityKeepaliveMinutes,
   setSecret,
   shareRepo,
   unshareRepo,
@@ -355,7 +356,25 @@ export class BotController {
         });
         return;
       }
-      const result = applySettingsCommand(this.config, settingsIntent.cmd, settingsIntent.defaultAgent, "telegram");
+      const identity = await getOrCreateIdentity(this.db, { platform: "telegram", workspaceId: null, userId });
+      if (settingsIntent.cmd.kind === "list") {
+        const result = formatSettingsSummary(this.config, settingsIntent.defaultAgent, "telegram", identity.keepalive_minutes);
+        await this.telegram.sendMessage({
+          chatId,
+          messageThreadId: forumThreadId,
+          replyToMessageId: message.message_id,
+          text: result,
+          priority: "user",
+        });
+        return;
+      }
+      const cloudResult = await applyCloudSettingsCommand({
+        config: this.config,
+        db: this.db,
+        cmd: settingsIntent.cmd,
+        identityId: identity.id,
+      });
+      const result = cloudResult ?? applySettingsCommand(this.config, settingsIntent.cmd, settingsIntent.defaultAgent, "telegram");
       await this.telegram.sendMessage({
         chatId,
         messageThreadId: forumThreadId,
@@ -1126,20 +1145,6 @@ export class BotController {
         await reply(secrets.map((s) => `- \`${s.name}\``).join("\n"));
         return true;
       }
-      case "secrets_get": {
-        const cmd = opts.command as Extract<CloudCommand, { kind: "secrets_get" }>;
-        const secrets = await listSecrets(this.db, identity.id);
-        const secret = this.findSecretMetaByName(secrets, cmd.name);
-        if (!secret) {
-          await reply("Secret not found.");
-          return true;
-        }
-        const createdAt = secret.created_at ? new Date(secret.created_at).toISOString() : "unknown";
-        const updatedAt = secret.updated_at ? new Date(secret.updated_at).toISOString() : "unknown";
-        const lines = [`*Secret* \`${secret.name}\``, `- created: \`${createdAt}\``, `- updated: \`${updatedAt}\``];
-        await reply(lines.join("\n"));
-        return true;
-      }
       case "secrets_delete": {
         const cmd = opts.command as Extract<CloudCommand, { kind: "secrets_delete" }>;
         const ok = await deleteSecret(this.db, identity.id, cmd.name);
@@ -1754,7 +1759,23 @@ export class BotController {
 
       const settingsIntent = parseSettingsIntentFromSlack(text);
       if (settingsIntent) {
-        const result = applySettingsCommand(this.config, settingsIntent.cmd, settingsIntent.defaultAgent, "slack");
+        const identity = await getOrCreateIdentity(this.db, { platform: "slack", workspaceId: teamId ?? null, userId });
+        if (settingsIntent.cmd.kind === "list") {
+          const result = formatSettingsSummary(this.config, settingsIntent.defaultAgent, "slack", identity.keepalive_minutes);
+          await this.slack.postEphemeral({
+            channel: channelId,
+            user: userId,
+            text: result,
+          });
+          return;
+        }
+        const cloudResult = await applyCloudSettingsCommand({
+          config: this.config,
+          db: this.db,
+          cmd: settingsIntent.cmd,
+          identityId: identity.id,
+        });
+        const result = cloudResult ?? applySettingsCommand(this.config, settingsIntent.cmd, settingsIntent.defaultAgent, "slack");
         await this.slack.postEphemeral({
           channel: channelId,
           user: userId,
@@ -2339,7 +2360,6 @@ type CloudCommand =
   | { kind: "secrets_create"; name: string; value: string | null }
   | { kind: "secrets_update"; name: string; value: string | null }
   | { kind: "secrets_list" }
-  | { kind: "secrets_get"; name: string }
   | { kind: "secrets_delete"; name: string };
 
 function normalizeCloudText(text: string): string {
@@ -2431,9 +2451,6 @@ function parseCloudCommand(text: string): CloudCommand | null {
   if (head === "secrets" && tokens.length >= 1) {
     const sub = tokens.shift()!.toLowerCase();
     if (sub === "list") return { kind: "secrets_list" };
-    if ((sub === "get" || sub === "read" || sub === "info") && tokens.length >= 1) {
-      return { kind: "secrets_get", name: tokens.join(" ") };
-    }
     if (sub === "set" && tokens.length >= 1) {
       const name = tokens.shift()!;
       const value = tokens.length > 0 ? tokens.join(" ") : null;
@@ -2496,22 +2513,10 @@ function applySettingsCommand(
   defaultAgent: SessionAgent,
   platform: "telegram" | "slack",
 ): string {
-  if (cmd.kind === "list") return formatSettingsSummary(config, defaultAgent, platform);
+  if (cmd.kind === "list") return formatSettingsSummary(config, defaultAgent, platform, null);
 
   const parsed = resolveSettingTarget(cmd.target, defaultAgent);
   if (!parsed) return `Unknown setting "${cmd.target}".\nSupported: ${formatSupportedSettingKeys()}`;
-
-  if (parsed.type === "cloud_number") {
-    if (!config.cloud) return "Cloud configuration is missing.";
-    if (cmd.kind !== "set") return `Use "settings set ${parsed.label} <number>" to change it.`;
-    const n = Number(cmd.value);
-    if (!Number.isFinite(n)) return `Expected a number for ${parsed.label}.`;
-    const next = Math.floor(n);
-    if (next < parsed.min) return `${parsed.label} must be >= ${parsed.min}.`;
-    const prev = config.cloud.keepalive_minutes;
-    config.cloud.keepalive_minutes = next;
-    return `${parsed.label} updated (${String(prev)} -> ${String(next)}). Runtime-only; affects cloud resumes. Use "settings" to view current values.`;
-  }
 
   const adapter = getAgentAdapter(parsed.agent);
   let agentConfig;
@@ -2652,7 +2657,6 @@ function buildCloudHelpText(platform: "telegram" | "slack"): string {
     "6) Secrets (optional)",
     `- \`${cmd("secrets create NAME VALUE")}\``,
     `- \`${cmd("secrets update NAME VALUE")}\``,
-    `- \`${cmd("secrets read NAME")}\``,
     `- \`${cmd("secrets list")}\``,
     `- \`${cmd("secrets delete NAME")}\``,
     "",
@@ -2692,15 +2696,10 @@ function resolveSettingTarget(
   | { type: "number"; agent: SessionAgent; key: NumberSettingKey; label: string; min: number }
   | { type: "string"; agent: SessionAgent; key: StringSettingKey; label: string }
   | { type: "env"; agent: SessionAgent; envKey: string; label: string }
-  | { type: "cloud_number"; key: "keepalive_minutes"; label: string; min: number }
   | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
   const lower = trimmed.toLowerCase();
-
-  if (lower === "cloud.keepalive_minutes") {
-    return { type: "cloud_number", key: "keepalive_minutes", label: "`cloud.keepalive_minutes`", min: 0 };
-  }
 
   const agentPrefix = lower.startsWith("codex.")
     ? ("codex" as const)
@@ -2772,7 +2771,12 @@ function formatSupportedSettingKeys(): string {
   ].join(", ");
 }
 
-function formatSettingsSummary(config: AppConfig, agent: SessionAgent, platform: "telegram" | "slack"): string {
+function formatSettingsSummary(
+  config: AppConfig,
+  agent: SessionAgent,
+  platform: "telegram" | "slack",
+  identityKeepaliveMinutes: number | null,
+): string {
   const adapter = getAgentAdapter(agent);
   let section;
   try {
@@ -2810,7 +2814,13 @@ function formatSettingsSummary(config: AppConfig, agent: SessionAgent, platform:
   }
 
   if (config.cloud?.enabled) {
-    lines.push("", "Cloud settings:", `- \`cloud.keepalive_minutes\`: ${String(config.cloud.keepalive_minutes)}`);
+    const effective =
+      typeof identityKeepaliveMinutes === "number" && Number.isFinite(identityKeepaliveMinutes)
+        ? identityKeepaliveMinutes
+        : config.cloud.keepalive_minutes;
+    const suffix =
+      typeof identityKeepaliveMinutes === "number" && Number.isFinite(identityKeepaliveMinutes) ? " (per-user)" : " (default)";
+    lines.push("", "Cloud settings:", `- \`cloud.keepalive_minutes\`: ${String(effective)}${suffix}`);
   }
 
   lines.push(
@@ -2819,9 +2829,37 @@ function formatSettingsSummary(config: AppConfig, agent: SessionAgent, platform:
     `- ${cmdPrefix}settings set ${prefix}.timeout_seconds 1800`,
     `- ${cmdPrefix}settings set mcp.SEARCH http://localhost:3000`,
     `- ${cmdPrefix}settings set cloud.keepalive_minutes 10`,
+    `- ${cmdPrefix}settings unset cloud.keepalive_minutes`,
     `- ${cmdPrefix}settings unset mcp.SEARCH`,
   );
   return lines.join("\n");
+}
+
+async function applyCloudSettingsCommand(opts: {
+  config: AppConfig;
+  db: Db;
+  cmd: SettingsCommand;
+  identityId: string;
+}): Promise<string | null> {
+  if (opts.cmd.kind === "list") return null;
+  const target = opts.cmd.target.trim().toLowerCase();
+  if (target !== "cloud.keepalive_minutes") return null;
+  if (!opts.config.cloud) return "Cloud configuration is missing.";
+
+  if (opts.cmd.kind === "unset") {
+    await setIdentityKeepaliveMinutes(opts.db, opts.identityId, null);
+    return "`cloud.keepalive_minutes` reset to default.";
+  }
+
+  if (opts.cmd.kind !== "set") {
+    return `Use "settings set cloud.keepalive_minutes <number>" to change it.`;
+  }
+  const n = Number(opts.cmd.value);
+  if (!Number.isFinite(n)) return "Expected a number for `cloud.keepalive_minutes`.";
+  const next = Math.floor(n);
+  if (next < 0) return "`cloud.keepalive_minutes` must be >= 0.";
+  await setIdentityKeepaliveMinutes(opts.db, opts.identityId, next);
+  return `cloud.keepalive_minutes updated (per-user) -> ${String(next)}.`;
 }
 
 function formatEnvValue(value: string): string {

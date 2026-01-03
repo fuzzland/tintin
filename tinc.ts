@@ -56,7 +56,6 @@ Usage:
   tinc secrets set <name> --from-stdin --platform <slack|telegram> --user <id> [--workspace <id>]
   tinc secrets create <name> <value> --platform <slack|telegram> --user <id> [--workspace <id>]
   tinc secrets update <name> <value> --platform <slack|telegram> --user <id> [--workspace <id>]
-  tinc secrets read <name> --platform <slack|telegram> --user <id> [--workspace <id>]
   tinc secrets list --platform <slack|telegram> --user <id> [--workspace <id>]
   tinc secrets delete <name> --platform <slack|telegram> --user <id> [--workspace <id>]
 `);
@@ -467,28 +466,6 @@ async function runSecrets(args: CliArgs) {
       return;
     }
     for (const s of secrets) console.log(s.name);
-    return;
-  }
-
-  if (normalizeSub === "read" || normalizeSub === "get" || normalizeSub === "info") {
-    const name = rest[0];
-    if (!name) throw new Error("secrets read requires a name");
-    const identity = parseIdentityFlags(rest.slice(1));
-    const { config, db } = await ensureConfig(args.configPath);
-    if (!config.cloud?.enabled) throw new Error("Cloud mode is disabled.");
-    const ident = await getOrCreateIdentity(db, {
-      platform: identity.platform,
-      workspaceId: identity.workspaceId,
-      userId: identity.userId,
-    });
-    const secrets = await listSecrets(db, ident.id);
-    const secret = secrets.find((s) => s.name === name) ?? null;
-    if (!secret) throw new Error("Secret not found.");
-    const createdAt = secret.created_at ? new Date(secret.created_at).toISOString() : "unknown";
-    const updatedAt = secret.updated_at ? new Date(secret.updated_at).toISOString() : "unknown";
-    console.log(`${secret.name}`);
-    console.log(`created: ${createdAt}`);
-    console.log(`updated: ${updatedAt}`);
     return;
   }
 
