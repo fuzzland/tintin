@@ -19,7 +19,7 @@ import { redactText } from "./redact.js";
 import type { SendToSessionFn } from "./messaging.js";
 import { validateAndResolveProjectPath } from "./security.js";
 import { startOAuthFlow } from "./cloud/oauth.js";
-import { ensureGithubAppToken, startGithubAppFlow } from "./cloud/githubApp.js";
+import { ensureGithubAppToken, parseGithubAppMetadata, startGithubAppFlow } from "./cloud/githubApp.js";
 import { fetchGithubInstallationRepos, fetchGithubRepos, fetchGitlabRepos } from "./cloud/repos.js";
 import { encryptSecret } from "./cloud/secrets.js";
 import { generateSetupSpecFromPath } from "./cloud/lift.js";
@@ -675,6 +675,24 @@ export class BotController {
         });
         try {
           if (provider === "github") {
+            const existing = (await listConnections(this.db, identity.id))
+              .filter((c) => c.type === "github")
+              .sort((a, b) => b.updated_at - a.updated_at)[0];
+            if (existing) {
+              const meta = parseGithubAppMetadata(existing.metadata_json);
+              const connectedAt = existing.updated_at ? new Date(existing.updated_at).toISOString() : null;
+              const lines = ["Already connected to GitHub."];
+              if (meta?.account_login) {
+                const accountType = meta.account_type ?? "unknown";
+                lines.push(`- Account: ${meta.account_login} (${accountType})`);
+              } else {
+                lines.push("- Account: (unknown; reconnect to refresh)");
+              }
+              if (meta?.installation_id) lines.push(`- Installation ID: ${meta.installation_id}`);
+              if (connectedAt) lines.push(`- Connected at: ${connectedAt}`);
+              await reply(lines.join("\n"), true);
+              return true;
+            }
             if (!cloud.github_app) {
               await reply("Missing [cloud].github_app configuration.");
               return true;
