@@ -103,6 +103,16 @@ export class SlackClient {
     await this.api("views.open", { trigger_id, view });
   }
 
+  async openConversation(opts: { users: string[] }): Promise<string> {
+    await this.limiter.waitTurn();
+    const res = await this.api<{ channel?: { id?: string } }>("conversations.open", {
+      users: opts.users.join(","),
+    });
+    const channelId = res.channel?.id;
+    if (!channelId) throw new Error("Slack API conversations.open missing channel id");
+    return channelId;
+  }
+
   async uploadFile(opts: { channel: string; thread_ts?: string; filename: string; file: Buffer; mimeType?: string; initial_comment?: string }) {
     await this.limiter.waitTurn();
     const form = new FormData();

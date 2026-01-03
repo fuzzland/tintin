@@ -127,6 +127,7 @@ export async function startGithubAppFlow(opts: {
   cloud: CloudSection;
   identityId: string;
   redirectBase: string;
+  metadataJson?: string | null;
 }): Promise<{ authorizeUrl: string }> {
   const cfg = opts.cloud.github_app;
   if (!cfg) throw new Error("Missing [cloud].github_app configuration.");
@@ -142,7 +143,7 @@ export async function startGithubAppFlow(opts: {
     codeVerifier: verifier,
     redirectUrl: redirectUri,
     identityId: opts.identityId,
-    metadataJson: null,
+    metadataJson: opts.metadataJson ?? null,
     ttlMs: 10 * 60 * 1000,
   });
   return { authorizeUrl: buildInstallUrl(cfg, state) };
@@ -153,7 +154,7 @@ export async function handleGithubAppCallback(opts: {
   cloud: CloudSection;
   installationId: string;
   state: string;
-}): Promise<void> {
+}): Promise<{ identityId: string; provider: string; metadataJson: string | null }> {
   const cfg = opts.cloud.github_app;
   if (!cfg) throw new Error("Missing [cloud].github_app configuration.");
   const saved = await consumeOAuthState(opts.db, STATE_PROVIDER, opts.state);
@@ -186,4 +187,5 @@ export async function handleGithubAppCallback(opts: {
     metadataJson: JSON.stringify(metadata),
   });
   await markIdentityOnboarded(opts.db, saved.identity_id);
+  return { identityId: saved.identity_id, provider: "github", metadataJson: saved.metadata_json ?? null };
 }

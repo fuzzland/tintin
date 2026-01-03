@@ -114,7 +114,7 @@ export async function handleOAuthCallback(opts: {
   provider: string;
   code: string;
   state: string;
-}): Promise<void> {
+}): Promise<{ identityId: string; provider: string; metadataJson: string | null }> {
   const cfg = resolveProviderConfig(opts.cloud, opts.provider);
   const saved = await consumeOAuthState(opts.db, opts.provider, opts.state);
   if (!saved) throw new Error("Invalid or expired OAuth state");
@@ -135,4 +135,5 @@ export async function handleOAuthCallback(opts: {
     metadataJson: saved.metadata_json ?? null,
   });
   await markIdentityOnboarded(opts.db, saved.identity_id);
+  return { identityId: saved.identity_id, provider: opts.provider, metadataJson: saved.metadata_json ?? null };
 }

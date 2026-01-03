@@ -22,6 +22,12 @@ export interface BotServiceDeps {
   logger: Logger;
 }
 
+type CloudConnectMetadata = {
+  platform: "telegram" | "slack";
+  chat_id: string;
+  user_id: string;
+};
+
 function readHeader(req: http.IncomingMessage, name: string): string | null {
   const value = req.headers[name];
   if (Array.isArray(value)) return value[0] ?? null;
@@ -49,6 +55,22 @@ function sendJson(res: http.ServerResponse, status: number, body: any) {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.end(JSON.stringify(body));
+}
+
+function parseCloudConnectMetadata(metadataJson: string | null): CloudConnectMetadata | null {
+  if (!metadataJson) return null;
+  try {
+    const parsed = JSON.parse(metadataJson) as any;
+    const platform = parsed?.platform;
+    const chatId = parsed?.chat_id;
+    const userId = parsed?.user_id;
+    if ((platform !== "slack" && platform !== "telegram") || typeof chatId !== "string" || typeof userId !== "string") {
+      return null;
+    }
+    return { platform, chat_id: chatId, user_id: userId };
+  } catch {
+    return null;
+  }
 }
 
 export async function createBotService(deps: BotServiceDeps) {
@@ -85,6 +107,29 @@ export async function createBotService(deps: BotServiceDeps) {
     process.once("SIGINT", () => void playwrightMcp.stop());
     process.once("SIGTERM", () => void playwrightMcp.stop());
   }
+
+  const notifyGithubConnected = async (metadataJson: string | null) => {
+    const metadata = parseCloudConnectMetadata(metadataJson);
+    if (!metadata) return;
+    const text = "GitHub connected. Run `repos` to list repositories.";
+    try {
+      if (metadata.platform === "telegram") {
+        if (!telegram) return;
+        const chatId = Number(metadata.chat_id);
+        if (!Number.isFinite(chatId)) return;
+        await telegram.sendMessage({ chatId, text, priority: "user" });
+        return;
+      }
+      if (!slack) return;
+      let channel = metadata.chat_id;
+      if (!channel.startsWith("D")) {
+        channel = await slack.openConversation({ users: [metadata.user_id] });
+      }
+      await slack.postMessageDetailed({ channel, text });
+    } catch (e) {
+      logger.warn(`Failed to send GitHub connect message: ${String(e)}`);
+    }
+  };
 
   const isFencedCodeBlock = (text: string): boolean => {
     const t = text.trim();
@@ -663,7 +708,8 @@ export async function createBotService(deps: BotServiceDeps) {
             return;
           }
           try {
-            await handleGithubAppCallback({ db, cloud: config.cloud, installationId, state });
+            const result = await handleGithubAppCallback({ db, cloud: config.cloud, installationId, state });
+            await notifyGithubConnected(result.metadataJson);
             sendText(res, 200, "Connected. Return to the chat.");
           } catch (e) {
             sendText(res, 400, `GitHub App connect failed: ${String(e)}`);
@@ -677,7 +723,10 @@ export async function createBotService(deps: BotServiceDeps) {
           return;
         }
         try {
-          await handleOAuthCallback({ db, cloud: config.cloud, provider, code, state });
+          const result = await handleOAuthCallback({ db, cloud: config.cloud, provider, code, state });
+          if (result.provider === "github") {
+            await notifyGithubConnected(result.metadataJson);
+          }
           sendText(res, 200, "Connected. Return to the chat.");
         } catch (e) {
           sendText(res, 400, `OAuth failed: ${String(e)}`);

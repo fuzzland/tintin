@@ -668,6 +668,11 @@ export class BotController {
         }
         const cmd = opts.command as Extract<CloudCommand, { kind: "connect" }>;
         const provider = cmd.provider;
+        const metadataJson = JSON.stringify({
+          platform: opts.platform,
+          chat_id: opts.chatId,
+          user_id: opts.userId,
+        });
         try {
           if (provider === "github") {
             if (!cloud.github_app) {
@@ -679,6 +684,7 @@ export class BotController {
               cloud,
               identityId: identity.id,
               redirectBase: cloud.public_base_url,
+              metadataJson,
             });
             await reply(`Install the GitHub App here:\n${authorizeUrl}`, true);
             return true;
@@ -689,6 +695,7 @@ export class BotController {
             provider,
             identityId: identity.id,
             redirectBase: cloud.public_base_url,
+            metadataJson,
           });
           await reply(`Authorize ${provider} here:\n${authorizeUrl}`, true);
         } catch (e) {
