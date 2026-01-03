@@ -738,7 +738,12 @@ export class BotController {
           try {
             if (conn.type === "github") {
               if (cloud.github_app) {
-                const token = await ensureGithubAppToken({ db: this.db, config: cloud.github_app, connection: conn });
+                const token = await ensureGithubAppToken({
+                  db: this.db,
+                  config: cloud.github_app,
+                  connection: conn,
+                  forceRefresh: true,
+                });
                 const repos = await fetchGithubInstallationRepos({ token: token.token, apiBaseUrl: cloud.github_app.api_base_url });
                 for (const r of repos) {
                   await this.db

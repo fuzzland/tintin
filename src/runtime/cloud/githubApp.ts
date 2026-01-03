@@ -106,9 +106,15 @@ export async function ensureGithubAppToken(opts: {
   db: Db;
   config: CloudGithubAppSection;
   connection: ConnectionsTable;
+  forceRefresh?: boolean;
 }): Promise<{ token: string; expiresAt: number | null }> {
   const now = nowMs();
-  if (opts.connection.access_token && opts.connection.token_expires_at && opts.connection.token_expires_at > now + TOKEN_REFRESH_BUFFER_MS) {
+  if (
+    !opts.forceRefresh &&
+    opts.connection.access_token &&
+    opts.connection.token_expires_at &&
+    opts.connection.token_expires_at > now + TOKEN_REFRESH_BUFFER_MS
+  ) {
     return { token: opts.connection.access_token, expiresAt: opts.connection.token_expires_at };
   }
   const metadata = parseGithubAppMetadata(opts.connection.metadata_json);
