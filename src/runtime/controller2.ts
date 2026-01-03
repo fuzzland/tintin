@@ -567,6 +567,12 @@ export class BotController {
     return repos.find((r) => r.id === target || r.name === target) ?? null;
   }
 
+  private findSecretMetaByName(secrets: { name: string; created_at: number; updated_at: number }[], name: string) {
+    const target = name.trim();
+    if (!target) return null;
+    return secrets.find((s) => s.name === target) ?? null;
+  }
+
   private async handleCloudCommand(opts: {
     platform: "telegram" | "slack";
     command: CloudCommand;
@@ -1063,13 +1069,75 @@ export class BotController {
         }
         return true;
       }
+      case "secrets_create": {
+        if (!opts.isDirect) {
+          await reply(`Use ${formatCmd("secrets create")} in a 1:1 chat.`);
+          return true;
+        }
+        const cmd = opts.command as Extract<CloudCommand, { kind: "secrets_create" }>;
+        if (!cmd.value) {
+          await reply(`Usage: ${formatCmd("secrets create NAME VALUE")}`);
+          return true;
+        }
+        const existing = await listSecrets(this.db, identity.id);
+        if (this.findSecretMetaByName(existing, cmd.name)) {
+          await reply(`Secret ${cmd.name} already exists. Use ${formatCmd("secrets update")}.`);
+          return true;
+        }
+        try {
+          const encrypted = encryptSecret(cmd.value, cloud.secrets_key);
+          await setSecret(this.db, { identityId: identity.id, name: cmd.name, encryptedValue: encrypted });
+          await reply(`Secret ${cmd.name} created.`);
+        } catch (e) {
+          await reply(`Failed to create secret: ${String(e)}`);
+        }
+        return true;
+      }
+      case "secrets_update": {
+        if (!opts.isDirect) {
+          await reply(`Use ${formatCmd("secrets update")} in a 1:1 chat.`);
+          return true;
+        }
+        const cmd = opts.command as Extract<CloudCommand, { kind: "secrets_update" }>;
+        if (!cmd.value) {
+          await reply(`Usage: ${formatCmd("secrets update NAME VALUE")}`);
+          return true;
+        }
+        const existing = await listSecrets(this.db, identity.id);
+        if (!this.findSecretMetaByName(existing, cmd.name)) {
+          await reply(`Secret ${cmd.name} not found. Use ${formatCmd("secrets create")}.`);
+          return true;
+        }
+        try {
+          const encrypted = encryptSecret(cmd.value, cloud.secrets_key);
+          await setSecret(this.db, { identityId: identity.id, name: cmd.name, encryptedValue: encrypted });
+          await reply(`Secret ${cmd.name} updated.`);
+        } catch (e) {
+          await reply(`Failed to update secret: ${String(e)}`);
+        }
+        return true;
+      }
       case "secrets_list": {
         const secrets = await listSecrets(this.db, identity.id);
         if (secrets.length === 0) {
           await reply("No secrets.");
           return true;
         }
-        await reply(secrets.map((s) => `- ${s.name}`).join("\n"));
+        await reply(secrets.map((s) => `- \`${s.name}\``).join("\n"));
+        return true;
+      }
+      case "secrets_get": {
+        const cmd = opts.command as Extract<CloudCommand, { kind: "secrets_get" }>;
+        const secrets = await listSecrets(this.db, identity.id);
+        const secret = this.findSecretMetaByName(secrets, cmd.name);
+        if (!secret) {
+          await reply("Secret not found.");
+          return true;
+        }
+        const createdAt = secret.created_at ? new Date(secret.created_at).toISOString() : "unknown";
+        const updatedAt = secret.updated_at ? new Date(secret.updated_at).toISOString() : "unknown";
+        const lines = [`*Secret* \`${secret.name}\``, `- created: \`${createdAt}\``, `- updated: \`${updatedAt}\``];
+        await reply(lines.join("\n"));
         return true;
       }
       case "secrets_delete": {
@@ -2112,6 +2180,14 @@ export class BotController {
       return;
     }
     this.logger.debug(`[session] resuming session=${session.id} from=${userId}`);
+    if (this.cloudManager && this.config.cloud?.enabled) {
+      const resumed = await this.cloudManager.resumeCloudSession(session, text);
+      if (resumed === "resumed") return;
+      if (resumed === "expired") {
+        await this.sendToSession(session.id, { text: "expired, please run again", priority: "user" });
+        return;
+      }
+    }
     await this.sessionManager.resumeSession(session, text);
   }
 }
@@ -2260,7 +2336,10 @@ type CloudCommand =
   | { kind: "setup_status" }
   | { kind: "setup_lift" }
   | { kind: "secrets_set"; name: string; value: string | null }
+  | { kind: "secrets_create"; name: string; value: string | null }
+  | { kind: "secrets_update"; name: string; value: string | null }
   | { kind: "secrets_list" }
+  | { kind: "secrets_get"; name: string }
   | { kind: "secrets_delete"; name: string };
 
 function normalizeCloudText(text: string): string {
@@ -2352,10 +2431,23 @@ function parseCloudCommand(text: string): CloudCommand | null {
   if (head === "secrets" && tokens.length >= 1) {
     const sub = tokens.shift()!.toLowerCase();
     if (sub === "list") return { kind: "secrets_list" };
+    if ((sub === "get" || sub === "read" || sub === "info") && tokens.length >= 1) {
+      return { kind: "secrets_get", name: tokens.join(" ") };
+    }
     if (sub === "set" && tokens.length >= 1) {
       const name = tokens.shift()!;
       const value = tokens.length > 0 ? tokens.join(" ") : null;
       return { kind: "secrets_set", name, value };
+    }
+    if (sub === "create" && tokens.length >= 1) {
+      const name = tokens.shift()!;
+      const value = tokens.length > 0 ? tokens.join(" ") : null;
+      return { kind: "secrets_create", name, value };
+    }
+    if (sub === "update" && tokens.length >= 1) {
+      const name = tokens.shift()!;
+      const value = tokens.length > 0 ? tokens.join(" ") : null;
+      return { kind: "secrets_update", name, value };
     }
     if (sub === "delete" && tokens.length >= 1) return { kind: "secrets_delete", name: tokens[0]! };
   }
@@ -2408,6 +2500,18 @@ function applySettingsCommand(
 
   const parsed = resolveSettingTarget(cmd.target, defaultAgent);
   if (!parsed) return `Unknown setting "${cmd.target}".\nSupported: ${formatSupportedSettingKeys()}`;
+
+  if (parsed.type === "cloud_number") {
+    if (!config.cloud) return "Cloud configuration is missing.";
+    if (cmd.kind !== "set") return `Use "settings set ${parsed.label} <number>" to change it.`;
+    const n = Number(cmd.value);
+    if (!Number.isFinite(n)) return `Expected a number for ${parsed.label}.`;
+    const next = Math.floor(n);
+    if (next < parsed.min) return `${parsed.label} must be >= ${parsed.min}.`;
+    const prev = config.cloud.keepalive_minutes;
+    config.cloud.keepalive_minutes = next;
+    return `${parsed.label} updated (${String(prev)} -> ${String(next)}). Runtime-only; affects cloud resumes. Use "settings" to view current values.`;
+  }
 
   const adapter = getAgentAdapter(parsed.agent);
   let agentConfig;
@@ -2546,7 +2650,9 @@ function buildCloudHelpText(platform: "telegram" | "slack"): string {
     `- \`${cmd("action status <runId>")}\``,
     `- \`${cmd("action pull <runId>")}\``,
     "6) Secrets (optional)",
-    `- \`${cmd("secrets set NAME VALUE")}\``,
+    `- \`${cmd("secrets create NAME VALUE")}\``,
+    `- \`${cmd("secrets update NAME VALUE")}\``,
+    `- \`${cmd("secrets read NAME")}\``,
     `- \`${cmd("secrets list")}\``,
     `- \`${cmd("secrets delete NAME")}\``,
     "",
@@ -2586,10 +2692,15 @@ function resolveSettingTarget(
   | { type: "number"; agent: SessionAgent; key: NumberSettingKey; label: string; min: number }
   | { type: "string"; agent: SessionAgent; key: StringSettingKey; label: string }
   | { type: "env"; agent: SessionAgent; envKey: string; label: string }
+  | { type: "cloud_number"; key: "keepalive_minutes"; label: string; min: number }
   | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
   const lower = trimmed.toLowerCase();
+
+  if (lower === "cloud.keepalive_minutes") {
+    return { type: "cloud_number", key: "keepalive_minutes", label: "`cloud.keepalive_minutes`", min: 0 };
+  }
 
   const agentPrefix = lower.startsWith("codex.")
     ? ("codex" as const)
@@ -2657,6 +2768,7 @@ function formatSupportedSettingKeys(): string {
     "`claude_code.sessions_dir`",
     "`claude_code.env.<KEY>`",
     "`mcp.<NAME>`",
+    "`cloud.keepalive_minutes`",
   ].join(", ");
 }
 
@@ -2697,11 +2809,16 @@ function formatSettingsSummary(config: AppConfig, agent: SessionAgent, platform:
     for (const [k, v] of mcpEntries) lines.push(`  - \`${k}\` = ${formatEnvValue(v)}`);
   }
 
+  if (config.cloud?.enabled) {
+    lines.push("", "Cloud settings:", `- \`cloud.keepalive_minutes\`: ${String(config.cloud.keepalive_minutes)}`);
+  }
+
   lines.push(
     "",
     "Examples:",
     `- ${cmdPrefix}settings set ${prefix}.timeout_seconds 1800`,
     `- ${cmdPrefix}settings set mcp.SEARCH http://localhost:3000`,
+    `- ${cmdPrefix}settings set cloud.keepalive_minutes 10`,
     `- ${cmdPrefix}settings unset mcp.SEARCH`,
   );
   return lines.join("\n");

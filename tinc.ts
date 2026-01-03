@@ -54,6 +54,9 @@ Usage:
   tinc lift [--repo <path>] [--output tintin-setup.yml] [--force]
   tinc secrets set <name> <value> --platform <slack|telegram> --user <id> [--workspace <id>]
   tinc secrets set <name> --from-stdin --platform <slack|telegram> --user <id> [--workspace <id>]
+  tinc secrets create <name> <value> --platform <slack|telegram> --user <id> [--workspace <id>]
+  tinc secrets update <name> <value> --platform <slack|telegram> --user <id> [--workspace <id>]
+  tinc secrets read <name> --platform <slack|telegram> --user <id> [--workspace <id>]
   tinc secrets list --platform <slack|telegram> --user <id> [--workspace <id>]
   tinc secrets delete <name> --platform <slack|telegram> --user <id> [--workspace <id>]
 `);
@@ -448,7 +451,8 @@ function parseIdentityFlags(rest: string[]) {
 async function runSecrets(args: CliArgs) {
   const [sub, ...rest] = args.rest;
   if (!sub) throw new Error("secrets requires a subcommand");
-  if (sub === "list") {
+  const normalizeSub = sub.toLowerCase();
+  if (normalizeSub === "list") {
     const identity = parseIdentityFlags(rest);
     const { config, db } = await ensureConfig(args.configPath);
     if (!config.cloud?.enabled) throw new Error("Cloud mode is disabled.");
@@ -466,7 +470,73 @@ async function runSecrets(args: CliArgs) {
     return;
   }
 
-  if (sub === "set") {
+  if (normalizeSub === "read" || normalizeSub === "get" || normalizeSub === "info") {
+    const name = rest[0];
+    if (!name) throw new Error("secrets read requires a name");
+    const identity = parseIdentityFlags(rest.slice(1));
+    const { config, db } = await ensureConfig(args.configPath);
+    if (!config.cloud?.enabled) throw new Error("Cloud mode is disabled.");
+    const ident = await getOrCreateIdentity(db, {
+      platform: identity.platform,
+      workspaceId: identity.workspaceId,
+      userId: identity.userId,
+    });
+    const secrets = await listSecrets(db, ident.id);
+    const secret = secrets.find((s) => s.name === name) ?? null;
+    if (!secret) throw new Error("Secret not found.");
+    const createdAt = secret.created_at ? new Date(secret.created_at).toISOString() : "unknown";
+    const updatedAt = secret.updated_at ? new Date(secret.updated_at).toISOString() : "unknown";
+    console.log(`${secret.name}`);
+    console.log(`created: ${createdAt}`);
+    console.log(`updated: ${updatedAt}`);
+    return;
+  }
+
+  if (normalizeSub === "create") {
+    const name = rest[0];
+    if (!name) throw new Error("secrets create requires a name");
+    const identity = parseIdentityFlags(rest.slice(1));
+    const { config, db } = await ensureConfig(args.configPath);
+    if (!config.cloud?.enabled) throw new Error("Cloud mode is disabled.");
+    const ident = await getOrCreateIdentity(db, {
+      platform: identity.platform,
+      workspaceId: identity.workspaceId,
+      userId: identity.userId,
+    });
+    const secrets = await listSecrets(db, ident.id);
+    if (secrets.some((s) => s.name === name)) throw new Error("Secret already exists.");
+    const fromStdin = identity.rest.includes("--from-stdin");
+    const value = fromStdin ? (await readStdin()) : identity.rest.join(" ");
+    if (!value) throw new Error("Missing secret value.");
+    const encrypted = encryptSecret(value.trim(), config.cloud.secrets_key);
+    await setSecret(db, { identityId: ident.id, name, encryptedValue: encrypted });
+    console.log(`Created ${name}`);
+    return;
+  }
+
+  if (normalizeSub === "update") {
+    const name = rest[0];
+    if (!name) throw new Error("secrets update requires a name");
+    const identity = parseIdentityFlags(rest.slice(1));
+    const { config, db } = await ensureConfig(args.configPath);
+    if (!config.cloud?.enabled) throw new Error("Cloud mode is disabled.");
+    const ident = await getOrCreateIdentity(db, {
+      platform: identity.platform,
+      workspaceId: identity.workspaceId,
+      userId: identity.userId,
+    });
+    const secrets = await listSecrets(db, ident.id);
+    if (!secrets.some((s) => s.name === name)) throw new Error("Secret not found.");
+    const fromStdin = identity.rest.includes("--from-stdin");
+    const value = fromStdin ? (await readStdin()) : identity.rest.join(" ");
+    if (!value) throw new Error("Missing secret value.");
+    const encrypted = encryptSecret(value.trim(), config.cloud.secrets_key);
+    await setSecret(db, { identityId: ident.id, name, encryptedValue: encrypted });
+    console.log(`Updated ${name}`);
+    return;
+  }
+
+  if (normalizeSub === "set") {
     const name = rest[0];
     if (!name) throw new Error("secrets set requires a name");
     const identity = parseIdentityFlags(rest.slice(1));
@@ -486,7 +556,7 @@ async function runSecrets(args: CliArgs) {
     return;
   }
 
-  if (sub === "delete") {
+  if (normalizeSub === "delete") {
     const name = rest[0];
     if (!name) throw new Error("secrets delete requires a name");
     const identity = parseIdentityFlags(rest.slice(1));
