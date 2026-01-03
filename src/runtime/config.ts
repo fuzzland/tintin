@@ -54,18 +54,23 @@ export interface ProjectEntry {
   path: string;
 }
 
-export type CloudProvider = "local" | "e2b";
+export type CloudProvider = "local" | "modal";
 export type CloudDefaultAgent = "codex" | "claude_code";
 
-export interface CloudE2BSection {
-  api_key: string;
-  template_id: string;
-  domain: string;
+export interface CloudModalSection {
+  token_id: string;
+  token_secret: string;
+  environment: string;
+  endpoint: string;
+  app_name: string;
+  image: string;
+  image_id: string;
   timeout_ms: number;
+  idle_timeout_ms: number;
   request_timeout_ms: number;
   command_timeout_ms: number;
-  secure: boolean;
-  allow_internet_access: boolean;
+  block_network: boolean;
+  cidr_allowlist: string[];
   workspace_root: string;
   codex_binary: string;
   claude_binary: string;
@@ -118,7 +123,7 @@ export interface CloudSection {
   keepalive_minutes: number;
   oauth: CloudOAuthSection;
   github_app?: CloudGithubAppSection | null;
-  e2b?: CloudE2BSection | null;
+  modal?: CloudModalSection | null;
   proxy?: CloudProxySection | null;
 }
 
@@ -393,18 +398,26 @@ function normalizeCloudOAuthProvider(
   };
 }
 
-function normalizeCloudE2BSection(value: unknown): CloudE2BSection {
+function normalizeCloudModalSection(value: unknown): CloudModalSection {
   const raw = value ?? {};
-  assert(isRecord(raw), "[cloud].e2b must be a table");
-  const api_key = typeof (raw as any).api_key === "string" ? (raw as any).api_key : "";
-  const template_id =
-    typeof (raw as any).template_id === "string" && (raw as any).template_id.length > 0
-      ? (raw as any).template_id
-      : "tintin-playwright";
-  const domain = typeof (raw as any).domain === "string" ? (raw as any).domain : "";
+  assert(isRecord(raw), "[cloud].modal must be a table");
+  const token_id = typeof (raw as any).token_id === "string" ? (raw as any).token_id : "";
+  const token_secret = typeof (raw as any).token_secret === "string" ? (raw as any).token_secret : "";
+  const environment = typeof (raw as any).environment === "string" ? (raw as any).environment : "";
+  const endpoint = typeof (raw as any).endpoint === "string" ? (raw as any).endpoint : "";
+  const app_name =
+    typeof (raw as any).app_name === "string" && (raw as any).app_name.length > 0 ? (raw as any).app_name : "tintin-cloud";
+  const image = typeof (raw as any).image === "string" && (raw as any).image.length > 0 ? (raw as any).image : "debian:12";
+  const image_id = typeof (raw as any).image_id === "string" ? (raw as any).image_id : "";
   const timeout_ms =
     typeof (raw as any).timeout_ms === "number" && Number.isFinite((raw as any).timeout_ms) && (raw as any).timeout_ms > 0
       ? Math.floor((raw as any).timeout_ms)
+      : 300_000;
+  const idle_timeout_ms =
+    typeof (raw as any).idle_timeout_ms === "number" &&
+    Number.isFinite((raw as any).idle_timeout_ms) &&
+    (raw as any).idle_timeout_ms > 0
+      ? Math.floor((raw as any).idle_timeout_ms)
       : 300_000;
   const request_timeout_ms =
     typeof (raw as any).request_timeout_ms === "number" &&
@@ -418,25 +431,30 @@ function normalizeCloudE2BSection(value: unknown): CloudE2BSection {
     (raw as any).command_timeout_ms > 0
       ? Math.floor((raw as any).command_timeout_ms)
       : 60_000;
-  const secure = typeof (raw as any).secure === "boolean" ? (raw as any).secure : true;
-  const allow_internet_access = typeof (raw as any).allow_internet_access === "boolean" ? (raw as any).allow_internet_access : true;
+  const block_network = typeof (raw as any).block_network === "boolean" ? (raw as any).block_network : false;
+  const cidr_allowlist = isStringArray((raw as any).cidr_allowlist) ? ((raw as any).cidr_allowlist as string[]) : [];
   const workspace_root =
     typeof (raw as any).workspace_root === "string" && (raw as any).workspace_root.length > 0
       ? (raw as any).workspace_root
-      : "/home/user/tintin";
+      : "/workspace/tintin";
   const codex_binary = typeof (raw as any).codex_binary === "string" && (raw as any).codex_binary.length > 0 ? (raw as any).codex_binary : "codex";
   const claude_binary =
     typeof (raw as any).claude_binary === "string" && (raw as any).claude_binary.length > 0 ? (raw as any).claude_binary : "claude";
 
   return {
-    api_key,
-    template_id,
-    domain,
+    token_id,
+    token_secret,
+    environment,
+    endpoint,
+    app_name,
+    image,
+    image_id,
     timeout_ms,
+    idle_timeout_ms,
     request_timeout_ms,
     command_timeout_ms,
-    secure,
-    allow_internet_access,
+    block_network,
+    cidr_allowlist,
     workspace_root,
     codex_binary,
     claude_binary,
@@ -541,7 +559,7 @@ function normalizeCloudSection(value: unknown, opts: { configDir: string; dataDi
 
   const enabled = typeof (value as any).enabled === "boolean" ? (value as any).enabled : true;
   const providerRaw = typeof (value as any).provider === "string" ? (value as any).provider.toLowerCase() : "local";
-  const provider: CloudProvider = providerRaw === "e2b" ? "e2b" : "local";
+  const provider: CloudProvider = providerRaw === "modal" ? "modal" : "local";
   const publicBaseUrl = typeof (value as any).public_base_url === "string" ? (value as any).public_base_url : "";
 
   const workspacesDirRaw =
@@ -596,7 +614,7 @@ function normalizeCloudSection(value: unknown, opts: { configDir: string; dataDi
   }
 
   const github_app = (value as any).github_app !== undefined ? normalizeCloudGithubAppSection((value as any).github_app) : null;
-  const e2b = (value as any).e2b !== undefined || provider === "e2b" ? normalizeCloudE2BSection((value as any).e2b) : null;
+  const modal = (value as any).modal !== undefined || provider === "modal" ? normalizeCloudModalSection((value as any).modal) : null;
   const proxy = (value as any).proxy !== undefined ? normalizeCloudProxySection((value as any).proxy) : null;
 
   return {
@@ -609,7 +627,7 @@ function normalizeCloudSection(value: unknown, opts: { configDir: string; dataDi
     keepalive_minutes,
     oauth,
     github_app,
-    e2b,
+    modal,
     proxy,
   };
 }

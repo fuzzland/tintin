@@ -3,9 +3,14 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { FileType } from "e2b";
 import type { Logger } from "../src/runtime/log.js";
-import { findRemoteJsonlFiles, RemoteLogSync } from "../src/runtime/cloud/e2bLogs.js";
+import { findRemoteJsonlFiles, RemoteLogSync } from "../src/runtime/cloud/modalLogs.js";
+
+type ExecResult = {
+  stdout: { readText: () => Promise<string> };
+  stderr: { readText: () => Promise<string> };
+  wait: () => Promise<number>;
+};
 
 function makeLogger(): Logger {
   return {
@@ -16,18 +21,21 @@ function makeLogger(): Logger {
   };
 }
 
-test("findRemoteJsonlFiles finds matching JSONL logs", async () => {
-  const tree: Record<string, Array<{ path: string; type: FileType }>> = {
-    "/root/sessions": [{ path: "/root/sessions/run1", type: FileType.DIR }],
-    "/root/sessions/run1": [{ path: "/root/sessions/run1/foo-abc.jsonl", type: FileType.FILE }],
+function makeProc(stdout: string, stderr = "", exitCode = 0): ExecResult {
+  return {
+    stdout: { readText: async () => stdout },
+    stderr: { readText: async () => stderr },
+    wait: async () => exitCode,
   };
+}
+
+test("findRemoteJsonlFiles finds matching JSONL logs", async () => {
+  const files = ["/root/sessions/run1/foo-abc.jsonl"];
   const sandbox: any = {
-    files: {
-      list: async (p: string) => tree[p] ?? [],
-    },
+    exec: async (_args: string[]) => makeProc(`${files.join("\n")}\n`),
   };
 
-  const files = await findRemoteJsonlFiles({
+  const result = await findRemoteJsonlFiles({
     sandbox,
     sessionsRoot: "/root/sessions",
     sessionId: "abc",
@@ -35,7 +43,7 @@ test("findRemoteJsonlFiles finds matching JSONL logs", async () => {
     pollMs: 10,
   });
 
-  assert.deepEqual(files, ["/root/sessions/run1/foo-abc.jsonl"]);
+  assert.deepEqual(result, files);
 });
 
 test("RemoteLogSync mirrors remote JSONL to local file without duplication", async () => {
@@ -44,16 +52,15 @@ test("RemoteLogSync mirrors remote JSONL to local file without duplication", asy
   const bytes = Buffer.from(remoteContent);
 
   const sandbox: any = {
-    commands: {
-      run: async (cmd: string) => {
-        const match = cmd.match(/tail -c \\+(\\d+) (\"[^\"]+\")/);
-        if (!match || !match[1] || !match[2]) return { stdout: "", stderr: "", exitCode: 0 };
-        const start = Number(match[1]);
-        const pathArg = JSON.parse(match[2]);
-        if (pathArg !== remotePath) return { stdout: "", stderr: "", exitCode: 0 };
-        const slice = bytes.slice(Math.max(0, start - 1));
-        return { stdout: slice.toString("utf8"), stderr: "", exitCode: 0 };
-      },
+    exec: async (args: string[]) => {
+      const cmd = args[2] ?? "";
+      const match = cmd.match(/tail -c \+(\d+) ("[^"]+")/);
+      if (!match || !match[1] || !match[2]) return makeProc("");
+      const start = Number(match[1]);
+      const pathArg = JSON.parse(match[2]);
+      if (pathArg !== remotePath) return makeProc("");
+      const slice = bytes.slice(Math.max(0, start - 1));
+      return makeProc(slice.toString("utf8"));
     },
   };
 

@@ -5,17 +5,17 @@ import type { Db, SessionAgent, SessionStatus } from "../db.js";
 import type { Logger } from "../log.js";
 import type { SessionManager } from "../sessionManager.js";
 import { nowMs } from "../util.js";
-import type { CommandHandle } from "e2b";
+import type { Sandbox } from "modal";
 import { resolveCodexHomeFromSessionsRoot, resolveSessionsRoot } from "../codex.js";
 import { resolveClaudeConfigDirFromSessionsRoot, resolveClaudeSessionJsonlPath } from "../claudeCode.js";
 import { LocalCloudProvider } from "./localProvider.js";
 import type { CloudProvider, CloudWorkspace } from "./provider.js";
-import { E2BCloudProvider } from "./e2bProvider.js";
+import { ModalCloudProvider } from "./modalProvider.js";
 import { hashSetupSpec, parseSetupSpec } from "./setupSpec.js";
 import { decryptSecret, interpolateSecrets } from "./secrets.js";
 import { buildCloneUrl } from "./git.js";
 import { ensureGithubAppToken } from "./githubApp.js";
-import { findRemoteJsonlFiles, getRemoteFileSize, RemoteLogSync } from "./e2bLogs.js";
+import { findRemoteJsonlFiles, getRemoteFileSize, RemoteLogSync } from "./modalLogs.js";
 import { createProxyToken } from "./proxy.js";
 import {
   addRunRepo,
@@ -36,6 +36,10 @@ function shellQuote(value: string): string {
   return JSON.stringify(value);
 }
 
+type RemoteHandle = {
+  wait(): Promise<number>;
+  pid: number | null;
+};
 
 export class CloudManager {
   private readonly provider: CloudProvider;
@@ -49,10 +53,9 @@ export class CloudManager {
     sessionManager: SessionManager | null,
   ) {
     const root = this.config.cloud?.workspaces_dir ?? path.resolve(this.config.config_dir, "./data/cloud/workspaces");
-    if (this.config.cloud?.provider === "e2b") {
-      if (!this.config.cloud.e2b) throw new Error("cloud.e2b is required when provider is e2b.");
-      const snapshotDir = path.join(root, "snapshots");
-      this.provider = new E2BCloudProvider(this.config.cloud.e2b, logger, { snapshotDir });
+    if (this.config.cloud?.provider === "modal") {
+      if (!this.config.cloud.modal) throw new Error("cloud.modal is required when provider is modal.");
+      this.provider = new ModalCloudProvider(this.config.cloud.modal, logger);
     } else {
       this.provider = new LocalCloudProvider(root, logger);
     }
@@ -68,8 +71,8 @@ export class CloudManager {
   }
 
   private workspaceFromId(workspaceId: string): CloudWorkspace {
-    if (this.provider.id === "e2b") {
-      const rootPath = (this.provider as E2BCloudProvider).workspaceRoot;
+    if (this.provider.id === "modal") {
+      const rootPath = (this.provider as ModalCloudProvider).workspaceRoot;
       return { id: workspaceId, rootPath };
     }
     const rootPath = path.join(this.config.cloud!.workspaces_dir, workspaceId);
@@ -88,9 +91,9 @@ export class CloudManager {
     }
     const clamped = Math.max(0, Math.floor(minutes));
     const keepalive = clamped * 60_000;
-    const e2bTimeout = this.config.cloud?.e2b?.timeout_ms;
-    if (typeof e2bTimeout === "number" && Number.isFinite(e2bTimeout) && e2bTimeout > 0) {
-      return Math.min(keepalive, e2bTimeout);
+    const modalTimeout = this.config.cloud?.modal?.timeout_ms;
+    if (typeof modalTimeout === "number" && Number.isFinite(modalTimeout) && modalTimeout > 0) {
+      return Math.min(keepalive, modalTimeout);
     }
     return keepalive;
   }
@@ -216,7 +219,7 @@ export class CloudManager {
       const mainRepoPath = repoMounts[0]!.absPath;
       const projectId = `cloud:${primaryRepoId}`;
       let sessionId: string;
-      if (this.provider.id === "e2b") {
+      if (this.provider.id !== "local") {
         sessionId = await this.startRemoteSession({
           identityId: opts.identityId,
           platform: opts.platform,
@@ -256,7 +259,7 @@ export class CloudManager {
       return { runId: run.id, sessionId };
     } catch (e) {
       await updateCloudRun(this.db, run.id, { status: "error", finished_at: nowMs() });
-      if (this.provider.id === "e2b") {
+      if (this.provider.id !== "local") {
         await this.provider.terminateWorkspace(workspace).catch(() => {});
       }
       throw e;
@@ -294,13 +297,13 @@ export class CloudManager {
   }
 
   private joinWorkspacePath(root: string, rel: string): string {
-    if (this.provider.id === "e2b") return path.posix.join(root, toPosix(rel));
+    if (this.provider.id !== "local") return path.posix.join(root, toPosix(rel));
     return path.join(root, rel);
   }
 
-  private getE2BProvider(): E2BCloudProvider {
-    if (this.provider.id !== "e2b") throw new Error("E2B provider is not configured.");
-    return this.provider as E2BCloudProvider;
+  private getModalProvider(): ModalCloudProvider {
+    if (this.provider.id !== "modal") throw new Error("Modal provider is not configured.");
+    return this.provider as ModalCloudProvider;
   }
 
   private buildCodexArgs(cwd: string): string[] {
@@ -401,7 +404,7 @@ export class CloudManager {
   }
 
   private applyProxyEnv(env: Record<string, string>, identityId: string, agent: SessionAgent): Record<string, string> {
-    if (this.provider.id !== "e2b") return env;
+    if (this.provider.id === "local") return env;
     const cloud = this.config.cloud;
     const proxy = cloud?.proxy;
     if (!cloud || !proxy?.enabled) return env;
@@ -430,6 +433,42 @@ export class CloudManager {
     return out;
   }
 
+  private async writeRemoteText(sandbox: Sandbox, targetPath: string, text: string): Promise<void> {
+    const file = await sandbox.open(targetPath, "w");
+    await file.write(Buffer.from(text, "utf8"));
+    await file.flush();
+    await file.close();
+  }
+
+  private async runRemoteCommand(
+    sandbox: Sandbox,
+    command: string,
+    opts: { cwd: string; env?: Record<string, string>; timeoutMs: number; stdout?: "pipe" | "ignore"; stderr?: "pipe" | "ignore" },
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const proc = await sandbox.exec(["/bin/sh", "-lc", command], {
+      workdir: toPosix(opts.cwd),
+      env: opts.env,
+      timeoutMs: opts.timeoutMs,
+      stdout: opts.stdout,
+      stderr: opts.stderr,
+      mode: "text",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.readText(), proc.stderr.readText(), proc.wait()]);
+    return { stdout, stderr, exitCode };
+  }
+
+  private async ensureRemoteDir(sandbox: Sandbox, dir: string, timeoutMs: number): Promise<void> {
+    const result = await this.runRemoteCommand(sandbox, `mkdir -p ${shellQuote(dir)}`, {
+      cwd: "/",
+      timeoutMs,
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    if (result.exitCode !== 0) {
+      throw new Error(`Failed to create remote dir ${dir}`);
+    }
+  }
+
   private async spawnRemoteAgent(opts: {
     sessionId: string;
     prompt: string;
@@ -437,15 +476,15 @@ export class CloudManager {
     agent: SessionAgent;
     workspace: CloudWorkspace;
     envOverrides: Record<string, string>;
-  }): Promise<{ handle: CommandHandle; agentSessionId: string; logSyncers: RemoteLogSync[] }> {
-    const e2b = this.getE2BProvider();
-    const sandbox = e2b.getSandbox(opts.workspace.id);
-    const e2bCfg = this.config.cloud?.e2b;
-    if (!e2bCfg) throw new Error("cloud.e2b is required for remote runs.");
+  }): Promise<{ handle: RemoteHandle; agentSessionId: string; logSyncers: RemoteLogSync[] }> {
+    const modal = this.getModalProvider();
+    const sandbox = modal.getSandbox(opts.workspace.id);
+    const modalCfg = this.config.cloud?.modal;
+    if (!modalCfg) throw new Error("cloud.modal is required for remote runs.");
 
     const promptFile = `/tmp/tintin-prompt-${opts.sessionId}.txt`;
     const promptText = opts.prompt.endsWith("\n") ? opts.prompt : `${opts.prompt}\n`;
-    await sandbox.files.write(promptFile, promptText, { requestTimeoutMs: e2bCfg.request_timeout_ms });
+    await this.writeRemoteText(sandbox, promptFile, promptText);
 
     let agentSessionId = crypto.randomUUID();
     let sessionsRoot = "";
@@ -457,13 +496,11 @@ export class CloudManager {
       if (!this.config.claude_code) throw new Error("Claude Code is not configured.");
       sessionsRoot = resolveSessionsRoot(opts.cwd, this.config.claude_code.sessions_dir);
       configDir = resolveClaudeConfigDirFromSessionsRoot(sessionsRoot);
-      await sandbox.files.makeDir(toPosix(sessionsRoot), { requestTimeoutMs: e2bCfg.request_timeout_ms }).catch(() => {});
-      await sandbox.files.makeDir(toPosix(configDir), { requestTimeoutMs: e2bCfg.request_timeout_ms }).catch(() => {});
-      await sandbox.files
-        .makeDir(path.posix.join(toPosix(configDir), "projects"), { requestTimeoutMs: e2bCfg.request_timeout_ms })
-        .catch(() => {});
+      await this.ensureRemoteDir(sandbox, toPosix(sessionsRoot), modalCfg.command_timeout_ms);
+      await this.ensureRemoteDir(sandbox, toPosix(configDir), modalCfg.command_timeout_ms);
+      await this.ensureRemoteDir(sandbox, path.posix.join(toPosix(configDir), "projects"), modalCfg.command_timeout_ms);
       const args = this.buildClaudeArgs(agentSessionId);
-      cmd = `${e2bCfg.claude_binary} ${args.map(shellQuote).join(" ")} < ${shellQuote(promptFile)}`;
+      cmd = `${modalCfg.claude_binary} ${args.map(shellQuote).join(" ")} < ${shellQuote(promptFile)}`;
       env = {
         ...this.config.claude_code.env,
         ...opts.envOverrides,
@@ -472,10 +509,10 @@ export class CloudManager {
     } else {
       sessionsRoot = resolveSessionsRoot(opts.cwd, this.config.codex.sessions_dir);
       const homeDir = resolveCodexHomeFromSessionsRoot(sessionsRoot);
-      await sandbox.files.makeDir(toPosix(sessionsRoot), { requestTimeoutMs: e2bCfg.request_timeout_ms }).catch(() => {});
-      await sandbox.files.makeDir(toPosix(homeDir), { requestTimeoutMs: e2bCfg.request_timeout_ms }).catch(() => {});
+      await this.ensureRemoteDir(sandbox, toPosix(sessionsRoot), modalCfg.command_timeout_ms);
+      await this.ensureRemoteDir(sandbox, toPosix(homeDir), modalCfg.command_timeout_ms);
       const args = this.buildCodexArgs(opts.cwd);
-      cmd = `${e2bCfg.codex_binary} ${args.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
+      cmd = `${modalCfg.codex_binary} ${args.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
       env = {
         ...this.config.codex.env,
         ...opts.envOverrides,
@@ -483,14 +520,15 @@ export class CloudManager {
       };
     }
 
-    const handle = (await sandbox.commands.run(cmd, {
-      cwd: toPosix(opts.cwd),
-      envs: env,
-      timeoutMs: e2bCfg.command_timeout_ms,
-      background: true,
-      onStdout: (data) => this.logger.debug(`[cloud][agent] ${data.trimEnd()}`),
-      onStderr: (data) => this.logger.debug(`[cloud][agent] ${data.trimEnd()}`),
-    })) as CommandHandle;
+    const proc = await sandbox.exec(["/bin/sh", "-lc", cmd], {
+      workdir: toPosix(opts.cwd),
+      env,
+      timeoutMs: 0,
+      stdout: "ignore",
+      stderr: "ignore",
+      mode: "text",
+    });
+    const handle: RemoteHandle = { pid: null, wait: () => proc.wait() };
 
     let remoteFiles: string[] = [];
     if (opts.agent === "claude_code") {
@@ -525,7 +563,7 @@ export class CloudManager {
         byte_offset: 0,
         updated_at: nowMs(),
       });
-      const syncer = new RemoteLogSync(sandbox, remotePath, localPath, this.logger, 500, e2bCfg.command_timeout_ms, 0);
+      const syncer = new RemoteLogSync(sandbox, remotePath, localPath, this.logger, 500, modalCfg.command_timeout_ms, 0);
       syncer.start();
       logSyncers.push(syncer);
     }
@@ -541,15 +579,15 @@ export class CloudManager {
     agent: SessionAgent;
     workspace: CloudWorkspace;
     envOverrides: Record<string, string>;
-  }): Promise<{ handle: CommandHandle; logSyncers: RemoteLogSync[] }> {
-    const e2b = this.getE2BProvider();
-    const sandbox = e2b.getSandbox(opts.workspace.id);
-    const e2bCfg = this.config.cloud?.e2b;
-    if (!e2bCfg) throw new Error("cloud.e2b is required for remote runs.");
+  }): Promise<{ handle: RemoteHandle; logSyncers: RemoteLogSync[] }> {
+    const modal = this.getModalProvider();
+    const sandbox = modal.getSandbox(opts.workspace.id);
+    const modalCfg = this.config.cloud?.modal;
+    if (!modalCfg) throw new Error("cloud.modal is required for remote runs.");
 
     const promptFile = `/tmp/tintin-prompt-${opts.sessionId}.txt`;
     const promptText = opts.prompt.endsWith("\n") ? opts.prompt : `${opts.prompt}\n`;
-    await sandbox.files.write(promptFile, promptText, { requestTimeoutMs: e2bCfg.request_timeout_ms });
+    await this.writeRemoteText(sandbox, promptFile, promptText);
 
     let sessionsRoot = "";
     let configDir: string | null = null;
@@ -560,13 +598,11 @@ export class CloudManager {
       if (!this.config.claude_code) throw new Error("Claude Code is not configured.");
       sessionsRoot = resolveSessionsRoot(opts.cwd, this.config.claude_code.sessions_dir);
       configDir = resolveClaudeConfigDirFromSessionsRoot(sessionsRoot);
-      await sandbox.files.makeDir(toPosix(sessionsRoot), { requestTimeoutMs: e2bCfg.request_timeout_ms }).catch(() => {});
-      await sandbox.files.makeDir(toPosix(configDir), { requestTimeoutMs: e2bCfg.request_timeout_ms }).catch(() => {});
-      await sandbox.files
-        .makeDir(path.posix.join(toPosix(configDir), "projects"), { requestTimeoutMs: e2bCfg.request_timeout_ms })
-        .catch(() => {});
+      await this.ensureRemoteDir(sandbox, toPosix(sessionsRoot), modalCfg.command_timeout_ms);
+      await this.ensureRemoteDir(sandbox, toPosix(configDir), modalCfg.command_timeout_ms);
+      await this.ensureRemoteDir(sandbox, path.posix.join(toPosix(configDir), "projects"), modalCfg.command_timeout_ms);
       const args = this.buildClaudeResumeArgs(opts.agentSessionId);
-      cmd = `${e2bCfg.claude_binary} ${args.map(shellQuote).join(" ")} < ${shellQuote(promptFile)}`;
+      cmd = `${modalCfg.claude_binary} ${args.map(shellQuote).join(" ")} < ${shellQuote(promptFile)}`;
       env = {
         ...this.config.claude_code.env,
         ...opts.envOverrides,
@@ -575,11 +611,11 @@ export class CloudManager {
     } else {
       sessionsRoot = resolveSessionsRoot(opts.cwd, this.config.codex.sessions_dir);
       const homeDir = resolveCodexHomeFromSessionsRoot(sessionsRoot);
-      await sandbox.files.makeDir(toPosix(sessionsRoot), { requestTimeoutMs: e2bCfg.request_timeout_ms }).catch(() => {});
-      await sandbox.files.makeDir(toPosix(homeDir), { requestTimeoutMs: e2bCfg.request_timeout_ms }).catch(() => {});
+      await this.ensureRemoteDir(sandbox, toPosix(sessionsRoot), modalCfg.command_timeout_ms);
+      await this.ensureRemoteDir(sandbox, toPosix(homeDir), modalCfg.command_timeout_ms);
       const args = this.buildCodexArgs(opts.cwd);
       args.push("resume", opts.agentSessionId);
-      cmd = `${e2bCfg.codex_binary} ${args.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
+      cmd = `${modalCfg.codex_binary} ${args.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
       env = {
         ...this.config.codex.env,
         ...opts.envOverrides,
@@ -611,19 +647,20 @@ export class CloudManager {
         await getRemoteFileSize({
           sandbox,
           remotePath,
-          timeoutMs: e2bCfg.command_timeout_ms,
+          timeoutMs: modalCfg.command_timeout_ms,
         }),
       );
     }
 
-    const handle = (await sandbox.commands.run(cmd, {
-      cwd: toPosix(opts.cwd),
-      envs: env,
-      timeoutMs: e2bCfg.command_timeout_ms,
-      background: true,
-      onStdout: (data) => this.logger.debug(`[cloud][agent] ${data.trimEnd()}`),
-      onStderr: (data) => this.logger.debug(`[cloud][agent] ${data.trimEnd()}`),
-    })) as CommandHandle;
+    const proc = await sandbox.exec(["/bin/sh", "-lc", cmd], {
+      workdir: toPosix(opts.cwd),
+      env,
+      timeoutMs: 0,
+      stdout: "ignore",
+      stderr: "ignore",
+      mode: "text",
+    });
+    const handle: RemoteHandle = { pid: null, wait: () => proc.wait() };
 
     const logsDir = path.join(this.config.cloud!.workspaces_dir, "logs", opts.sessionId);
     await mkdir(logsDir, { recursive: true });
@@ -641,7 +678,7 @@ export class CloudManager {
         updated_at: nowMs(),
       });
       const initialOffset = initialOffsets[i] ?? 0;
-      const syncer = new RemoteLogSync(sandbox, remotePath, localPath, this.logger, 500, e2bCfg.command_timeout_ms, initialOffset);
+      const syncer = new RemoteLogSync(sandbox, remotePath, localPath, this.logger, 500, modalCfg.command_timeout_ms, initialOffset);
       syncer.start();
       logSyncers.push(syncer);
     }
@@ -651,7 +688,7 @@ export class CloudManager {
 
   private async monitorRemoteSession(opts: {
     sessionId: string;
-    handle: CommandHandle;
+    handle: RemoteHandle;
     logSyncers: RemoteLogSync[];
     workspace: CloudWorkspace;
   }) {
@@ -659,8 +696,8 @@ export class CloudManager {
     let exitCode: number | null = null;
     try {
       const result = await opts.handle.wait();
-      exitCode = result.exitCode;
-      status = result.exitCode === 0 ? "finished" : "error";
+      exitCode = result;
+      status = result === 0 ? "finished" : "error";
     } catch (e) {
       exitCode = e && typeof e === "object" && "exitCode" in e ? (e as any).exitCode : null;
       status = "error";
@@ -679,13 +716,13 @@ export class CloudManager {
   }
 
   async resumeCloudSession(session: SessionRow, prompt: string): Promise<"resumed" | "expired" | "not_cloud"> {
-    if (this.provider.id !== "e2b") return "not_cloud";
+    if (this.provider.id !== "modal") return "not_cloud";
     const run = await getCloudRunBySession(this.db, session.id);
-    if (!run || run.provider !== "e2b") return "not_cloud";
+    if (!run || run.provider !== "modal") return "not_cloud";
     if (!session.codex_session_id) throw new Error("Session missing codex_session_id");
 
     try {
-      this.getE2BProvider().getSandbox(run.workspace_id);
+      this.getModalProvider().getSandbox(run.workspace_id);
     } catch {
       return "expired";
     }
@@ -741,7 +778,7 @@ export class CloudManager {
       diff_summary: summary,
       finished_at: nowMs(),
     });
-    if (this.provider.id === "e2b") {
+    if (this.provider.id !== "local") {
       void this.scheduleWorkspaceTermination(run.workspace_id, run.identity_id);
     }
   }

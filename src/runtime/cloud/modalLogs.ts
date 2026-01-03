@@ -1,6 +1,6 @@
 import path from "node:path";
 import { appendFile } from "node:fs/promises";
-import { CommandExitError, FileType, Sandbox } from "e2b";
+import type { Sandbox } from "modal";
 import picomatch from "picomatch";
 import type { Logger } from "../log.js";
 import { sleep } from "../util.js";
@@ -9,16 +9,30 @@ function shellQuote(value: string): string {
   return JSON.stringify(value);
 }
 
+async function runShell(
+  sandbox: Sandbox,
+  command: string,
+  timeoutMs: number,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  try {
+    const proc = await sandbox.exec(["/bin/sh", "-lc", command], {
+      workdir: "/",
+      timeoutMs,
+      mode: "text",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.readText(), proc.stderr.readText(), proc.wait()]);
+    return { stdout, stderr, exitCode };
+  } catch (e) {
+    return { stdout: "", stderr: String(e), exitCode: 1 };
+  }
+}
+
 export async function getRemoteFileSize(opts: { sandbox: Sandbox; remotePath: string; timeoutMs: number }): Promise<number> {
   const cmd = `wc -c < ${shellQuote(opts.remotePath)}`;
-  try {
-    const result = await opts.sandbox.commands.run(cmd, { timeoutMs: opts.timeoutMs });
-    const raw = String(result.stdout ?? "").trim();
-    const n = Number(raw);
-    return Number.isFinite(n) && n >= 0 ? n : 0;
-  } catch {
-    return 0;
-  }
+  const result = await runShell(opts.sandbox, cmd, opts.timeoutMs);
+  const raw = String(result.stdout ?? "").trim();
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
 }
 
 export async function findRemoteJsonlFiles(opts: {
@@ -36,7 +50,7 @@ export async function findRemoteJsonlFiles(opts: {
   const matchers = patterns.map((pat) => picomatch(pat, { dot: true }));
 
   while (Date.now() < deadline) {
-    const files = await listRemoteFiles(opts.sandbox, opts.sessionsRoot);
+    const files = await listRemoteFiles(opts.sandbox, opts.sessionsRoot, opts.timeoutMs);
     const matches = files.filter((file) => {
       const rel = path.posix.relative(opts.sessionsRoot, file);
       return matchers.some((m) => m(rel));
@@ -47,21 +61,14 @@ export async function findRemoteJsonlFiles(opts: {
   return [];
 }
 
-async function listRemoteFiles(sandbox: Sandbox, root: string): Promise<string[]> {
-  const out: string[] = [];
-  const stack = [root];
-  while (stack.length > 0) {
-    const dir = stack.pop()!;
-    const entries = await sandbox.files.list(dir).catch(() => []);
-    for (const entry of entries) {
-      if (entry.type === FileType.DIR) {
-        stack.push(entry.path);
-      } else if (entry.type === FileType.FILE) {
-        out.push(entry.path);
-      }
-    }
-  }
-  return out;
+async function listRemoteFiles(sandbox: Sandbox, root: string, timeoutMs: number): Promise<string[]> {
+  const cmd = `find ${shellQuote(root)} -type f -print`;
+  const result = await runShell(sandbox, cmd, timeoutMs);
+  if (result.exitCode !== 0) return [];
+  return result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
 }
 
 export class RemoteLogSync {
@@ -110,14 +117,14 @@ export class RemoteLogSync {
     const start = this.offset + 1;
     const cmd = `tail -c +${start} ${shellQuote(this.remotePath)}`;
     try {
-      const result = await this.sandbox.commands.run(cmd, { timeoutMs: this.commandTimeoutMs });
+      const result = await runShell(this.sandbox, cmd, this.commandTimeoutMs);
+      if (result.exitCode !== 0) return;
       const chunk = result.stdout ?? "";
       if (!chunk) return;
       await appendFile(this.localPath, chunk);
       this.offset += Buffer.byteLength(chunk);
     } catch (e) {
-      if (e instanceof CommandExitError) return;
-      this.logger.debug(`[cloud][e2b] log sync error: ${String(e)}`);
+      this.logger.debug(`[cloud][modal] log sync error: ${String(e)}`);
     }
   }
 }

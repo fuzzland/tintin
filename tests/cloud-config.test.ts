@@ -42,7 +42,7 @@ ${extra}
 `;
 }
 
-test("loadConfig applies E2B defaults when provider is e2b", async () => {
+test("loadConfig applies Modal defaults when provider is modal", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "tintin-config-"));
   const configPath = path.join(dir, "config.toml");
   await writeFile(
@@ -50,7 +50,7 @@ test("loadConfig applies E2B defaults when provider is e2b", async () => {
     baseConfig(`
 [cloud]
 enabled = true
-provider = "e2b"
+provider = "modal"
 public_base_url = "https://cloud.example.com"
 `),
     "utf8",
@@ -58,21 +58,23 @@ public_base_url = "https://cloud.example.com"
 
   try {
     const config = await loadConfig(configPath);
-    assert.equal(config.cloud?.provider, "e2b");
-    const e2b = config.cloud?.e2b;
-    assert.ok(e2b);
-    assert.equal(e2b?.template_id, "tintin-playwright");
-    assert.equal(e2b?.workspace_root, "/home/user/tintin");
-    assert.equal(e2b?.command_timeout_ms, 60000);
-    assert.equal(e2b?.request_timeout_ms, 60000);
-    assert.equal(e2b?.timeout_ms, 300000);
-    assert.equal(e2b?.allow_internet_access, true);
+    assert.equal(config.cloud?.provider, "modal");
+    const modal = config.cloud?.modal;
+    assert.ok(modal);
+    assert.equal(modal?.app_name, "tintin-cloud");
+    assert.equal(modal?.image, "debian:12");
+    assert.equal(modal?.workspace_root, "/workspace/tintin");
+    assert.equal(modal?.command_timeout_ms, 60000);
+    assert.equal(modal?.request_timeout_ms, 60000);
+    assert.equal(modal?.timeout_ms, 300000);
+    assert.equal(modal?.idle_timeout_ms, 300000);
+    assert.equal(modal?.block_network, false);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("loadConfig preserves explicit E2B settings", async () => {
+test("loadConfig preserves explicit Modal settings", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "tintin-config-"));
   const configPath = path.join(dir, "config.toml");
   await writeFile(
@@ -80,18 +82,23 @@ test("loadConfig preserves explicit E2B settings", async () => {
     baseConfig(`
 [cloud]
 enabled = true
-provider = "e2b"
+provider = "modal"
 public_base_url = "https://cloud.example.com"
 
-[cloud.e2b]
-api_key = "test-key"
-template_id = "tmpl-123"
-domain = "e2b.dev"
+[cloud.modal]
+token_id = "modal-id"
+token_secret = "modal-secret"
+environment = "dev"
+endpoint = "https://modal.example.com"
+app_name = "tintin-dev"
+image = "ubuntu:22.04"
+image_id = "im-123"
 timeout_ms = 120000
+idle_timeout_ms = 90000
 request_timeout_ms = 15000
 command_timeout_ms = 45000
-secure = false
-allow_internet_access = false
+block_network = true
+cidr_allowlist = ["10.0.0.0/8"]
 workspace_root = "/workspace"
 codex_binary = "codex-custom"
 claude_binary = "claude-custom"
@@ -101,19 +108,24 @@ claude_binary = "claude-custom"
 
   try {
     const config = await loadConfig(configPath);
-    const e2b = config.cloud?.e2b;
-    assert.ok(e2b);
-    assert.equal(e2b?.api_key, "test-key");
-    assert.equal(e2b?.template_id, "tmpl-123");
-    assert.equal(e2b?.domain, "e2b.dev");
-    assert.equal(e2b?.timeout_ms, 120000);
-    assert.equal(e2b?.request_timeout_ms, 15000);
-    assert.equal(e2b?.command_timeout_ms, 45000);
-    assert.equal(e2b?.secure, false);
-    assert.equal(e2b?.allow_internet_access, false);
-    assert.equal(e2b?.workspace_root, "/workspace");
-    assert.equal(e2b?.codex_binary, "codex-custom");
-    assert.equal(e2b?.claude_binary, "claude-custom");
+    const modal = config.cloud?.modal;
+    assert.ok(modal);
+    assert.equal(modal?.token_id, "modal-id");
+    assert.equal(modal?.token_secret, "modal-secret");
+    assert.equal(modal?.environment, "dev");
+    assert.equal(modal?.endpoint, "https://modal.example.com");
+    assert.equal(modal?.app_name, "tintin-dev");
+    assert.equal(modal?.image, "ubuntu:22.04");
+    assert.equal(modal?.image_id, "im-123");
+    assert.equal(modal?.timeout_ms, 120000);
+    assert.equal(modal?.idle_timeout_ms, 90000);
+    assert.equal(modal?.request_timeout_ms, 15000);
+    assert.equal(modal?.command_timeout_ms, 45000);
+    assert.equal(modal?.block_network, true);
+    assert.deepEqual(modal?.cidr_allowlist, ["10.0.0.0/8"]);
+    assert.equal(modal?.workspace_root, "/workspace");
+    assert.equal(modal?.codex_binary, "codex-custom");
+    assert.equal(modal?.claude_binary, "claude-custom");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -127,7 +139,7 @@ test("loadConfig rejects proxy without public base url", async () => {
     baseConfig(`
 [cloud]
 enabled = true
-provider = "e2b"
+provider = "modal"
 
 [cloud.proxy]
 enabled = true

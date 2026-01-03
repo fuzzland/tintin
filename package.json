@@ -35,7 +35,7 @@
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.25.0",
     "better-sqlite3": "^12.5.0",
-    "e2b": "^2.9.0",
+    "modal": "^0.6.0",
     "kysely": "^0.28.5",
     "mysql2": "^3.14.4",
     "pg": "^8.16.3",

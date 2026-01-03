@@ -77,7 +77,7 @@ rate_limit_msgs_per_sec = 1.0
 
 [cloud]
 enabled = false
-provider = "local" # local | e2b
+provider = "local" # local | modal
 public_base_url = "https://tintin.example.com"
 workspaces_dir = "./data/cloud/workspaces"
 default_agent = "codex"
@@ -85,20 +85,25 @@ default_agent = "codex"
 secrets_key = "env:TINTIN_CLOUD_SECRETS_KEY"
 keepalive_minutes = 10
 
-[cloud.e2b]
-# Optional E2B settings (used when provider = "e2b")
-api_key = "env:E2B_API_KEY"
-# Template should include Playwright + Codex + Claude Code preinstalled.
-template_id = "tintin-playwright"
-domain = "" # optional override, e.g. "e2b.app"
+[cloud.modal]
+# Optional Modal settings (used when provider = "modal")
+token_id = "env:MODAL_TOKEN_ID"
+token_secret = "env:MODAL_TOKEN_SECRET"
+# environment = "default"
+# endpoint = "https://api.modal.com"
+app_name = "tintin-cloud"
+# Image must include Playwright + Codex + Claude Code preinstalled.
+image = "debian:12"
+# image_id = "" # optional override (snapshot image ID)
 timeout_ms = 300000
+idle_timeout_ms = 300000
 request_timeout_ms = 60000
 command_timeout_ms = 60000
-secure = true
-allow_internet_access = true
-workspace_root = "/home/user/tintin"
-codex_binary = "codex" # command inside the E2B template
-claude_binary = "claude" # command inside the E2B template
+block_network = false
+cidr_allowlist = []
+workspace_root = "/workspace/tintin"
+codex_binary = "codex" # command inside the Modal image
+claude_binary = "claude" # command inside the Modal image
 
 [cloud.proxy]
 # When users do not provide their own API keys/endpoints, Tintin uses this proxy.
