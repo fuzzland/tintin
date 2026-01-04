@@ -113,6 +113,16 @@ export interface CloudGithubAppSection {
   app_base_url: string;
 }
 
+export interface CloudUiSection {
+  path: string;
+  token_secret: string;
+  token_ttl_ms: number;
+  s3_bucket: string;
+  s3_region: string;
+  s3_prefix: string;
+  s3_signed_url_ttl_ms: number;
+}
+
 export interface CloudSection {
   enabled: boolean;
   provider: CloudProvider;
@@ -125,6 +135,7 @@ export interface CloudSection {
   github_app?: CloudGithubAppSection | null;
   modal?: CloudModalSection | null;
   proxy?: CloudProxySection | null;
+  ui?: CloudUiSection | null;
 }
 
 export interface TelegramSection {
@@ -210,20 +221,27 @@ function toStringIdArray(value: unknown): string[] {
   return out;
 }
 
-function resolveEnvSecrets(value: unknown): unknown {
+function resolveEnvSecrets(
+  value: unknown,
+  opts: { allowMissing?: (path: string[]) => boolean } = {},
+  path: string[] = [],
+): unknown {
   if (typeof value === "string") {
     if (value.startsWith("env:")) {
       const key = value.slice("env:".length);
       const resolved = process.env[key];
-      if (!resolved) throw new Error(`Missing required environment variable ${key}`);
+      if (!resolved) {
+        if (opts.allowMissing?.(path)) return value;
+        throw new Error(`Missing required environment variable ${key}`);
+      }
       return resolved;
     }
     return value;
   }
-  if (Array.isArray(value)) return value.map(resolveEnvSecrets);
+  if (Array.isArray(value)) return value.map((v, i) => resolveEnvSecrets(v, opts, [...path, String(i)]));
   if (isRecord(value)) {
     const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) out[k] = resolveEnvSecrets(v);
+    for (const [k, v] of Object.entries(value)) out[k] = resolveEnvSecrets(v, opts, [...path, k]);
     return out;
   }
   return value;
@@ -553,6 +571,36 @@ function normalizeCloudGithubAppSection(value: unknown): CloudGithubAppSection {
   };
 }
 
+function normalizeCloudUiSection(value: unknown): CloudUiSection {
+  const raw = value ?? {};
+  assert(isRecord(raw), "[cloud].ui must be a table");
+  const pathRaw = typeof (raw as any).path === "string" ? (raw as any).path : "/ui";
+  const path = normalizeHttpPath(pathRaw, "[cloud].ui.path");
+  const token_secret = typeof (raw as any).token_secret === "string" ? (raw as any).token_secret : "";
+  const token_ttl_ms =
+    typeof (raw as any).token_ttl_ms === "number" && Number.isFinite((raw as any).token_ttl_ms) && (raw as any).token_ttl_ms > 0
+      ? Math.floor((raw as any).token_ttl_ms)
+      : 24 * 60 * 60 * 1000;
+  const s3_bucket = typeof (raw as any).s3_bucket === "string" ? (raw as any).s3_bucket : "";
+  const s3_region = typeof (raw as any).s3_region === "string" ? (raw as any).s3_region : "";
+  const s3_prefix = typeof (raw as any).s3_prefix === "string" ? (raw as any).s3_prefix : "tintin/ui";
+  const s3_signed_url_ttl_ms =
+    typeof (raw as any).s3_signed_url_ttl_ms === "number" &&
+    Number.isFinite((raw as any).s3_signed_url_ttl_ms) &&
+    (raw as any).s3_signed_url_ttl_ms > 0
+      ? Math.floor((raw as any).s3_signed_url_ttl_ms)
+      : 5 * 60 * 1000;
+  return {
+    path,
+    token_secret,
+    token_ttl_ms,
+    s3_bucket,
+    s3_region,
+    s3_prefix,
+    s3_signed_url_ttl_ms,
+  };
+}
+
 function normalizeCloudSection(value: unknown, opts: { configDir: string; dataDir: string }): CloudSection | null {
   if (value === undefined) return null;
   assert(isRecord(value), "[cloud] must be a table");
@@ -616,6 +664,7 @@ function normalizeCloudSection(value: unknown, opts: { configDir: string; dataDi
   const github_app = (value as any).github_app !== undefined ? normalizeCloudGithubAppSection((value as any).github_app) : null;
   const modal = (value as any).modal !== undefined || provider === "modal" ? normalizeCloudModalSection((value as any).modal) : null;
   const proxy = (value as any).proxy !== undefined ? normalizeCloudProxySection((value as any).proxy) : null;
+  const ui = (value as any).ui !== undefined ? normalizeCloudUiSection((value as any).ui) : null;
 
   return {
     enabled,
@@ -629,6 +678,7 @@ function normalizeCloudSection(value: unknown, opts: { configDir: string; dataDi
     github_app,
     modal,
     proxy,
+    ui,
   };
 }
 
@@ -638,7 +688,15 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
 
   const rawText = await readFile(absPath, "utf8");
   const parsed = toml.parse(rawText) as unknown;
-  const resolved = resolveEnvSecrets(parsed) as unknown;
+  const cloudEnabled = (() => {
+    if (!isRecord(parsed)) return false;
+    const cloud = (parsed as any).cloud;
+    if (!isRecord(cloud)) return false;
+    return cloud.enabled === true;
+  })();
+  const resolved = resolveEnvSecrets(parsed, {
+    allowMissing: (path) => !cloudEnabled && path[0] === "cloud",
+  }) as unknown;
   assert(isRecord(resolved), "config.toml must parse to a table");
 
   const bot = resolved.bot;
