@@ -36,6 +36,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+RUN mkdir -p /tmp/.X11-unix \
+    && chown root:root /tmp/.X11-unix \
+    && chmod 1777 /tmp/.X11-unix
+
 # Install Codex + Claude Code CLIs (Node 18+ required for Claude Code)
 RUN npm i -g @openai/codex @anthropic-ai/claude-code \
     && npm cache clean --force \
@@ -98,65 +102,73 @@ RUN mkdir -p /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml \
 XML
 
 # Create startup script
-RUN echo '#!/usr/bin/env bash\n\
-\n\
-DISPLAY=${DISPLAY:-:99}\n\
-WIDTH=${WIDTH:-1920}\n\
-HEIGHT=${HEIGHT:-1080}\n\
-export DISPLAY\n\
-\n\
-rm -f /tmp/.X99-lock /tmp/.X11-unix/X99\n\
-mkdir -p /tmp/.X11-unix\n\
-\n\
-Xvfb "${DISPLAY}" -screen 0 "${WIDTH}x${HEIGHT}x24" -ac +extension RANDR &\n\
-\n\
-for i in $(seq 1 20); do\n\
-  if xdpyinfo -display "${DISPLAY}" >/dev/null 2>&1; then\n\
-    break\n\
-  fi\n\
-  sleep 0.5\n\
-done\n\
-\n\
-if command -v dbus-launch >/dev/null 2>&1; then\n\
-  eval "$(dbus-launch --sh-syntax)"\n\
-fi\n\
-\n\
-# Start XFCE session\n\
-startxfce4 >/home/ubuntu/xfce.log 2>&1 &\n\
-sleep 2\n\
-\n\
-# Set theme and appearance (best-effort)\n\
-xfconf-query -c xsettings -p /Net/ThemeName -s "Arc-Dark" >/dev/null 2>&1 || true\n\
-xfconf-query -c xsettings -p /Net/IconThemeName -s "Papirus-Dark" >/dev/null 2>&1 || true\n\
-xfconf-query -c xfwm4 -p /general/theme -s "Arc-Dark" >/dev/null 2>&1 || true\n\
-\n\
-# Start Chrome CDP endpoint\n\
-google-chrome \\\n  --no-sandbox \\\n  --disable-setuid-sandbox \\\n  --disable-dev-shm-usage \\\n  --disable-gpu \\\n  --remote-debugging-port=9222 \\\n  --no-first-run \\\n  --no-default-browser-check \\\n  --user-data-dir=/home/ubuntu/.chrome &\n\
-\n\
-# Forward CDP port\n\
-socat TCP-LISTEN:9223,fork,reuseaddr TCP:127.0.0.1:9222 &\n\
-\n\
-# Start Playwright MCP connected to CDP\n\
-PLAYWRIGHT_MCP_PORT=${PLAYWRIGHT_MCP_PORT:-11000}\n\
-CDP_URL=""\n\
-for i in $(seq 1 15); do\n\
-  CDP_URL=$(curl -s http://127.0.0.1:9222/json/version | sed -n "s/.*\\\"webSocketDebuggerUrl\\\":\\\"\\([^\\\"]*\\)\\\".*/\\1/p")\n\
-  if [ -n "$CDP_URL" ]; then break; fi\n\
-  sleep 1\n\
-done\n\
-if [ -n "$CDP_URL" ]; then\n\
-  npx -y @playwright/mcp@latest --host 127.0.0.1 --port ${PLAYWRIGHT_MCP_PORT} --browser chromium --cdp-endpoint "$CDP_URL" --shared-browser-context &\n\
-else\n\
-  npx -y @playwright/mcp@latest --host 127.0.0.1 --port ${PLAYWRIGHT_MCP_PORT} --browser chromium --shared-browser-context &\n\
-fi\n\
-\n\
-x11vnc -display "${DISPLAY}" -forever -nopw -shared &\n\
-code-server --auth none --bind-addr 0.0.0.0:8080 &\n\
-ttyd -p 7681 bash &\n\
-\n\
-# Keep container alive\n\
-sleep infinity\n\
-' > /home/ubuntu/start.sh \
+RUN cat <<'SCRIPT' > /home/ubuntu/start.sh
+#!/usr/bin/env bash
+
+DISPLAY=${DISPLAY:-:99}
+WIDTH=${WIDTH:-1920}
+HEIGHT=${HEIGHT:-1080}
+export DISPLAY
+
+rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
+
+Xvfb "${DISPLAY}" -screen 0 "${WIDTH}x${HEIGHT}x24" -ac +extension RANDR &
+
+for i in $(seq 1 20); do
+  if xdpyinfo -display "${DISPLAY}" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.5
+done
+
+if command -v dbus-launch >/dev/null 2>&1; then
+  eval "$(dbus-launch --sh-syntax)"
+fi
+
+# Start XFCE session
+startxfce4 >/home/ubuntu/xfce.log 2>&1 &
+sleep 2
+
+# Set theme and appearance (best-effort)
+xfconf-query -c xsettings -p /Net/ThemeName -s "Arc-Dark" >/dev/null 2>&1 || true
+xfconf-query -c xsettings -p /Net/IconThemeName -s "Papirus-Dark" >/dev/null 2>&1 || true
+xfconf-query -c xfwm4 -p /general/theme -s "Arc-Dark" >/dev/null 2>&1 || true
+
+# Start Chrome CDP endpoint
+google-chrome \
+  --no-sandbox \
+  --disable-setuid-sandbox \
+  --disable-dev-shm-usage \
+  --disable-gpu \
+  --remote-debugging-port=9222 \
+  --no-first-run \
+  --no-default-browser-check \
+  --user-data-dir=/home/ubuntu/.chrome &
+
+# Forward CDP port
+socat TCP-LISTEN:9223,fork,reuseaddr TCP:127.0.0.1:9222 &
+
+# Start Playwright MCP connected to CDP
+PLAYWRIGHT_MCP_PORT=${PLAYWRIGHT_MCP_PORT:-11000}
+CDP_URL=""
+for i in $(seq 1 15); do
+  CDP_URL=$(curl -s http://127.0.0.1:9222/json/version | sed -n 's/.*"webSocketDebuggerUrl":"\([^"]*\)".*/\1/p')
+  if [ -n "$CDP_URL" ]; then break; fi
+  sleep 1
+done
+if [ -n "$CDP_URL" ]; then
+  npx -y @playwright/mcp@latest --host 127.0.0.1 --port ${PLAYWRIGHT_MCP_PORT} --browser chromium --cdp-endpoint "$CDP_URL" --shared-browser-context &
+else
+  npx -y @playwright/mcp@latest --host 127.0.0.1 --port ${PLAYWRIGHT_MCP_PORT} --browser chromium --shared-browser-context &
+fi
+
+x11vnc -display "${DISPLAY}" -forever -nopw -shared &
+code-server --auth none --bind-addr 0.0.0.0:8080 &
+ttyd -p 7681 bash &
+
+# Keep container alive
+sleep infinity
+SCRIPT
     && chmod +x /home/ubuntu/start.sh
 
 EXPOSE 8080 7681 9222 9223 11000
