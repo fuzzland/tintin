@@ -184,4 +184,4 @@ context_id = ""
 [playwright_mcp.hyperbrowser]
 api_key = "env:HYPERBROWSER_API_KEY"
 api_base_url = "https://api.hyperbrowser.ai"
-# session_params = { ... } # raw Hyperbrowser session payload
+# session_params = { solveCaptchas = true, useStealth = true } # raw Hyperbrowser session payload

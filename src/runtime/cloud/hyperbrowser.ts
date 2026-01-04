@@ -40,7 +40,13 @@ export async function createHyperbrowserSession(opts: {
     throw new Error("Hyperbrowser config requires api_key.");
   }
   const base = normalizeBaseUrl(cfg.api_base_url ?? "https://api.hyperbrowser.ai");
-  const body = isRecord(cfg.session_params) ? cfg.session_params : {};
+  const body = isRecord(cfg.session_params) ? { ...cfg.session_params } : {};
+  if (!("solveCaptchas" in body)) {
+    body.solveCaptchas = true;
+  }
+  if (!("useStealth" in body)) {
+    body.useStealth = true;
+  }
   const res = await fetchWithProxy(`${base}/api/session`, {
     method: "POST",
     headers: {
