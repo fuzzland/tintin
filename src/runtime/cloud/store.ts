@@ -10,6 +10,8 @@ export interface IdentityRow {
   active_repo_id: string | null;
   onboarded_at: number | null;
   keepalive_minutes: number | null;
+  git_user_name: string | null;
+  git_user_email: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -41,6 +43,8 @@ export async function getOrCreateIdentity(
     active_repo_id: null,
     onboarded_at: null,
     keepalive_minutes: null,
+    git_user_name: null,
+    git_user_email: null,
     created_at: now,
     updated_at: now,
   };
@@ -52,6 +56,22 @@ export async function setIdentityKeepaliveMinutes(db: Db, identityId: string, mi
   await db
     .updateTable("identities")
     .set({ keepalive_minutes: minutes, updated_at: nowMs() })
+    .where("id", "=", identityId)
+    .execute();
+}
+
+export async function setIdentityGitUserName(db: Db, identityId: string, name: string | null): Promise<void> {
+  await db
+    .updateTable("identities")
+    .set({ git_user_name: name, updated_at: nowMs() })
+    .where("id", "=", identityId)
+    .execute();
+}
+
+export async function setIdentityGitUserEmail(db: Db, identityId: string, email: string | null): Promise<void> {
+  await db
+    .updateTable("identities")
+    .set({ git_user_email: email, updated_at: nowMs() })
     .where("id", "=", identityId)
     .execute();
 }

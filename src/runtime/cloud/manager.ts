@@ -473,15 +473,28 @@ export class CloudManager {
     const key = this.config.cloud?.secrets_key ?? "";
     const secrets = await this.db.selectFrom("secrets").selectAll().where("identity_id", "=", identityId).execute();
     const env: Record<string, string> = {};
+    let secretCount = 0;
     for (const s of secrets) {
       try {
         env[s.name] = decryptSecret(s.encrypted_value, key);
+        secretCount += 1;
       } catch {
         continue;
       }
     }
-    if (Object.keys(env).length > 0) {
-      this.logger.info(`[cloud] loaded ${Object.keys(env).length} secrets for identity=${identityId}`);
+    const identity = await this.db
+      .selectFrom("identities")
+      .select(["git_user_name", "git_user_email"])
+      .where("id", "=", identityId)
+      .executeTakeFirst();
+    if (identity?.git_user_name && identity.git_user_name.trim().length > 0) {
+      env.TINTIN_GIT_USER_NAME = identity.git_user_name.trim();
+    }
+    if (identity?.git_user_email && identity.git_user_email.trim().length > 0) {
+      env.TINTIN_GIT_USER_EMAIL = identity.git_user_email.trim();
+    }
+    if (secretCount > 0) {
+      this.logger.info(`[cloud] loaded ${secretCount} secrets for identity=${identityId}`);
     }
     return env;
   }
@@ -903,9 +916,11 @@ export class CloudManager {
     lines.push('if [ -z "$HOME" ]; then');
     lines.push('  export HOME="/home/ubuntu"');
     lines.push("fi");
+    lines.push('TINTIN_GIT_USER_NAME="${TINTIN_GIT_USER_NAME:-tintin[bot]}"');
+    lines.push('TINTIN_GIT_USER_EMAIL="${TINTIN_GIT_USER_EMAIL:-tintin@fuzz.land}"');
     lines.push("if command -v git >/dev/null 2>&1; then");
-    lines.push('  git config --global user.name "tintin[bot]"');
-    lines.push('  git config --global user.email "tintin@fuzz.land"');
+    lines.push('  git config --global user.name "$TINTIN_GIT_USER_NAME"');
+    lines.push('  git config --global user.email "$TINTIN_GIT_USER_EMAIL"');
     lines.push("fi");
 
     const dirs: string[] = [];

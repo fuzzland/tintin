@@ -38,6 +38,8 @@ import {
   listSecrets,
   listSharedRepos,
   setIdentityActiveRepo,
+  setIdentityGitUserEmail,
+  setIdentityGitUserName,
   setIdentityKeepaliveMinutes,
   setSecret,
   shareRepo,
@@ -381,13 +383,7 @@ export class BotController {
             anthropic: names.has("ANTHROPIC_API_KEY"),
           };
         }
-        const result = formatSettingsSummary(
-          this.config,
-          settingsIntent.defaultAgent,
-          "telegram",
-          identity.keepalive_minutes,
-          cloudKeyStatus,
-        );
+        const result = formatSettingsSummary(this.config, settingsIntent.defaultAgent, "telegram", identity, cloudKeyStatus);
         await this.telegram.sendMessage({
           chatId,
           messageThreadId: forumThreadId,
@@ -1874,13 +1870,7 @@ export class BotController {
               anthropic: names.has("ANTHROPIC_API_KEY"),
             };
           }
-          const result = formatSettingsSummary(
-            this.config,
-            settingsIntent.defaultAgent,
-            "slack",
-            identity.keepalive_minutes,
-            cloudKeyStatus,
-          );
+            const result = formatSettingsSummary(this.config, settingsIntent.defaultAgent, "slack", identity, cloudKeyStatus);
           await this.slack.postEphemeral({
             channel: channelId,
             user: userId,
@@ -2902,6 +2892,8 @@ function formatSupportedSettingKeys(): string {
     "`claude_code.env.<KEY>`",
     "`mcp.<NAME>`",
     "`cloud.keepalive_minutes`",
+    "`cloud.git_user_name`",
+    "`cloud.git_user_email`",
     "`cloud.openai_api_key`",
     "`cloud.anthropic_api_key`",
   ].join(", ");
@@ -2911,7 +2903,7 @@ function formatSettingsSummary(
   config: AppConfig,
   agent: SessionAgent,
   platform: "telegram" | "slack",
-  identityKeepaliveMinutes: number | null,
+  identity: { keepalive_minutes: number | null; git_user_name: string | null; git_user_email: string | null } | null,
   cloudKeyStatus: { openai: boolean; anthropic: boolean } | null,
 ): string {
   const adapter = getAgentAdapter(agent);
@@ -2951,6 +2943,7 @@ function formatSettingsSummary(
   }
 
   if (config.cloud?.enabled) {
+    const identityKeepaliveMinutes = identity?.keepalive_minutes ?? null;
     const effective =
       typeof identityKeepaliveMinutes === "number" && Number.isFinite(identityKeepaliveMinutes)
         ? identityKeepaliveMinutes
@@ -2959,10 +2952,16 @@ function formatSettingsSummary(
       typeof identityKeepaliveMinutes === "number" && Number.isFinite(identityKeepaliveMinutes) ? " (per-user)" : " (default)";
     const openaiStatus = cloudKeyStatus?.openai ? "set (per-user)" : "not set";
     const anthropicStatus = cloudKeyStatus?.anthropic ? "set (per-user)" : "not set";
+    const gitName = identity?.git_user_name?.trim() || null;
+    const gitEmail = identity?.git_user_email?.trim() || null;
+    const gitNameLabel = gitName ? `${gitName} (per-user)` : "tintin[bot] (default)";
+    const gitEmailLabel = gitEmail ? `${gitEmail} (per-user)` : "tintin@fuzz.land (default)";
     lines.push(
       "",
       "Cloud settings:",
       `- \`cloud.keepalive_minutes\`: ${String(effective)}${suffix}`,
+      `- \`cloud.git_user_name\`: ${gitNameLabel}`,
+      `- \`cloud.git_user_email\`: ${gitEmailLabel}`,
       `- \`cloud.openai_api_key\`: ${openaiStatus}`,
       `- \`cloud.anthropic_api_key\`: ${anthropicStatus}`,
     );
@@ -2974,9 +2973,13 @@ function formatSettingsSummary(
     `- ${cmdPrefix}settings set ${prefix}.timeout_seconds 1800`,
     `- ${cmdPrefix}settings set mcp.SEARCH http://localhost:3000`,
     `- ${cmdPrefix}settings set cloud.keepalive_minutes 10`,
+    `- ${cmdPrefix}settings set cloud.git_user_name \"Tintin Bot\"`,
+    `- ${cmdPrefix}settings set cloud.git_user_email tintin@fuzz.land`,
     `- ${cmdPrefix}settings set cloud.openai_api_key sk-...`,
     `- ${cmdPrefix}settings set cloud.anthropic_api_key sk-ant-...`,
     `- ${cmdPrefix}settings unset cloud.keepalive_minutes`,
+    `- ${cmdPrefix}settings unset cloud.git_user_name`,
+    `- ${cmdPrefix}settings unset cloud.git_user_email`,
     `- ${cmdPrefix}settings unset cloud.openai_api_key`,
     `- ${cmdPrefix}settings unset cloud.anthropic_api_key`,
     `- ${cmdPrefix}settings unset mcp.SEARCH`,
@@ -2992,7 +2995,14 @@ async function applyCloudSettingsCommand(opts: {
 }): Promise<string | null> {
   if (opts.cmd.kind === "list") return null;
   const target = opts.cmd.target.trim().toLowerCase();
-  if (target !== "cloud.keepalive_minutes" && target !== "cloud.openai_api_key" && target !== "cloud.anthropic_api_key") return null;
+  if (
+    target !== "cloud.keepalive_minutes" &&
+    target !== "cloud.git_user_name" &&
+    target !== "cloud.git_user_email" &&
+    target !== "cloud.openai_api_key" &&
+    target !== "cloud.anthropic_api_key"
+  )
+    return null;
   if (!opts.config.cloud) return "Cloud configuration is missing.";
 
   if (opts.cmd.kind === "unset") {
@@ -3000,9 +3010,37 @@ async function applyCloudSettingsCommand(opts: {
       await setIdentityKeepaliveMinutes(opts.db, opts.identityId, null);
       return "`cloud.keepalive_minutes` reset to default.";
     }
+    if (target === "cloud.git_user_name") {
+      await setIdentityGitUserName(opts.db, opts.identityId, null);
+      return "`cloud.git_user_name` reset to default.";
+    }
+    if (target === "cloud.git_user_email") {
+      await setIdentityGitUserEmail(opts.db, opts.identityId, null);
+      return "`cloud.git_user_email` reset to default.";
+    }
     const name = target === "cloud.openai_api_key" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY";
     const ok = await deleteSecret(opts.db, opts.identityId, name);
     return ok ? `\`${target}\` cleared (per-user).` : `\`${target}\` was already unset.`;
+  }
+
+  if (target === "cloud.git_user_name") {
+    if (opts.cmd.kind !== "set") {
+      return `Use "settings set cloud.git_user_name <name>" to change it.`;
+    }
+    const value = opts.cmd.value.trim();
+    if (!value) return "`cloud.git_user_name` cannot be empty.";
+    await setIdentityGitUserName(opts.db, opts.identityId, value);
+    return `cloud.git_user_name updated (per-user) -> ${value}.`;
+  }
+
+  if (target === "cloud.git_user_email") {
+    if (opts.cmd.kind !== "set") {
+      return `Use "settings set cloud.git_user_email <email>" to change it.`;
+    }
+    const value = opts.cmd.value.trim();
+    if (!value) return "`cloud.git_user_email` cannot be empty.";
+    await setIdentityGitUserEmail(opts.db, opts.identityId, value);
+    return `cloud.git_user_email updated (per-user) -> ${value}.`;
   }
 
   if (target === "cloud.keepalive_minutes") {
