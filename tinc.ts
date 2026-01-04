@@ -1,39 +1,64 @@
 #!/usr/bin/env node
-import { open, readdir, stat, writeFile } from "node:fs/promises";
+import { stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
-import { loadConfig } from "./src/runtime/config.js";
-import { createDatabase } from "./src/runtime/db.js";
-import { createLogger } from "./src/runtime/log.js";
-import { encryptSecret } from "./src/runtime/cloud/secrets.js";
 import { generateSetupSpecFromPath } from "./src/runtime/cloud/lift.js";
 import { stringifySetupSpec } from "./src/runtime/cloud/setupSpec.js";
-import { getCloudRun, getOrCreateIdentity, listSecrets, setSecret, deleteSecret } from "./src/runtime/cloud/store.js";
-import { getAgentAdapter } from "./src/runtime/agents.js";
-import { sleep } from "./src/runtime/util.js";
-
 
 interface CliArgs {
   command: string | null;
-  configPath: string;
+  url: string | null;
+  token: string | null;
   rest: string[];
+}
+
+interface ApiConfig {
+  baseUrl: string;
+  token: string;
+}
+
+type AttachFragment = { text: string; continuous?: boolean };
+
+type SseEvent = { event: string; data: unknown };
+
+const ENV_URL_KEYS = ["TINC_URL", "TINTIN_CLOUD_URL", "TINTIN_URL"];
+const ENV_TOKEN_KEYS = ["TINC_TOKEN", "TINTIN_CLOUD_TOKEN", "TINTIN_TOKEN"];
+
+function envFirst(keys: string[]): string | null {
+  for (const key of keys) {
+    const value = process.env[key];
+    if (value && value.trim().length > 0) return value.trim();
+  }
+  return null;
 }
 
 function parseCliArgs(argv: string[]): CliArgs {
   let command: string | null = null;
-  let configPath = process.env.CONFIG_PATH ?? "./config.toml";
+  let url: string | null = envFirst(ENV_URL_KEYS);
+  let token: string | null = envFirst(ENV_TOKEN_KEYS);
   const rest: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
-    if (arg === "--config" || arg === "-c") {
+    if (arg === "--url" || arg === "--base-url") {
       const v = argv[i + 1];
-      if (!v) throw new Error("--config requires a value");
-      configPath = v;
+      if (!v) throw new Error(`${arg} requires a value`);
+      url = v;
       i++;
       continue;
     }
-    if (arg.startsWith("--config=")) {
-      configPath = arg.slice("--config=".length);
+    if (arg.startsWith("--url=") || arg.startsWith("--base-url=")) {
+      url = arg.split("=", 2)[1] ?? "";
+      continue;
+    }
+    if (arg === "--token") {
+      const v = argv[i + 1];
+      if (!v) throw new Error("--token requires a value");
+      token = v;
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--token=")) {
+      token = arg.slice("--token=".length);
       continue;
     }
     if (!command) {
@@ -42,38 +67,71 @@ function parseCliArgs(argv: string[]): CliArgs {
     }
     rest.push(arg);
   }
-  return { command, configPath, rest };
+  return { command, url, token, rest };
 }
 
 function showHelp() {
   console.log(`tinc cloud CLI
 
 Usage:
-  tinc pull --run <id> [--output <path>]
-  tinc attach --run <id> [--raw] [--once] [--poll <ms>]
+  tinc pull --run <id> [--output <path>] [--url <base>] [--token <token>]
+  tinc attach --run <id> [--raw] [--once] [--poll <ms>] [--url <base>] [--token <token>]
   tinc lift [--repo <path>] [--output tintin-setup.yml] [--force]
-  tinc secrets set <name> <value> --platform <slack|telegram> --user <id> [--workspace <id>]
-  tinc secrets set <name> --from-stdin --platform <slack|telegram> --user <id> [--workspace <id>]
-  tinc secrets create <name> <value> --platform <slack|telegram> --user <id> [--workspace <id>]
-  tinc secrets update <name> <value> --platform <slack|telegram> --user <id> [--workspace <id>]
-  tinc secrets list --platform <slack|telegram> --user <id> [--workspace <id>]
-  tinc secrets delete <name> --platform <slack|telegram> --user <id> [--workspace <id>]
+  tinc secrets set <name> <value> [--from-stdin] [--url <base>] [--token <token>]
+  tinc secrets create <name> <value> [--from-stdin] [--url <base>] [--token <token>]
+  tinc secrets update <name> <value> [--from-stdin] [--url <base>] [--token <token>]
+  tinc secrets list [--url <base>] [--token <token>]
+  tinc secrets delete <name> [--url <base>] [--token <token>]
+
+Environment:
+  ${ENV_URL_KEYS.join(" ")} (API base URL, default: http://127.0.0.1:8787)
+  ${ENV_TOKEN_KEYS.join(" ")} (API token; run "tinc token" in chat)
 `);
 }
 
-async function ensureConfig(configPath: string) {
-  const config = await loadConfig(configPath);
-  const logger = createLogger(config.bot.log_level);
-  const db = await createDatabase(config, logger);
-  return { config, logger, db };
+function normalizeBaseUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error("Missing API base URL.");
+  const withScheme = /^[a-z]+:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+  return withScheme.replace(/\/+$/g, "");
 }
 
-async function pathExists(p: string): Promise<boolean> {
+function resolveApiConfig(args: CliArgs): ApiConfig {
+  const baseUrl = normalizeBaseUrl(args.url ?? "http://127.0.0.1:8787");
+  const token = args.token ?? "";
+  if (!token) {
+    throw new Error("Missing API token. Run \"tinc token\" in chat or set TINC_TOKEN.");
+  }
+  return { baseUrl, token };
+}
+
+function buildApiUrl(baseUrl: string, path: string): string {
+  const base = baseUrl.replace(/\/+$/g, "");
+  const suffix = path.startsWith("/") ? path : `/${path}`;
+  if (base.endsWith("/api/cloud")) return `${base}${suffix}`;
+  if (base.endsWith("/api")) return `${base}/cloud${suffix}`;
+  return `${base}/api/cloud${suffix}`;
+}
+
+async function apiRequest<T>(cfg: ApiConfig, method: string, path: string, body?: unknown): Promise<T> {
+  const url = buildApiUrl(cfg.baseUrl, path);
+  const headers: Record<string, string> = { Authorization: `Bearer ${cfg.token}` };
+  const init: { method: string; headers: Record<string, string>; body?: string } = { method, headers };
+  if (body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(body);
+  }
+  const res = await fetch(url, init);
+  const text = await res.text();
+  if (!res.ok) {
+    const message = text || res.statusText;
+    throw new Error(`Request failed (${res.status}): ${message}`);
+  }
+  if (!text) return undefined as T;
   try {
-    await stat(p);
-    return true;
+    return JSON.parse(text) as T;
   } catch {
-    return false;
+    return text as unknown as T;
   }
 }
 
@@ -110,10 +168,9 @@ async function runPull(args: CliArgs) {
   rest = outputFlag.rest;
   const runId = runFlag.value ?? rest[0];
   if (!runId) throw new Error("pull requires --run <id>");
-  const { config, db } = await ensureConfig(args.configPath);
-  if (!config.cloud?.enabled) throw new Error("Cloud mode is disabled.");
-  const run = await getCloudRun(db, runId);
-  if (!run) throw new Error("Run not found.");
+  const api = resolveApiConfig(args);
+  const run = await apiRequest<any>(api, "GET", `/runs/${encodeURIComponent(runId)}`);
+  if (!run || typeof run !== "object") throw new Error("Run not found.");
   const diff = run.diff_patch ?? run.diff_summary ?? "";
   if (outputFlag.value) {
     await writeFile(outputFlag.value, diff, "utf8");
@@ -123,175 +180,72 @@ async function runPull(args: CliArgs) {
   }
 }
 
-type AttachFragment = { text: string; continuous?: boolean };
-
-function decodeBase64ToString(value: unknown): string {
-  if (typeof value !== "string") return "";
-  try {
-    return Buffer.from(value, "base64").toString("utf8");
-  } catch {
-    return value;
+async function streamSse(url: string, headers: Record<string, string>, onEvent: (event: SseEvent) => void) {
+  const res = await fetch(url, {
+    method: "GET",
+    headers: { ...headers, Accept: "text/event-stream" },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Request failed (${res.status}): ${text || res.statusText}`);
   }
-}
-
-function formatCommand(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (Array.isArray(value)) return value.map((v) => String(v)).join(" ");
-  return "";
-}
-
-function extractTextBlocks(value: unknown): string {
-  if (!Array.isArray(value)) return "";
-  const parts: string[] = [];
-  for (const block of value) {
-    if (!block || typeof block !== "object") continue;
-    const type = (block as { type?: unknown }).type;
-    if (type === "text" && typeof (block as { text?: unknown }).text === "string") {
-      parts.push((block as { text: string }).text);
-    }
-  }
-  return parts.join("");
-}
-
-function formatCodexLine(obj: any): AttachFragment[] {
-  if (!obj || typeof obj !== "object") return [];
-  const type = typeof obj.type === "string" ? obj.type : "";
-
-  if (type === "event_msg" && obj.payload && typeof obj.payload === "object") {
-    const payload = obj.payload as Record<string, unknown>;
-    const evType = typeof payload.type === "string" ? payload.type : "";
-    switch (evType) {
-      case "agent_message": {
-        const msg = typeof payload.message === "string" ? payload.message : "";
-        return msg ? [{ text: msg }] : [];
-      }
-      case "agent_message_delta":
-      case "agent_message_content_delta": {
-        const delta = typeof payload.delta === "string" ? payload.delta : "";
-        return delta ? [{ text: delta, continuous: true }] : [];
-      }
-      case "exec_command_begin": {
-        const cmd = formatCommand(payload.command);
-        return cmd ? [{ text: `$ ${cmd}` }] : [];
-      }
-      case "exec_command_output_delta": {
-        const chunk = decodeBase64ToString(payload.chunk);
-        return chunk ? [{ text: chunk, continuous: true }] : [];
-      }
-      case "exec_command_end": {
-        const cmd = formatCommand(payload.command);
-        const exit = typeof payload.exit_code === "number" ? payload.exit_code : null;
-        if (!cmd) return [];
-        const suffix = exit !== null ? ` (exit ${exit})` : "";
-        return [{ text: `$ ${cmd} completed${suffix}` }];
-      }
-      case "error": {
-        const msg = typeof payload.message === "string" ? payload.message : "";
-        return msg ? [{ text: `Error: ${msg}` }] : [];
-      }
-      case "warning": {
-        const msg = typeof payload.message === "string" ? payload.message : "";
-        return msg ? [{ text: `Warning: ${msg}` }] : [];
-      }
-      default:
-        return [];
-    }
-  }
-
-  if (type === "response_item" && obj.payload && typeof obj.payload === "object") {
-    const payload = obj.payload as Record<string, unknown>;
-    const itemType = typeof payload.type === "string" ? payload.type : "";
-    if (itemType === "function_call" || itemType === "custom_tool_call") {
-      const name = typeof payload.name === "string" ? payload.name : "tool";
-      return [{ text: `Tool: ${name}` }];
-    }
-    if (itemType === "function_call_output" || itemType === "custom_tool_call_output") {
-      const output = typeof payload.output === "string" ? payload.output : "";
-      return output ? [{ text: output }] : [];
-    }
-  }
-
-  if (typeof type === "string" && type.startsWith("item.") && obj.item && typeof obj.item === "object") {
-    if (obj.item.type === "agent_message" && typeof obj.item.text === "string") {
-      return [{ text: obj.item.text }];
-    }
-  }
-
-  return [];
-}
-
-function formatClaudeLine(obj: any): AttachFragment[] {
-  if (!obj || typeof obj !== "object") return [];
-  const type = typeof obj.type === "string" ? obj.type : "";
-
-  if (type === "result") {
-    const isError = Boolean(obj.is_error);
-    const subtype = typeof obj.subtype === "string" ? obj.subtype : "";
-    if (isError || (subtype && subtype !== "success")) {
-      return [{ text: `Result: ${subtype || "error"}` }];
-    }
-    return [];
-  }
-
-  if (type === "assistant" || type === "user") {
-    const message = obj.message && typeof obj.message === "object" ? obj.message : null;
-    const content = message ? (message as any).content : null;
-    if (Array.isArray(content)) {
-      const text = extractTextBlocks(content);
-      const fragments: AttachFragment[] = [];
-      if (text) fragments.push({ text });
-      for (const block of content) {
-        if (!block || typeof block !== "object") continue;
-        if ((block as any).type === "tool_use") {
-          const name = typeof (block as any).name === "string" ? (block as any).name : "tool";
-          fragments.push({ text: `Tool: ${name}` });
+  if (!res.body) return;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let eventName = "";
+  let dataLines: string[] = [];
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx = buffer.indexOf("\n");
+    while (idx !== -1) {
+      let line = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 1);
+      if (line.endsWith("\r")) line = line.slice(0, -1);
+      if (line === "") {
+        if (dataLines.length > 0) {
+          const dataText = dataLines.join("\n");
+          let data: unknown = dataText;
+          try {
+            data = JSON.parse(dataText);
+          } catch {
+            // keep as string
+          }
+          onEvent({ event: eventName || "message", data });
         }
-        if ((block as any).type === "tool_result") {
-          const resultText =
-            typeof (block as any).content === "string"
-              ? (block as any).content
-              : extractTextBlocks((block as any).content);
-          if (resultText) fragments.push({ text: resultText });
-        }
+        eventName = "";
+        dataLines = [];
+        idx = buffer.indexOf("\n");
+        continue;
       }
-      return fragments;
+      if (line.startsWith("event:")) {
+        eventName = line.slice("event:".length).trim();
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice("data:".length).trim());
+      }
+      idx = buffer.indexOf("\n");
     }
   }
-
-  return [];
 }
 
-async function readNewJsonlLines(filePath: string, offset: number): Promise<{ lines: string[]; newOffset: number }> {
-  const handle = await open(filePath, "r");
-  try {
-    const stat = await handle.stat();
-    if (offset >= stat.size) return { lines: [], newOffset: offset };
-
-    const maxBytes = 2_000_000;
-    const remaining = stat.size - offset;
-    const toRead = Math.min(remaining, maxBytes);
-    const buf = Buffer.allocUnsafe(toRead);
-    const { bytesRead } = await handle.read(buf, 0, toRead, offset);
-    const slice = buf.subarray(0, bytesRead);
-
-    const lastNewline = slice.lastIndexOf(0x0a);
-    if (lastNewline === -1) return { lines: [], newOffset: offset };
-
-    const complete = slice.subarray(0, lastNewline);
-    const text = complete.toString("utf8");
-    const lines = text.split("\n");
-    const newOffset = offset + lastNewline + 1;
-    return { lines, newOffset };
-  } finally {
-    await handle.close();
+function formatPlanUpdate(plan: unknown, explanation: unknown): string {
+  const lines: string[] = ["Plan update"];
+  if (typeof explanation === "string" && explanation.trim().length > 0) lines.push(explanation.trim());
+  if (Array.isArray(plan)) {
+    const steps = plan
+      .map((item) => {
+        if (!item || typeof item !== "object") return null;
+        const step = typeof (item as any).step === "string" ? (item as any).step : "";
+        const status = typeof (item as any).status === "string" ? (item as any).status : "";
+        if (!step && !status) return null;
+        return `- [${status || "?"}] ${step}`.trim();
+      })
+      .filter((v): v is string => Boolean(v));
+    if (steps.length > 0) lines.push(...steps);
   }
-}
-
-async function listJsonlFiles(dir: string): Promise<string[]> {
-  const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
-  const files = entries.filter((e) => e.isFile() && e.name.endsWith(".jsonl")).map((e) => path.join(dir, e.name));
-  files.sort();
-  return files;
+  return lines.join("\n");
 }
 
 async function runAttach(args: CliArgs) {
@@ -304,58 +258,15 @@ async function runAttach(args: CliArgs) {
   const once = rest.includes("--once");
   const pollFlag = parseFlagValue(rest, "--poll");
   const parsedPoll = pollFlag.value ? Number(pollFlag.value) : NaN;
-  const pollMs = Number.isFinite(parsedPoll) && parsedPoll > 0 ? parsedPoll : 500;
+  const pollMs = Number.isFinite(parsedPoll) && parsedPoll > 0 ? Math.floor(parsedPoll) : null;
 
-  const { config, db } = await ensureConfig(args.configPath);
-  if (!config.cloud?.enabled) throw new Error("Cloud mode is disabled.");
-  const run = await getCloudRun(db, runId);
-  if (!run) throw new Error("Run not found.");
-  if (!run.session_id) throw new Error("Run has no session id yet.");
+  const api = resolveApiConfig(args);
+  const params = new URLSearchParams();
+  if (once) params.set("once", "1");
+  if (pollMs) params.set("poll", String(pollMs));
+  const base = buildApiUrl(api.baseUrl, `/runs/${encodeURIComponent(runId)}/events`);
+  const url = params.toString() ? `${base}?${params.toString()}` : base;
 
-  let session = await db.selectFrom("sessions").selectAll().where("id", "=", run.session_id).executeTakeFirst();
-  if (!session) throw new Error("Session not found.");
-
-  let files: string[] = [];
-  const follow = !once;
-  const isE2B = run.provider === "e2b";
-  const logsDir = isE2B && config.cloud?.workspaces_dir ? path.join(config.cloud.workspaces_dir, "logs", run.session_id) : null;
-
-  const resolveFiles = async (): Promise<string[]> => {
-    if (isE2B) {
-      if (!logsDir) return [];
-      return await listJsonlFiles(logsDir);
-    }
-    if (!session?.codex_session_id) {
-      session = await db.selectFrom("sessions").selectAll().where("id", "=", run.session_id!).executeTakeFirst();
-    }
-    if (!session?.codex_session_id) return [];
-    const adapter = getAgentAdapter(session.agent);
-    const sessionsRoot = adapter.resolveSessionsRoot(session.codex_cwd, config);
-    const homeDir = adapter.resolveHomeDir(sessionsRoot);
-    return await adapter.findSessionJsonlFiles({
-      sessionsRoot,
-      homeDir,
-      cwd: session.codex_cwd,
-      sessionId: session.codex_session_id,
-      timeoutMs: 5_000,
-      pollMs: 200,
-    });
-  };
-
-  const waitForFiles = async () => {
-    const deadline = Date.now() + 20_000;
-    while (Date.now() < deadline) {
-      files = await resolveFiles();
-      if (files.length > 0) return;
-      await sleep(250);
-      session = await db.selectFrom("sessions").selectAll().where("id", "=", run.session_id!).executeTakeFirst();
-    }
-  };
-
-  await waitForFiles();
-  if (files.length === 0 && !follow) throw new Error("No JSONL logs found.");
-
-  const offsets = new Map<string, number>();
   let lastWasContinuous = false;
   const emit = (frag: AttachFragment) => {
     if (!frag.text) return;
@@ -365,51 +276,40 @@ async function runAttach(args: CliArgs) {
     lastWasContinuous = Boolean(frag.continuous);
   };
 
-  while (true) {
-    let hadNew = false;
-    if (follow) {
-      const latest = await resolveFiles();
-      for (const f of latest) {
-        if (!files.includes(f)) files.push(f);
+  await streamSse(url, { Authorization: `Bearer ${api.token}` }, ({ event, data }) => {
+    if (event === "ready") return;
+    if (raw) {
+      const output = typeof data === "string" ? data : JSON.stringify(data);
+      process.stdout.write(`${output}\n`);
+      return;
+    }
+    if (data && typeof data === "object") {
+      const kind = typeof (data as any).kind === "string" ? (data as any).kind : "";
+      if (kind === "plan_update") {
+        emit({ text: formatPlanUpdate((data as any).plan, (data as any).explanation) });
+        return;
+      }
+      if (kind === "final") return;
+      const text = typeof (data as any).text === "string" ? (data as any).text : "";
+      if (text) {
+        const continuous = Boolean((data as any).continuous);
+        emit({ text, continuous });
+        return;
       }
     }
-
-    for (const file of files) {
-      const offset = offsets.get(file) ?? 0;
-      const { lines, newOffset } = await readNewJsonlLines(file, offset);
-      if (lines.length === 0) continue;
-      offsets.set(file, newOffset);
-      hadNew = true;
-      for (const line of lines) {
-        if (raw) {
-          emit({ text: line });
-          continue;
-        }
-        let obj: any;
-        try {
-          obj = JSON.parse(line);
-        } catch {
-          emit({ text: line });
-          continue;
-        }
-        const fragments = session?.agent === "claude_code" ? formatClaudeLine(obj) : formatCodexLine(obj);
-        for (const frag of fragments) emit(frag);
-      }
-    }
-
-    if (!follow) break;
-    if (!hadNew) {
-      const current = await db
-        .selectFrom("sessions")
-        .select(["status"])
-        .where("id", "=", run.session_id!)
-        .executeTakeFirst();
-      if (current && current.status !== "running" && current.status !== "starting") break;
-    }
-    await sleep(pollMs);
-  }
+    if (typeof data === "string") emit({ text: data });
+  });
 
   if (lastWasContinuous) process.stdout.write("\n");
+}
+
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await stat(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function runLift(args: CliArgs) {
@@ -433,34 +333,15 @@ async function runLift(args: CliArgs) {
   console.log(`Wrote ${absOut}`);
 }
 
-function parseIdentityFlags(rest: string[]) {
-  const platformFlag = parseFlagValue(rest, "--platform");
-  rest = platformFlag.rest;
-  const userFlag = parseFlagValue(rest, "--user");
-  rest = userFlag.rest;
-  const workspaceFlag = parseFlagValue(rest, "--workspace");
-  rest = workspaceFlag.rest;
-  const platform = platformFlag.value;
-  const userId = userFlag.value;
-  const workspaceId = workspaceFlag.value ?? null;
-  if (!platform || !userId) throw new Error("--platform and --user are required");
-  return { platform, userId, workspaceId, rest };
-}
-
 async function runSecrets(args: CliArgs) {
   const [sub, ...rest] = args.rest;
   if (!sub) throw new Error("secrets requires a subcommand");
   const normalizeSub = sub.toLowerCase();
+  const api = resolveApiConfig(args);
+
   if (normalizeSub === "list") {
-    const identity = parseIdentityFlags(rest);
-    const { config, db } = await ensureConfig(args.configPath);
-    if (!config.cloud?.enabled) throw new Error("Cloud mode is disabled.");
-    const ident = await getOrCreateIdentity(db, {
-      platform: identity.platform,
-      workspaceId: identity.workspaceId,
-      userId: identity.userId,
-    });
-    const secrets = await listSecrets(db, ident.id);
+    const result = await apiRequest<{ secrets: Array<{ name: string }> }>(api, "GET", "/secrets");
+    const secrets = result?.secrets ?? [];
     if (secrets.length === 0) {
       console.log("No secrets.");
       return;
@@ -469,83 +350,26 @@ async function runSecrets(args: CliArgs) {
     return;
   }
 
-  if (normalizeSub === "create") {
+  if (normalizeSub === "create" || normalizeSub === "update" || normalizeSub === "set") {
     const name = rest[0];
-    if (!name) throw new Error("secrets create requires a name");
-    const identity = parseIdentityFlags(rest.slice(1));
-    const { config, db } = await ensureConfig(args.configPath);
-    if (!config.cloud?.enabled) throw new Error("Cloud mode is disabled.");
-    const ident = await getOrCreateIdentity(db, {
-      platform: identity.platform,
-      workspaceId: identity.workspaceId,
-      userId: identity.userId,
-    });
-    const secrets = await listSecrets(db, ident.id);
-    if (secrets.some((s) => s.name === name)) throw new Error("Secret already exists.");
-    const fromStdin = identity.rest.includes("--from-stdin");
-    const value = fromStdin ? (await readStdin()) : identity.rest.join(" ");
+    if (!name) throw new Error(`secrets ${normalizeSub} requires a name`);
+    const fromStdin = rest.includes("--from-stdin");
+    const valueParts = rest.slice(1).filter((v) => v !== "--from-stdin");
+    const value = fromStdin ? await readStdin() : valueParts.join(" ");
     if (!value) throw new Error("Missing secret value.");
-    const encrypted = encryptSecret(value.trim(), config.cloud.secrets_key);
-    await setSecret(db, { identityId: ident.id, name, encryptedValue: encrypted });
-    console.log(`Created ${name}`);
-    return;
-  }
-
-  if (normalizeSub === "update") {
-    const name = rest[0];
-    if (!name) throw new Error("secrets update requires a name");
-    const identity = parseIdentityFlags(rest.slice(1));
-    const { config, db } = await ensureConfig(args.configPath);
-    if (!config.cloud?.enabled) throw new Error("Cloud mode is disabled.");
-    const ident = await getOrCreateIdentity(db, {
-      platform: identity.platform,
-      workspaceId: identity.workspaceId,
-      userId: identity.userId,
-    });
-    const secrets = await listSecrets(db, ident.id);
-    if (!secrets.some((s) => s.name === name)) throw new Error("Secret not found.");
-    const fromStdin = identity.rest.includes("--from-stdin");
-    const value = fromStdin ? (await readStdin()) : identity.rest.join(" ");
-    if (!value) throw new Error("Missing secret value.");
-    const encrypted = encryptSecret(value.trim(), config.cloud.secrets_key);
-    await setSecret(db, { identityId: ident.id, name, encryptedValue: encrypted });
-    console.log(`Updated ${name}`);
-    return;
-  }
-
-  if (normalizeSub === "set") {
-    const name = rest[0];
-    if (!name) throw new Error("secrets set requires a name");
-    const identity = parseIdentityFlags(rest.slice(1));
-    const { config, db } = await ensureConfig(args.configPath);
-    if (!config.cloud?.enabled) throw new Error("Cloud mode is disabled.");
-    const ident = await getOrCreateIdentity(db, {
-      platform: identity.platform,
-      workspaceId: identity.workspaceId,
-      userId: identity.userId,
-    });
-    const fromStdin = identity.rest.includes("--from-stdin");
-    const value = fromStdin ? (await readStdin()) : identity.rest.join(" ");
-    if (!value) throw new Error("Missing secret value.");
-    const encrypted = encryptSecret(value.trim(), config.cloud.secrets_key);
-    await setSecret(db, { identityId: ident.id, name, encryptedValue: encrypted });
-    console.log(`Saved ${name}`);
+    const mode = normalizeSub === "create" ? "create" : normalizeSub === "update" ? "update" : "set";
+    await apiRequest(api, "POST", "/secrets", { name, value: value.trim(), mode });
+    if (normalizeSub === "create") console.log(`Created ${name}`);
+    else if (normalizeSub === "update") console.log(`Updated ${name}`);
+    else console.log(`Saved ${name}`);
     return;
   }
 
   if (normalizeSub === "delete") {
     const name = rest[0];
     if (!name) throw new Error("secrets delete requires a name");
-    const identity = parseIdentityFlags(rest.slice(1));
-    const { config, db } = await ensureConfig(args.configPath);
-    if (!config.cloud?.enabled) throw new Error("Cloud mode is disabled.");
-    const ident = await getOrCreateIdentity(db, {
-      platform: identity.platform,
-      workspaceId: identity.workspaceId,
-      userId: identity.userId,
-    });
-    const ok = await deleteSecret(db, ident.id, name);
-    console.log(ok ? `Deleted ${name}` : "Secret not found.");
+    const result = await apiRequest<{ deleted: boolean }>(api, "DELETE", `/secrets/${encodeURIComponent(name)}`);
+    console.log(result?.deleted ? `Deleted ${name}` : "Secret not found.");
     return;
   }
 

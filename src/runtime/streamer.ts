@@ -1216,7 +1216,11 @@ function mapEventMsgPayload(
     }
     case "background_event":
       if (!includeEvents) return [];
-      return text(stringOrEmpty(payload.message));
+      {
+        const msg = stringOrEmpty(payload.message);
+        if (msg.startsWith("tintin ")) return [];
+        return text(msg);
+      }
     case "undo_started": {
       if (!includeEvents) return [];
       const msg = stringOrEmpty(payload.message);

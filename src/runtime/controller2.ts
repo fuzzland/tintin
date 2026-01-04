@@ -26,6 +26,7 @@ import { generateSetupSpecFromPath } from "./cloud/lift.js";
 import { hashSetupSpec, stringifySetupSpec } from "./cloud/setupSpec.js";
 import { buildCloneUrl, runGitClone } from "./cloud/git.js";
 import { LocalCloudProvider } from "./cloud/localProvider.js";
+import { createUiToken } from "./cloud/uiTokens.js";
 import {
   getCloudRun,
   getLatestSetupSpec,
@@ -81,6 +82,18 @@ export class BotController {
 
   private markReviewCommitDisabled(sessionId: string) {
     this.reviewCommitDisabled.add(sessionId);
+  }
+
+  private buildCloudUiLink(runId: string, identityId: string, isDirect: boolean): string | null {
+    const cloud = this.config.cloud;
+    const ui = cloud?.ui;
+    if (!cloud?.enabled || !ui || !ui.token_secret || !cloud.public_base_url) return null;
+    const base = cloud.public_base_url.replace(/\/+$/g, "");
+    const path = ui.path.startsWith("/") ? ui.path : `/${ui.path}`;
+    const token = isDirect
+      ? createUiToken(ui, { scope: "identity", identity_id: identityId })
+      : createUiToken(ui, { scope: "run", run_id: runId });
+    return `${base}${path}/run/${runId}?token=${encodeURIComponent(token)}`;
   }
 
   private async disableReviewCommitButtonsTelegram(opts: {
@@ -1005,7 +1018,8 @@ export class BotController {
           await reply("Run not found.");
           return true;
         }
-        await reply(`Run ${run.id}: ${run.status}`);
+        const link = this.buildCloudUiLink(run.id, identity.id, opts.isDirect);
+        await reply(link ? `Run ${run.id}: ${run.status}\nView: ${link}` : `Run ${run.id}: ${run.status}`);
         return true;
       }
       case "action_pull": {
@@ -1016,7 +1030,9 @@ export class BotController {
           return true;
         }
         const summary = run.diff_summary ?? "No diff available.";
-        await reply(`Diff summary for ${run.id}:\n${summary}\n\nUse \`tinc pull --run ${run.id}\` for full diff.`);
+        const link = this.buildCloudUiLink(run.id, identity.id, opts.isDirect);
+        const tail = link ? `\nView: ${link}` : "";
+        await reply(`Diff summary for ${run.id}:\n${summary}\n\nUse \`tinc pull --run ${run.id}\` for full diff.${tail}`);
         return true;
       }
       case "action_run": {
@@ -1069,7 +1085,8 @@ export class BotController {
             repoIds,
             agent,
           });
-          await reply(`Started run ${result.runId}.`, false);
+          const link = this.buildCloudUiLink(result.runId, identity.id, opts.isDirect);
+          await reply(link ? `Started run ${result.runId}.\nView: ${link}` : `Started run ${result.runId}.`, false);
         } catch (e) {
           await reply(`Run failed: ${String(e)}`);
         }
@@ -1116,6 +1133,44 @@ export class BotController {
         } catch (e) {
           await reply(`Setup lift failed: ${String(e)}`);
         }
+        return true;
+      }
+      case "tinc_token": {
+        if (!opts.isDirect) {
+          await reply(`Use ${formatCmd("tinc token")} in a 1:1 chat.`);
+          return true;
+        }
+        const ui = cloud.ui;
+        if (!ui || !ui.token_secret) {
+          await reply("Missing [cloud].ui.token_secret configuration.");
+          return true;
+        }
+        const token = createUiToken(ui, { scope: "identity", identity_id: identity.id });
+        const baseRaw =
+          cloud.public_base_url && cloud.public_base_url.trim().length > 0
+            ? cloud.public_base_url
+            : `http://localhost:${this.config.bot.port}`;
+        const baseUrl = baseRaw.replace(/\/+$/g, "");
+        const ttlMs = ui.token_ttl_ms;
+        const ttl =
+          typeof ttlMs === "number" && Number.isFinite(ttlMs) && ttlMs > 0
+            ? ttlMs >= 60 * 60 * 1000
+              ? `${(ttlMs / (60 * 60 * 1000)).toFixed(1)}h`
+              : `${Math.max(1, Math.round(ttlMs / (60 * 1000)))}m`
+            : null;
+        const lines = [
+          "Here is your tinc API token (keep it secret):",
+          "`" + token + "`",
+          "",
+          "Set env vars:",
+          "`TINC_URL=" + baseUrl + "`",
+          "`TINC_TOKEN=<token>`",
+          "",
+          "Example:",
+          "`TINC_URL=" + baseUrl + " TINC_TOKEN=<token> tinc pull --run <id>`",
+          ttl ? `Token TTL: ${ttl}` : null,
+        ].filter((line): line is string => Boolean(line));
+        await reply(lines.join("\n"), true);
         return true;
       }
       case "secrets_set": {
@@ -2428,6 +2483,7 @@ type CloudCommand =
   | { kind: "action_pull"; runId: string }
   | { kind: "setup_status" }
   | { kind: "setup_lift" }
+  | { kind: "tinc_token" }
   | { kind: "secrets_set"; name: string; value: string | null }
   | { kind: "secrets_create"; name: string; value: string | null }
   | { kind: "secrets_update"; name: string; value: string | null }
@@ -2519,6 +2575,10 @@ function parseCloudCommand(text: string): CloudCommand | null {
     const sub = tokens.shift()!.toLowerCase();
     if (sub === "status") return { kind: "setup_status" };
     if (sub === "lift") return { kind: "setup_lift" };
+  }
+  if (head === "tinc" && tokens.length >= 1) {
+    const sub = tokens.shift()!.toLowerCase();
+    if (sub === "token" || sub === "auth") return { kind: "tinc_token" };
   }
   if (head === "secrets" && tokens.length >= 1) {
     const sub = tokens.shift()!.toLowerCase();
@@ -2731,6 +2791,8 @@ function buildCloudHelpText(platform: "telegram" | "slack"): string {
     `- \`${cmd("secrets update NAME VALUE")}\``,
     `- \`${cmd("secrets list")}\``,
     `- \`${cmd("secrets delete NAME")}\``,
+    "7) CLI (optional)",
+    `- \`${cmd("tinc token")}\` (get a token for the tinc CLI)`,
     "",
     "Notes",
     ...notes,

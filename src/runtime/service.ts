@@ -20,10 +20,15 @@ import {
   getCloudRunBySession,
   listCloudRunScreenshots,
   listCloudRunsForIdentity,
+  listSecrets,
+  getSecret,
+  setSecret,
+  deleteSecret,
 } from "./cloud/store.js";
 import { uploadScreenshot, signScreenshotUrl } from "./cloud/s3.js";
 import { verifyUiToken, type UiTokenPayload } from "./cloud/uiTokens.js";
 import { buildRunArtifactsFromJsonl } from "./cloud/uiArtifacts.js";
+import { encryptSecret } from "./cloud/secrets.js";
 import http from "node:http";
 import { PlaywrightMcpManager } from "./playwrightMcp.js";
 import { appendFile, open, readdir, readFile } from "node:fs/promises";
@@ -899,6 +904,78 @@ export async function createBotService(deps: BotServiceDeps) {
         const payload = requireUiAuth(req, res, url);
         if (!payload) return;
 
+        if (pathParts[2] === "secrets") {
+          if (payload.scope !== "identity") {
+            sendText(res, 403, "identity token required");
+            return;
+          }
+          if (!config.cloud?.secrets_key) {
+            sendText(res, 503, "secrets not configured");
+            return;
+          }
+          if (req.method === "GET" && pathParts.length === 3) {
+            const secrets = await listSecrets(db, payload.identity_id);
+            sendJson(res, 200, { secrets });
+            return;
+          }
+          if (req.method === "POST" && pathParts.length === 3) {
+            const rawBody = await readRequestBody(req);
+            let parsed: any = {};
+            if (rawBody && rawBody.trim().length > 0) {
+              try {
+                parsed = JSON.parse(rawBody);
+              } catch {
+                sendText(res, 400, "invalid json");
+                return;
+              }
+            }
+            const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
+            const valueRaw = typeof parsed.value === "string" ? parsed.value : "";
+            const value = valueRaw.trim();
+            const modeRaw = typeof parsed.mode === "string" ? parsed.mode.toLowerCase() : "set";
+            if (!name) {
+              sendText(res, 400, "missing name");
+              return;
+            }
+            if (!value) {
+              sendText(res, 400, "missing value");
+              return;
+            }
+            if (!["set", "create", "update"].includes(modeRaw)) {
+              sendText(res, 400, "invalid mode");
+              return;
+            }
+            const existing = await getSecret(db, payload.identity_id, name);
+            if (modeRaw === "create" && existing) {
+              sendText(res, 409, "secret already exists");
+              return;
+            }
+            if (modeRaw === "update" && !existing) {
+              sendText(res, 404, "secret not found");
+              return;
+            }
+            const encrypted = encryptSecret(value, config.cloud.secrets_key);
+            await setSecret(db, { identityId: payload.identity_id, name, encryptedValue: encrypted });
+            sendJson(res, existing ? 200 : 201, { status: existing ? "updated" : "created" });
+            return;
+          }
+          if (req.method === "DELETE" && pathParts.length === 4) {
+            let name = pathParts[3] ?? "";
+            try {
+              name = decodeURIComponent(name);
+            } catch {
+              // keep raw
+            }
+            if (!name) {
+              sendText(res, 400, "missing name");
+              return;
+            }
+            const deleted = await deleteSecret(db, payload.identity_id, name);
+            sendJson(res, 200, { deleted });
+            return;
+          }
+        }
+
         if (req.method === "GET" && pathParts[2] === "runs" && pathParts.length === 3) {
           if (payload.scope === "run") {
             const run = await getCloudRun(db, payload.run_id);
@@ -942,6 +1019,13 @@ export async function createBotService(deps: BotServiceDeps) {
               sendText(res, 404, "session not found");
               return;
             }
+            const once = url.searchParams.get("once") === "1";
+            const pollRaw = url.searchParams.get("poll");
+            const pollParsed = pollRaw ? Number(pollRaw) : NaN;
+            const pollMs =
+              Number.isFinite(pollParsed) && pollParsed > 0
+                ? Math.max(50, Math.min(Math.floor(pollParsed), 2000))
+                : 500;
 
             res.writeHead(200, {
               "Content-Type": "text/event-stream",
@@ -958,6 +1042,7 @@ export async function createBotService(deps: BotServiceDeps) {
 
             const offsets = new Map<string, number>();
             while (!closed) {
+              let hadNew = false;
               const files = await resolveRunLogFiles(run.session_id, session);
               for (const file of files) {
                 const prevOffset = offsets.get(file) ?? 0;
@@ -967,6 +1052,7 @@ export async function createBotService(deps: BotServiceDeps) {
                   continue;
                 }
                 offsets.set(file, newOffset);
+                hadNew = true;
                 for (const line of lines) {
                   const trimmed = line.trim();
                   if (!trimmed) continue;
@@ -978,7 +1064,7 @@ export async function createBotService(deps: BotServiceDeps) {
                   }
                   const fragments = mapEventToFragments(session.agent, obj, {
                     includeUserMessages: true,
-                    verbosity: config.bot.message_verbosity,
+                    verbosity: 3,
                   });
                   for (const frag of fragments) {
                     if (frag.kind === "final") continue;
@@ -990,7 +1076,15 @@ export async function createBotService(deps: BotServiceDeps) {
                   }
                 }
               }
-              await sleep(500);
+              if (once && !hadNew) {
+                const current = await db
+                  .selectFrom("sessions")
+                  .select(["status"])
+                  .where("id", "=", run.session_id)
+                  .executeTakeFirst();
+                if (!current || (current.status !== "running" && current.status !== "starting")) break;
+              }
+              await sleep(pollMs);
             }
             res.end();
             return;
@@ -1009,7 +1103,36 @@ export async function createBotService(deps: BotServiceDeps) {
               return;
             }
             const files = await resolveRunLogFiles(run.session_id, session);
-            const artifacts = await buildRunArtifactsFromJsonl(files, session.agent);
+            let baselineResolver: ((filePath: string) => Promise<string | null>) | undefined;
+            if (config.cloud?.provider === "local" && config.cloud?.workspaces_dir) {
+              let root: string | null = null;
+              if (run.snapshot_id) {
+                root = path.join(config.cloud.workspaces_dir, "snapshots", run.snapshot_id);
+              } else if (run.workspace_id) {
+                root = path.join(config.cloud.workspaces_dir, run.workspace_id);
+              }
+              if (root) {
+                const mount = run.primary_repo_id
+                  ? await db
+                      .selectFrom("cloud_run_repos")
+                      .select(["mount_path"])
+                      .where("run_id", "=", run.id)
+                      .where("repo_id", "=", run.primary_repo_id)
+                      .executeTakeFirst()
+                  : null;
+                const repoRoot = mount ? path.join(root, mount.mount_path) : root;
+                baselineResolver = async (filePath: string) => {
+                  const full = path.join(repoRoot, filePath);
+                  if (!full.startsWith(repoRoot)) return null;
+                  return await readFile(full, "utf8").catch(() => null);
+                };
+              }
+            }
+            const artifacts = await buildRunArtifactsFromJsonl(files, session.agent, {
+              baselineResolver,
+              fallbackPatch: run.diff_patch ?? null,
+              fallbackTimestamp: run.finished_at ?? null,
+            });
             sendJson(res, 200, artifacts);
             return;
           }

@@ -191,13 +191,14 @@ export class ModalCloudProvider implements CloudProvider {
     );
 
     const root = toPosix(this.workspaceRoot);
-    await this.runCommand(sandbox, `mkdir -p ${shellQuote(root)}`, { cwd: "/" });
-    await this.runCommand(
+    void this.runCommand(
       sandbox,
       "if [ -x /home/ubuntu/start.sh ]; then sudo -u ubuntu /home/ubuntu/start.sh > /home/ubuntu/start.log 2>&1 & fi",
       { cwd: "/" },
-    );
-    await sandbox.tunnels(60_000).catch((e) => {
+    ).catch((e) => {
+      this.logger.debug(`[cloud][modal] start.sh failed: ${String(e)}`);
+    });
+    void sandbox.tunnels(60_000).catch((e) => {
       this.logger.debug(`[cloud][modal] tunnel init failed: ${String(e)}`);
     });
 

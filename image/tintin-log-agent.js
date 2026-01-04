@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import process from "node:process";
+const process = require("node:process");
 
 const url = process.env.TINTIN_AGENT_URL ?? "";
 const token = process.env.TINTIN_AGENT_TOKEN ?? "";
@@ -79,20 +79,14 @@ const sendLoop = async () => {
 
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
+  if (!chunk) return;
   buffer += chunk;
-  if (buffer.length >= maxChunkBytes) {
-    flush();
-    return;
-  }
-  scheduleFlush();
+  if (buffer.length >= maxChunkBytes) flush();
+  else scheduleFlush();
 });
 
 process.stdin.on("end", () => {
   ended = true;
-  if (flushTimer) {
-    clearTimeout(flushTimer);
-    flushTimer = null;
-  }
   flush();
-  if (!sending && queue.length === 0) process.exit(0);
+  void sendLoop();
 });

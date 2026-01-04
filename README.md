@@ -58,7 +58,20 @@ Key commands (chat):
 CLI (cloud binary): `tinc`
 - `tinc lift` generates `tintin-setup.yml`
 - `tinc pull --run <id>` fetches a diff artifact
-- `tinc attach --run <id>` streams JSONL logs to your terminal
+- `tinc attach --run <id>` streams run output to your terminal
+- CLI auth: in a 1:1 chat, run `tinc token` to get a token. Then set:
+  ```
+  export TINC_URL=http://127.0.0.1:8787
+  export TINC_TOKEN=<token>
+  ```
+
+### Cloud UI
+
+Tintin can serve a lightweight web UI for cloud runs (events, diffs, terminal playback, screenshots).
+
+- Configure `[cloud.ui]` in `config.toml` (token secret, S3 bucket/region, signed URL TTLs). The token secret is also used to sign `tinc` CLI tokens. See `config.example.toml`.
+- UI is served at `${cloud.public_base_url}${cloud.ui.path}` and links are shared in Slack/Telegram with a `?token=...` query param.
+- Group chat links are scoped to a single run; private chat links can view all runs for that identity.
 
 ### Playwright MCP
 

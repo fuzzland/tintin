@@ -127,6 +127,7 @@ export interface CloudSection {
   enabled: boolean;
   provider: CloudProvider;
   public_base_url: string;
+  log_relay_enabled: boolean;
   workspaces_dir: string;
   default_agent: CloudDefaultAgent;
   secrets_key: string;
@@ -609,6 +610,8 @@ function normalizeCloudSection(value: unknown, opts: { configDir: string; dataDi
   const providerRaw = typeof (value as any).provider === "string" ? (value as any).provider.toLowerCase() : "local";
   const provider: CloudProvider = providerRaw === "modal" ? "modal" : "local";
   const publicBaseUrl = typeof (value as any).public_base_url === "string" ? (value as any).public_base_url : "";
+  const log_relay_enabled =
+    typeof (value as any).log_relay_enabled === "boolean" ? (value as any).log_relay_enabled : true;
 
   const workspacesDirRaw =
     typeof (value as any).workspaces_dir === "string" && (value as any).workspaces_dir.length > 0
@@ -670,6 +673,7 @@ function normalizeCloudSection(value: unknown, opts: { configDir: string; dataDi
     enabled,
     provider,
     public_base_url: publicBaseUrl,
+    log_relay_enabled,
     workspaces_dir,
     default_agent,
     secrets_key,

@@ -79,6 +79,7 @@ rate_limit_msgs_per_sec = 1.0
 enabled = false
 provider = "local" # local | modal
 public_base_url = "https://tintin.example.com"
+log_relay_enabled = true # disable to fall back to log syncer polling
 workspaces_dir = "./data/cloud/workspaces"
 default_agent = "codex"
 # 32+ bytes recommended; use env:VAR to keep secrets out of config.toml
@@ -141,6 +142,15 @@ authorize_url = "https://local-tintin.example.com/oauth/authorize"
 token_url = "https://local-tintin.example.com/oauth/token"
 api_base_url = "https://local-tintin.example.com/api"
 scopes = ["repo:read"]
+
+[cloud.ui]
+path = "/ui"
+token_secret = "env:TINTIN_CLOUD_UI_TOKEN_SECRET" # also used for tinc CLI tokens
+token_ttl_ms = 86400000
+s3_bucket = "env:TINTIN_CLOUD_UI_S3_BUCKET"
+s3_region = "us-east-1"
+s3_prefix = "tintin/ui"
+s3_signed_url_ttl_ms = 300000
 
 [playwright_mcp]
 enabled = true
