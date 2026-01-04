@@ -657,20 +657,8 @@ export class CloudManager {
     this.logger.info(
       `[cloud] env check openai_key=${openaiKeyLen > 0 ? `len=${openaiKeyLen}` : "missing"} openai_base=${openaiBase || "(none)"} anthropic_key=${anthropicKeyLen > 0 ? `len=${anthropicKeyLen}` : "missing"} anthropic_base=${anthropicBase || "(none)"}`,
     );
-    if (mcpEnabled) {
-      this.logger.info(
-        `[cloud] waiting for playwright mcp inside sandbox (timeout=${this.config.playwright_mcp!.timeout_ms}ms, port=${this.config.playwright_mcp!.port_start})`,
-      );
-    }
-
     const errPath = `/tmp/tintin-agent-${opts.sessionId}.err`;
     cmd = `${cmd} 2> ${shellQuote(errPath)}`;
-
-    if (mcpEnabled) {
-      this.logger.info(
-        `[cloud] waiting for playwright mcp inside sandbox (timeout=${this.config.playwright_mcp!.timeout_ms}ms, port=${this.config.playwright_mcp!.port_start})`,
-      );
-    }
 
     if (this.provider.id === "modal") {
       const binary = opts.agent === "claude_code" ? modalCfg.claude_binary : modalCfg.codex_binary;
@@ -767,6 +755,11 @@ export class CloudManager {
       "  fi",
       "  sleep 1",
       "done",
+      "OPENAI_KEY_LEN=${#OPENAI_API_KEY}",
+      "ANTHROPIC_KEY_LEN=${#ANTHROPIC_API_KEY}",
+      "OPENAI_BASE=${OPENAI_BASE_URL:-${OPENAI_API_BASE:-}}",
+      "ANTHROPIC_BASE=${ANTHROPIC_BASE_URL:-}",
+      "echo \"tintin env: openai_len=${OPENAI_KEY_LEN:-0} openai_base=${OPENAI_BASE:-} anthropic_len=${ANTHROPIC_KEY_LEN:-0} anthropic_base=${ANTHROPIC_BASE:-}\" >&2",
       'if [ "$TINTIN_MCP_READY" != "1" ]; then',
       `  echo "Playwright MCP not ready after ${timeoutSec}s; continuing without MCP." >&2`,
       "fi",
@@ -853,6 +846,11 @@ export class CloudManager {
     this.logger.info(
       `[cloud] env check openai_key=${openaiKeyLen > 0 ? `len=${openaiKeyLen}` : "missing"} openai_base=${openaiBase || "(none)"} anthropic_key=${anthropicKeyLen > 0 ? `len=${anthropicKeyLen}` : "missing"} anthropic_base=${anthropicBase || "(none)"}`,
     );
+    if (mcpEnabled) {
+      this.logger.info(
+        `[cloud] waiting for playwright mcp inside sandbox (timeout=${this.config.playwright_mcp!.timeout_ms}ms, port=${this.config.playwright_mcp!.port_start})`,
+      );
+    }
 
     const errPath = `/tmp/tintin-agent-${opts.sessionId}.err`;
     cmd = `${cmd} 2> ${shellQuote(errPath)}`;
