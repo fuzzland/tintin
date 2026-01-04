@@ -885,7 +885,7 @@ export class CloudManager {
           byte_offset: 0,
           updated_at: nowMs(),
         });
-        const syncer = new RemoteLogSync(sandbox, remotePath, localPath, this.logger, 500, modalCfg.command_timeout_ms, 0);
+        const syncer = new RemoteLogSync(sandbox, remotePath, localPath, this.logger, 100, modalCfg.command_timeout_ms, 0);
         syncer.start();
         logSyncers.push(syncer);
       }
@@ -1111,7 +1111,7 @@ export class CloudManager {
           updated_at: nowMs(),
         });
         const initialOffset = initialOffsets[i] ?? 0;
-        const syncer = new RemoteLogSync(sandbox, remotePath, localPath, this.logger, 500, modalCfg.command_timeout_ms, initialOffset);
+        const syncer = new RemoteLogSync(sandbox, remotePath, localPath, this.logger, 100, modalCfg.command_timeout_ms, initialOffset);
         syncer.start();
         logSyncers.push(syncer);
       }
