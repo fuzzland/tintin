@@ -23,14 +23,13 @@ import { getAgentAdapter } from "../agents.js";
 import {
   addRunRepo,
   createCloudRun,
-  deleteSessionOffsets,
   getCloudRunBySession,
   getLatestSetupSpec,
   listSecrets,
   putSetupSpec,
   updateCloudRun,
 } from "./store.js";
-import { createSession, updateSession, upsertSessionOffset, type SessionRow } from "../store.js";
+import { createSession, deleteSessionOffsets, updateSession, upsertSessionOffset, type SessionRow } from "../store.js";
 
 function toPosix(p: string): string {
   return p.replace(/\\/g, "/");
@@ -1286,9 +1285,7 @@ export class CloudManager {
       this.logger.warn(`[cloud] failed to restart session=${session.id}: ${String(e)}`);
       await updateSession(this.db, session.id, { status: "error", finished_at: nowMs(), pid: null });
       await updateCloudRun(this.db, run.id, { status: "error", finished_at: nowMs() });
-      if (this.provider.id !== "local") {
-        await this.provider.terminateWorkspace(workspace).catch(() => {});
-      }
+      await this.provider.terminateWorkspace(workspace).catch(() => {});
       throw e;
     }
   }
