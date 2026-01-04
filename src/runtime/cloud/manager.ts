@@ -4,7 +4,7 @@ import type { AppConfig } from "../config.js";
 import type { Db, SessionAgent, SessionStatus } from "../db.js";
 import type { Logger } from "../log.js";
 import type { SessionManager } from "../sessionManager.js";
-import { nowMs } from "../util.js";
+import { nowMs, sleep } from "../util.js";
 import { redactText } from "../redact.js";
 import type { Sandbox } from "modal";
 import type { PlaywrightServerInfo } from "../playwrightMcp.js";
@@ -604,7 +604,18 @@ export class CloudManager {
     let configDir: string | null = null;
     let cmd = "";
     let env: Record<string, string> = {};
-    const playwrightArgs = this.buildRemotePlaywrightArgs(opts.agent);
+    let playwrightArgs: string[] = [];
+    if (this.provider.id === "modal" && this.config.playwright_mcp?.enabled) {
+      const port = this.config.playwright_mcp.port_start;
+      const ready = await this.waitForPlaywrightMcp(sandbox, port, this.config.playwright_mcp.timeout_ms);
+      if (ready) {
+        playwrightArgs = this.buildRemotePlaywrightArgs(opts.agent);
+      } else {
+        this.logger.warn("[cloud] playwright mcp not ready; running without MCP for this session.");
+      }
+    } else {
+      playwrightArgs = this.buildRemotePlaywrightArgs(opts.agent);
+    }
 
     if (opts.agent === "claude_code") {
       if (!this.config.claude_code) throw new Error("Claude Code is not configured.");
@@ -743,6 +754,27 @@ export class CloudManager {
     return { stdout: stdout ?? "", stderr: stderr ?? "", exitCode };
   }
 
+  private async waitForPlaywrightMcp(sandbox: Sandbox, port: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + Math.max(1_000, timeoutMs);
+    let attempt = 0;
+    while (Date.now() < deadline) {
+      attempt += 1;
+      const result = await this.runRemoteDebugCommand(
+        sandbox,
+        `curl -s -o /dev/null -w "%{http_code}" --max-time 2 http://127.0.0.1:${port}/mcp`,
+        Math.min(5_000, timeoutMs),
+      );
+      const status = result.stdout.trim();
+      if (result.exitCode === 0 && status && status !== "000") {
+        this.logger.info(`[cloud] playwright mcp ready status=${status} attempts=${attempt}`);
+        return true;
+      }
+      await sleep(1_000);
+    }
+    this.logger.warn(`[cloud] playwright mcp not ready after ${timeoutMs}ms`);
+    return false;
+  }
+
   private async spawnRemoteResume(opts: {
     sessionId: string;
     agentSessionId: string;
@@ -765,7 +797,18 @@ export class CloudManager {
     let configDir: string | null = null;
     let cmd = "";
     let env: Record<string, string> = {};
-    const playwrightArgs = this.buildRemotePlaywrightArgs(opts.agent);
+    let playwrightArgs: string[] = [];
+    if (this.provider.id === "modal" && this.config.playwright_mcp?.enabled) {
+      const port = this.config.playwright_mcp.port_start;
+      const ready = await this.waitForPlaywrightMcp(sandbox, port, this.config.playwright_mcp.timeout_ms);
+      if (ready) {
+        playwrightArgs = this.buildRemotePlaywrightArgs(opts.agent);
+      } else {
+        this.logger.warn("[cloud] playwright mcp not ready; running without MCP for this session.");
+      }
+    } else {
+      playwrightArgs = this.buildRemotePlaywrightArgs(opts.agent);
+    }
 
     if (opts.agent === "claude_code") {
       if (!this.config.claude_code) throw new Error("Claude Code is not configured.");
