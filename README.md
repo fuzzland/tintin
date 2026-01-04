@@ -43,7 +43,7 @@ Cloud mode lets users run actions via Slack/Telegram without pre-registering pro
 
 GitHub App setup: configure `[cloud.github_app]` (app_id, app_slug, private_key as base64-encoded PEM) and set the app callback URL to `${cloud.public_base_url}${cloud.oauth.callback_path}`.
 
-To run on Modal, set `[cloud].provider = "modal"` and configure `[cloud.modal]` (token, app name, image, timeouts). The Modal image should include Playwright + browser and the agent binaries (`codex` and/or `claude`) or adjust `cloud.modal.codex_binary` / `cloud.modal.claude_binary` to match.
+To run on Modal, set `[cloud].provider = "modal"` and configure `[cloud.modal]` (token, app name, image, timeouts; defaults: `timeout_ms`/`idle_timeout_ms` = 86400000). The Modal image should include Playwright + browser and the agent binaries (`codex` and/or `claude`) or adjust `cloud.modal.codex_binary` / `cloud.modal.claude_binary` to match.
 
 API access in cloud mode:
 - Users can provide their own `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` (and optional `*_BASE_URL`) via `tintin secrets`.

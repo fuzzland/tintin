@@ -41,6 +41,7 @@ import {
   setIdentityGitUserEmail,
   setIdentityGitUserName,
   setIdentityKeepaliveMinutes,
+  setIdentityMessageVerbosity,
   setSecret,
   shareRepo,
   unshareRepo,
@@ -399,7 +400,16 @@ export class BotController {
         cmd: settingsIntent.cmd,
         identityId: identity.id,
       });
-      const result = cloudResult ?? applySettingsCommand(this.config, settingsIntent.cmd, settingsIntent.defaultAgent, "telegram");
+      const identityResult = await applyIdentitySettingsCommand({
+        config: this.config,
+        db: this.db,
+        cmd: settingsIntent.cmd,
+        identityId: identity.id,
+      });
+      const result =
+        identityResult ??
+        cloudResult ??
+        applySettingsCommand(this.config, settingsIntent.cmd, settingsIntent.defaultAgent, "telegram");
       await this.telegram.sendMessage({
         chatId,
         messageThreadId: forumThreadId,
@@ -1878,13 +1888,20 @@ export class BotController {
           });
           return;
         }
-        const cloudResult = await applyCloudSettingsCommand({
-          config: this.config,
-          db: this.db,
-          cmd: settingsIntent.cmd,
-          identityId: identity.id,
-        });
-        const result = cloudResult ?? applySettingsCommand(this.config, settingsIntent.cmd, settingsIntent.defaultAgent, "slack");
+      const cloudResult = await applyCloudSettingsCommand({
+        config: this.config,
+        db: this.db,
+        cmd: settingsIntent.cmd,
+        identityId: identity.id,
+      });
+      const identityResult = await applyIdentitySettingsCommand({
+        config: this.config,
+        db: this.db,
+        cmd: settingsIntent.cmd,
+        identityId: identity.id,
+      });
+      const result =
+        identityResult ?? cloudResult ?? applySettingsCommand(this.config, settingsIntent.cmd, settingsIntent.defaultAgent, "slack");
         await this.slack.postEphemeral({
           channel: channelId,
           user: userId,
@@ -2872,6 +2889,8 @@ function resolveSettingTarget(
 
 function formatSupportedSettingKeys(): string {
   return [
+    "`message_verbosity`",
+    "`bot.message_verbosity`",
     "`codex.full_auto`",
     "`claude_code.full_auto`",
     "`codex.dangerously_bypass_approvals_and_sandbox`",
@@ -2903,7 +2922,12 @@ function formatSettingsSummary(
   config: AppConfig,
   agent: SessionAgent,
   platform: "telegram" | "slack",
-  identity: { keepalive_minutes: number | null; git_user_name: string | null; git_user_email: string | null } | null,
+  identity: {
+    keepalive_minutes: number | null;
+    message_verbosity: number | null;
+    git_user_name: string | null;
+    git_user_email: string | null;
+  } | null,
   cloudKeyStatus: { openai: boolean; anthropic: boolean } | null,
 ): string {
   const adapter = getAgentAdapter(agent);
@@ -2916,6 +2940,14 @@ function formatSettingsSummary(
   const cmdPrefix = platform === "telegram" ? "/" : "@bot ";
   const prefix = AGENT_PREFIX[agent];
 
+  const identityVerbosity = identity?.message_verbosity ?? null;
+  const effectiveVerbosity =
+    typeof identityVerbosity === "number" && Number.isFinite(identityVerbosity)
+      ? identityVerbosity
+      : config.bot.message_verbosity;
+  const verbositySuffix =
+    typeof identityVerbosity === "number" && Number.isFinite(identityVerbosity) ? " (per-user)" : " (default)";
+
   const lines = [
     `Settings for ${adapter.displayName} (runtime only; not saved to config.toml):`,
     `- \`${prefix}.binary\`: ${section.binary}`,
@@ -2926,6 +2958,9 @@ function formatSettingsSummary(
     `- \`${prefix}.full_auto\`: ${String(section.full_auto)}`,
     `- \`${prefix}.dangerously_bypass_approvals_and_sandbox\`: ${String(section.dangerously_bypass_approvals_and_sandbox)}`,
     `- \`${prefix}.skip_git_repo_check\`: ${String(section.skip_git_repo_check)}`,
+    "",
+    "User settings:",
+    `- \`message_verbosity\`: ${String(effectiveVerbosity)}${verbositySuffix}`,
   ];
 
   const envEntries = Object.entries(section.env);
@@ -2971,6 +3006,7 @@ function formatSettingsSummary(
     "",
     "Examples:",
     `- ${cmdPrefix}settings set ${prefix}.timeout_seconds 1800`,
+    `- ${cmdPrefix}settings set message_verbosity 2`,
     `- ${cmdPrefix}settings set mcp.SEARCH http://localhost:3000`,
     `- ${cmdPrefix}settings set cloud.keepalive_minutes 10`,
     `- ${cmdPrefix}settings set cloud.git_user_name \"Tintin Bot\"`,
@@ -2985,6 +3021,30 @@ function formatSettingsSummary(
     `- ${cmdPrefix}settings unset mcp.SEARCH`,
   );
   return lines.join("\n");
+}
+
+async function applyIdentitySettingsCommand(opts: {
+  config: AppConfig;
+  db: Db;
+  cmd: SettingsCommand;
+  identityId: string;
+}): Promise<string | null> {
+  if (opts.cmd.kind === "list") return null;
+  const target = opts.cmd.target.trim().toLowerCase();
+  if (target !== "message_verbosity" && target !== "bot.message_verbosity") return null;
+
+  if (opts.cmd.kind === "unset") {
+    await setIdentityMessageVerbosity(opts.db, opts.identityId, null);
+    return "`message_verbosity` reset to default.";
+  }
+
+  const raw = opts.cmd.value.trim();
+  const next = Number(raw);
+  if (!Number.isFinite(next)) return "Expected a number for `message_verbosity`.";
+  const value = Math.floor(next);
+  if (value < 1 || value > 3) return "`message_verbosity` must be 1 (response only), 2 (response + reasoning + events), or 3 (all).";
+  await setIdentityMessageVerbosity(opts.db, opts.identityId, value);
+  return `message_verbosity updated (per-user) -> ${value}.`;
 }
 
 async function applyCloudSettingsCommand(opts: {

@@ -533,13 +533,13 @@ function normalizeCloudModalSection(value: unknown): CloudModalSection {
   const timeout_ms =
     typeof (raw as any).timeout_ms === "number" && Number.isFinite((raw as any).timeout_ms) && (raw as any).timeout_ms > 0
       ? Math.floor((raw as any).timeout_ms)
-      : 300_000;
+      : 86_400_000;
   const idle_timeout_ms =
     typeof (raw as any).idle_timeout_ms === "number" &&
     Number.isFinite((raw as any).idle_timeout_ms) &&
     (raw as any).idle_timeout_ms > 0
       ? Math.floor((raw as any).idle_timeout_ms)
-      : 300_000;
+      : 86_400_000;
   const request_timeout_ms =
     typeof (raw as any).request_timeout_ms === "number" &&
     Number.isFinite((raw as any).request_timeout_ms) &&

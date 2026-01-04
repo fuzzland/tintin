@@ -8,6 +8,7 @@ import type { SendToSessionFn } from "./messaging.js";
 import { redactText } from "./redact.js";
 import { nowMs, sleep } from "./util.js";
 import { listRunningSessions, listSessionOffsets, upsertSessionOffset } from "./store.js";
+import { getIdentity } from "./cloud/store.js";
 import type { SessionRow } from "./store.js";
 import { PlaywrightMcpManager } from "./playwrightMcp.js";
 import { readFile } from "node:fs/promises";
@@ -92,6 +93,21 @@ export class JsonlStreamer {
     return this.config.codex.poll_interval_ms;
   }
 
+  private async resolveMessageVerbosity(session: SessionRow): Promise<MessageVerbosity> {
+    const fallback = normalizeMessageVerbosity(this.config.bot.message_verbosity);
+    try {
+      const identity = await getIdentity(this.db, {
+        platform: session.platform,
+        workspaceId: session.workspace_id ?? null,
+        userId: session.created_by_user_id,
+      });
+      if (!identity || identity.message_verbosity === null || identity.message_verbosity === undefined) return fallback;
+      return normalizeMessageVerbosity(identity.message_verbosity);
+    } catch {
+      return fallback;
+    }
+  }
+
   private async pollOnce(onlySessionIds?: string[]) {
     const sessions = await listRunningSessions(this.db);
     const runningSessionIds = new Set<string>();
@@ -102,6 +118,7 @@ export class JsonlStreamer {
       else this.playwrightCloudSessions.delete(session.id);
       this.noteUserActivity(session.id, session.last_user_message_at, session.created_at);
       if (!session.codex_session_id) continue;
+      const messageVerbosity = await this.resolveMessageVerbosity(session);
       const adapter = getAgentAdapter(session.agent);
       let agentConfig: { max_catchup_lines: number } | null = null;
       try {
@@ -176,7 +193,7 @@ export class JsonlStreamer {
             fragments.push(
               ...mapper(obj, {
                 includeUserMessages: session.platform !== "telegram",
-                verbosity: this.config.bot.message_verbosity,
+                verbosity: messageVerbosity,
               }),
             );
           } catch {

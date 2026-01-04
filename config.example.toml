@@ -96,8 +96,8 @@ app_name = "tintin-cloud"
 # Image must include Playwright + Codex + Claude Code preinstalled.
 image = "debian:12"
 # image_id = "" # optional override (snapshot image ID)
-timeout_ms = 300000
-idle_timeout_ms = 300000
+timeout_ms = 86400000
+idle_timeout_ms = 86400000
 request_timeout_ms = 60000
 command_timeout_ms = 60000
 block_network = false

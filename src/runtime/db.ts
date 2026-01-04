@@ -86,6 +86,7 @@ export interface IdentitiesTable {
   active_repo_id: string | null;
   onboarded_at: number | null;
   keepalive_minutes: number | null;
+  message_verbosity: number | null;
   git_user_name: string | null;
   git_user_email: string | null;
   created_at: number;
