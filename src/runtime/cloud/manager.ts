@@ -4,7 +4,7 @@ import type { AppConfig } from "../config.js";
 import type { Db, SessionAgent, SessionStatus } from "../db.js";
 import type { Logger } from "../log.js";
 import type { SessionManager } from "../sessionManager.js";
-import { nowMs, sleep } from "../util.js";
+import { nowMs } from "../util.js";
 import { redactText } from "../redact.js";
 import type { Sandbox } from "modal";
 import type { PlaywrightServerInfo } from "../playwrightMcp.js";
@@ -604,18 +604,8 @@ export class CloudManager {
     let configDir: string | null = null;
     let cmd = "";
     let env: Record<string, string> = {};
-    let playwrightArgs: string[] = [];
-    if (this.provider.id === "modal" && this.config.playwright_mcp?.enabled) {
-      const port = this.config.playwright_mcp.port_start;
-      const ready = await this.waitForPlaywrightMcp(sandbox, port, this.config.playwright_mcp.timeout_ms);
-      if (ready) {
-        playwrightArgs = this.buildRemotePlaywrightArgs(opts.agent);
-      } else {
-        this.logger.warn("[cloud] playwright mcp not ready; running without MCP for this session.");
-      }
-    } else {
-      playwrightArgs = this.buildRemotePlaywrightArgs(opts.agent);
-    }
+    const mcpEnabled = this.provider.id === "modal" && this.config.playwright_mcp?.enabled;
+    const playwrightArgs = mcpEnabled ? this.buildRemotePlaywrightArgs(opts.agent) : [];
 
     if (opts.agent === "claude_code") {
       if (!this.config.claude_code) throw new Error("Claude Code is not configured.");
@@ -624,9 +614,15 @@ export class CloudManager {
       await this.ensureRemoteDir(sandbox, toPosix(sessionsRoot), modalCfg.command_timeout_ms);
       await this.ensureRemoteDir(sandbox, toPosix(configDir), modalCfg.command_timeout_ms);
       await this.ensureRemoteDir(sandbox, path.posix.join(toPosix(configDir), "projects"), modalCfg.command_timeout_ms);
-      const args = this.buildClaudeArgs(agentSessionId);
-      args.push(...playwrightArgs);
-      cmd = `${modalCfg.claude_binary} ${args.map(shellQuote).join(" ")} < ${shellQuote(promptFile)}`;
+      const baseArgs = this.buildClaudeArgs(agentSessionId);
+      const baseCmd = `${modalCfg.claude_binary} ${baseArgs.map(shellQuote).join(" ")} < ${shellQuote(promptFile)}`;
+      if (mcpEnabled && playwrightArgs.length > 0) {
+        const argsWithMcp = [...baseArgs, ...playwrightArgs];
+        const mcpCmd = `${modalCfg.claude_binary} ${argsWithMcp.map(shellQuote).join(" ")} < ${shellQuote(promptFile)}`;
+        cmd = this.wrapMcpWaitCommand(mcpCmd, baseCmd, this.config.playwright_mcp!.port_start, this.config.playwright_mcp!.timeout_ms);
+      } else {
+        cmd = baseCmd;
+      }
       env = {
         ...this.config.claude_code.env,
         ...opts.envOverrides,
@@ -637,9 +633,15 @@ export class CloudManager {
       const homeDir = resolveCodexHomeFromSessionsRoot(sessionsRoot);
       await this.ensureRemoteDir(sandbox, toPosix(sessionsRoot), modalCfg.command_timeout_ms);
       await this.ensureRemoteDir(sandbox, toPosix(homeDir), modalCfg.command_timeout_ms);
-      const args = this.buildCodexArgs(opts.cwd);
-      args.push(...playwrightArgs);
-      cmd = `${modalCfg.codex_binary} ${args.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
+      const baseArgs = this.buildCodexArgs(opts.cwd);
+      const baseCmd = `${modalCfg.codex_binary} ${baseArgs.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
+      if (mcpEnabled && playwrightArgs.length > 0) {
+        const argsWithMcp = [...baseArgs, ...playwrightArgs];
+        const mcpCmd = `${modalCfg.codex_binary} ${argsWithMcp.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
+        cmd = this.wrapMcpWaitCommand(mcpCmd, baseCmd, this.config.playwright_mcp!.port_start, this.config.playwright_mcp!.timeout_ms);
+      } else {
+        cmd = baseCmd;
+      }
       env = {
         ...this.config.codex.env,
         ...opts.envOverrides,
@@ -655,19 +657,18 @@ export class CloudManager {
     this.logger.info(
       `[cloud] env check openai_key=${openaiKeyLen > 0 ? `len=${openaiKeyLen}` : "missing"} openai_base=${openaiBase || "(none)"} anthropic_key=${anthropicKeyLen > 0 ? `len=${anthropicKeyLen}` : "missing"} anthropic_base=${anthropicBase || "(none)"}`,
     );
+    if (mcpEnabled) {
+      this.logger.info(
+        `[cloud] waiting for playwright mcp inside sandbox (timeout=${this.config.playwright_mcp!.timeout_ms}ms, port=${this.config.playwright_mcp!.port_start})`,
+      );
+    }
 
     const errPath = `/tmp/tintin-agent-${opts.sessionId}.err`;
     cmd = `${cmd} 2> ${shellQuote(errPath)}`;
 
-    if (this.provider.id === "modal" && this.config.playwright_mcp?.enabled) {
-      const port = this.config.playwright_mcp.port_start;
-      const check = await this.runRemoteDebugCommand(
-        sandbox,
-        `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:${port}/mcp`,
-        modalCfg.command_timeout_ms,
-      );
+    if (mcpEnabled) {
       this.logger.info(
-        `[cloud] playwright mcp check status=${check.stdout.trim() || "?"} exit=${check.exitCode} port=${port}`,
+        `[cloud] waiting for playwright mcp inside sandbox (timeout=${this.config.playwright_mcp!.timeout_ms}ms, port=${this.config.playwright_mcp!.port_start})`,
       );
     }
 
@@ -754,25 +755,27 @@ export class CloudManager {
     return { stdout: stdout ?? "", stderr: stderr ?? "", exitCode };
   }
 
-  private async waitForPlaywrightMcp(sandbox: Sandbox, port: number, timeoutMs: number): Promise<boolean> {
-    const deadline = Date.now() + Math.max(1_000, timeoutMs);
-    let attempt = 0;
-    while (Date.now() < deadline) {
-      attempt += 1;
-      const result = await this.runRemoteDebugCommand(
-        sandbox,
-        `curl -s -o /dev/null -w "%{http_code}" --max-time 2 http://127.0.0.1:${port}/mcp`,
-        Math.min(5_000, timeoutMs),
-      );
-      const status = result.stdout.trim();
-      if (result.exitCode === 0 && status && status !== "000") {
-        this.logger.info(`[cloud] playwright mcp ready status=${status} attempts=${attempt}`);
-        return true;
-      }
-      await sleep(1_000);
-    }
-    this.logger.warn(`[cloud] playwright mcp not ready after ${timeoutMs}ms`);
-    return false;
+  private wrapMcpWaitCommand(cmdWithMcp: string, cmdWithoutMcp: string, port: number, timeoutMs: number): string {
+    const timeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
+    return [
+      "TINTIN_MCP_READY=0",
+      `for i in $(seq 1 ${timeoutSec}); do`,
+      `  status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 http://127.0.0.1:${port}/mcp || true)`,
+      `  if [ -n "$status" ] && [ "$status" != "000" ]; then`,
+      "    TINTIN_MCP_READY=1",
+      "    break",
+      "  fi",
+      "  sleep 1",
+      "done",
+      'if [ "$TINTIN_MCP_READY" != "1" ]; then',
+      `  echo "Playwright MCP not ready after ${timeoutSec}s; continuing without MCP." >&2`,
+      "fi",
+      'if [ "$TINTIN_MCP_READY" = "1" ]; then',
+      `  ${cmdWithMcp}`,
+      "else",
+      `  ${cmdWithoutMcp}`,
+      "fi",
+    ].join("\n");
   }
 
   private async spawnRemoteResume(opts: {
@@ -797,18 +800,8 @@ export class CloudManager {
     let configDir: string | null = null;
     let cmd = "";
     let env: Record<string, string> = {};
-    let playwrightArgs: string[] = [];
-    if (this.provider.id === "modal" && this.config.playwright_mcp?.enabled) {
-      const port = this.config.playwright_mcp.port_start;
-      const ready = await this.waitForPlaywrightMcp(sandbox, port, this.config.playwright_mcp.timeout_ms);
-      if (ready) {
-        playwrightArgs = this.buildRemotePlaywrightArgs(opts.agent);
-      } else {
-        this.logger.warn("[cloud] playwright mcp not ready; running without MCP for this session.");
-      }
-    } else {
-      playwrightArgs = this.buildRemotePlaywrightArgs(opts.agent);
-    }
+    const mcpEnabled = this.provider.id === "modal" && this.config.playwright_mcp?.enabled;
+    const playwrightArgs = mcpEnabled ? this.buildRemotePlaywrightArgs(opts.agent) : [];
 
     if (opts.agent === "claude_code") {
       if (!this.config.claude_code) throw new Error("Claude Code is not configured.");
@@ -817,9 +810,15 @@ export class CloudManager {
       await this.ensureRemoteDir(sandbox, toPosix(sessionsRoot), modalCfg.command_timeout_ms);
       await this.ensureRemoteDir(sandbox, toPosix(configDir), modalCfg.command_timeout_ms);
       await this.ensureRemoteDir(sandbox, path.posix.join(toPosix(configDir), "projects"), modalCfg.command_timeout_ms);
-      const args = this.buildClaudeResumeArgs(opts.agentSessionId);
-      args.push(...playwrightArgs);
-      cmd = `${modalCfg.claude_binary} ${args.map(shellQuote).join(" ")} < ${shellQuote(promptFile)}`;
+      const baseArgs = this.buildClaudeResumeArgs(opts.agentSessionId);
+      const baseCmd = `${modalCfg.claude_binary} ${baseArgs.map(shellQuote).join(" ")} < ${shellQuote(promptFile)}`;
+      if (mcpEnabled && playwrightArgs.length > 0) {
+        const argsWithMcp = [...baseArgs, ...playwrightArgs];
+        const mcpCmd = `${modalCfg.claude_binary} ${argsWithMcp.map(shellQuote).join(" ")} < ${shellQuote(promptFile)}`;
+        cmd = this.wrapMcpWaitCommand(mcpCmd, baseCmd, this.config.playwright_mcp!.port_start, this.config.playwright_mcp!.timeout_ms);
+      } else {
+        cmd = baseCmd;
+      }
       env = {
         ...this.config.claude_code.env,
         ...opts.envOverrides,
@@ -830,10 +829,15 @@ export class CloudManager {
       const homeDir = resolveCodexHomeFromSessionsRoot(sessionsRoot);
       await this.ensureRemoteDir(sandbox, toPosix(sessionsRoot), modalCfg.command_timeout_ms);
       await this.ensureRemoteDir(sandbox, toPosix(homeDir), modalCfg.command_timeout_ms);
-      const args = this.buildCodexArgs(opts.cwd);
-      args.push(...playwrightArgs);
-      args.push("resume", opts.agentSessionId);
-      cmd = `${modalCfg.codex_binary} ${args.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
+      const baseArgs = this.buildCodexArgs(opts.cwd);
+      const baseCmd = `${modalCfg.codex_binary} ${baseArgs.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
+      if (mcpEnabled && playwrightArgs.length > 0) {
+        const argsWithMcp = [...baseArgs, ...playwrightArgs, "resume", opts.agentSessionId];
+        const mcpCmd = `${modalCfg.codex_binary} ${argsWithMcp.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
+        cmd = this.wrapMcpWaitCommand(mcpCmd, baseCmd, this.config.playwright_mcp!.port_start, this.config.playwright_mcp!.timeout_ms);
+      } else {
+        cmd = baseCmd;
+      }
       env = {
         ...this.config.codex.env,
         ...opts.envOverrides,
