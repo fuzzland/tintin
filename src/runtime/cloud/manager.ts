@@ -312,6 +312,9 @@ export class CloudManager {
         continue;
       }
     }
+    if (Object.keys(env).length > 0) {
+      this.logger.info(`[cloud] loaded ${Object.keys(env).length} secrets for identity=${identityId}`);
+    }
     return env;
   }
 
@@ -521,20 +524,24 @@ export class CloudManager {
       : cloud.public_base_url;
 
     const token = createProxyToken(proxy.shared_secret, identityId, proxy.token_ttl_ms);
-    const hasOpenAIKey = "OPENAI_API_KEY" in out || "OPENAI_API_KEY" in this.config.codex.env;
-    const hasOpenAIBase = "OPENAI_BASE_URL" in out || "OPENAI_API_BASE" in out;
+    const openaiKey = typeof out.OPENAI_API_KEY === "string" ? out.OPENAI_API_KEY : this.config.codex.env.OPENAI_API_KEY;
+    const hasOpenAIKey = typeof openaiKey === "string" && openaiKey.length > 0;
+    const hasOpenAIBase = Boolean(out.OPENAI_BASE_URL || out.OPENAI_API_BASE);
     if (agent === "codex" && !hasOpenAIKey && !hasOpenAIBase && proxy.openai_api_key) {
       out.OPENAI_API_KEY = token;
       const openaiBase = `${baseUrl}${proxy.openai_path}`;
       out.OPENAI_BASE_URL = openaiBase;
       out.OPENAI_API_BASE = openaiBase;
+      this.logger.info("[cloud] proxy applied for OpenAI (token).");
     }
     const hasAnthropicKey =
-      "ANTHROPIC_API_KEY" in out || (this.config.claude_code?.env && "ANTHROPIC_API_KEY" in this.config.claude_code.env);
+      (typeof out.ANTHROPIC_API_KEY === "string" && out.ANTHROPIC_API_KEY.length > 0) ||
+      (this.config.claude_code?.env && typeof this.config.claude_code.env.ANTHROPIC_API_KEY === "string" && this.config.claude_code.env.ANTHROPIC_API_KEY.length > 0);
     const hasAnthropicBase = "ANTHROPIC_BASE_URL" in out;
     if (agent === "claude_code" && !hasAnthropicKey && !hasAnthropicBase && proxy.anthropic_api_key) {
       out.ANTHROPIC_API_KEY = token;
       out.ANTHROPIC_BASE_URL = `${baseUrl}${proxy.anthropic_path}`;
+      this.logger.info("[cloud] proxy applied for Anthropic (token).");
     }
     return out;
   }
@@ -630,6 +637,13 @@ export class CloudManager {
     }
 
     env = this.ensureModalEnv(env);
+    const openaiKeyLen = typeof env.OPENAI_API_KEY === "string" ? env.OPENAI_API_KEY.length : 0;
+    const anthropicKeyLen = typeof env.ANTHROPIC_API_KEY === "string" ? env.ANTHROPIC_API_KEY.length : 0;
+    const openaiBase = env.OPENAI_BASE_URL || env.OPENAI_API_BASE || "";
+    const anthropicBase = env.ANTHROPIC_BASE_URL || "";
+    this.logger.info(
+      `[cloud] env check openai_key=${openaiKeyLen > 0 ? `len=${openaiKeyLen}` : "missing"} openai_base=${openaiBase || "(none)"} anthropic_key=${anthropicKeyLen > 0 ? `len=${anthropicKeyLen}` : "missing"} anthropic_base=${anthropicBase || "(none)"}`,
+    );
 
     const errPath = `/tmp/tintin-agent-${opts.sessionId}.err`;
     cmd = `${cmd} 2> ${shellQuote(errPath)}`;
@@ -785,6 +799,13 @@ export class CloudManager {
     }
 
     env = this.ensureModalEnv(env);
+    const openaiKeyLen = typeof env.OPENAI_API_KEY === "string" ? env.OPENAI_API_KEY.length : 0;
+    const anthropicKeyLen = typeof env.ANTHROPIC_API_KEY === "string" ? env.ANTHROPIC_API_KEY.length : 0;
+    const openaiBase = env.OPENAI_BASE_URL || env.OPENAI_API_BASE || "";
+    const anthropicBase = env.ANTHROPIC_BASE_URL || "";
+    this.logger.info(
+      `[cloud] env check openai_key=${openaiKeyLen > 0 ? `len=${openaiKeyLen}` : "missing"} openai_base=${openaiBase || "(none)"} anthropic_key=${anthropicKeyLen > 0 ? `len=${anthropicKeyLen}` : "missing"} anthropic_base=${anthropicBase || "(none)"}`,
+    );
 
     const errPath = `/tmp/tintin-agent-${opts.sessionId}.err`;
     cmd = `${cmd} 2> ${shellQuote(errPath)}`;
