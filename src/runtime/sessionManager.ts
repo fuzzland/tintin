@@ -342,6 +342,10 @@ export class SessionManager {
     await updateSession(this.db, sessionId, { status: "killed", finished_at: nowMs() });
   }
 
+  async drainSession(sessionId: string) {
+    await this.onProcessExitDrain(sessionId);
+  }
+
   private async handleExit(sessionId: string, code: number | null, signal: NodeJS.Signals | null) {
     const proc = this.processes.get(sessionId);
     const procKind = proc?.kind ?? "?";
