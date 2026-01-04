@@ -169,7 +169,8 @@ ttyd -p 7681 bash &
 # Keep container alive
 sleep infinity
 SCRIPT
-    && chmod +x /home/ubuntu/start.sh
+
+RUN chmod +x /home/ubuntu/start.sh
 
 EXPOSE 8080 7681 9222 9223 11000
 
