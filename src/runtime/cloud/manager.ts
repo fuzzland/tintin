@@ -45,6 +45,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function sanitizeBrowserbaseMetadataValue(value: unknown): string | number | boolean | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const sanitized = trimmed.replace(/[^A-Za-z0-9 .:_-]+/g, "_");
+  const maxLen = 200;
+  return sanitized.length > maxLen ? sanitized.slice(0, maxLen) : sanitized;
+}
+
 type RemoteHandle = {
   wait(): Promise<number>;
   pid: number | null;
@@ -778,14 +789,22 @@ export class CloudManager {
     base: Record<string, unknown> | null,
     extra: Record<string, unknown>,
   ): Record<string, unknown> | undefined {
-    const cleaned = Object.fromEntries(
-      Object.entries(extra).filter(([, value]) => value !== undefined && value !== null && value !== ""),
-    );
-    if (!base && Object.keys(cleaned).length === 0) return undefined;
-    const merged: Record<string, unknown> = base ? { ...base } : {};
-    const existingTintin = isRecord(merged.tintin) ? { ...(merged.tintin as Record<string, unknown>) } : {};
-    merged.tintin = { ...existingTintin, ...cleaned };
-    return merged;
+    const merged: Record<string, unknown> = {};
+    const pushEntries = (source: Record<string, unknown>) => {
+      for (const [key, value] of Object.entries(source)) {
+        const sanitized = sanitizeBrowserbaseMetadataValue(value);
+        if (sanitized === null) continue;
+        merged[key] = sanitized;
+      }
+    };
+    if (base) pushEntries(base);
+    const prefixed: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(extra)) {
+      if (value === undefined || value === null || value === "") continue;
+      prefixed[`tintin_${key}`] = value;
+    }
+    pushEntries(prefixed);
+    return Object.keys(merged).length > 0 ? merged : undefined;
   }
 
   private buildBrowserbaseBootstrapLines(opts: {
@@ -883,7 +902,7 @@ export class CloudManager {
         run_id: opts.runId ?? undefined,
         agent: opts.agent,
         project_id: opts.projectId,
-        project_path: opts.projectPath,
+        project_path: path.basename(opts.projectPath),
       });
       created = await createBrowserbaseSession({ config: browserbase, userMetadata: metadata });
 
