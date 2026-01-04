@@ -111,7 +111,22 @@ xfconf-query -c xsettings -p /Net/IconThemeName -s "Papirus-Dark"\n\
 xfconf-query -c xfwm4 -p /general/theme -s "Arc-Dark"\n\
 # Start Chrome CDP endpoint\n\
 google-chrome \\\n  --no-sandbox \\\n  --disable-setuid-sandbox \\\n  --disable-dev-shm-usage \\\n  --disable-gpu \\\n  --remote-debugging-port=9222 \\\n  --no-first-run \\\n  --no-default-browser-check \\\n  --user-data-dir=/home/ubuntu/.chrome &\n\
+# Forward CDP port\n\
 socat TCP-LISTEN:9223,fork,reuseaddr TCP:127.0.0.1:9222 &\n\
+# Start Playwright MCP connected to CDP\n\
+PLAYWRIGHT_MCP_PORT=${PLAYWRIGHT_MCP_PORT:-11000}\n\
+CDP_URL=""\n\
+for i in $(seq 1 15); do\n\
+  CDP_URL=$(curl -s http://127.0.0.1:9222/json/version | python3 -c "import sys, json; print(json.load(sys.stdin).get('webSocketDebuggerUrl',''))" 2>/dev/null || true)\n\
+  if [ -n "$CDP_URL" ]; then break; fi\n\
+  sleep 1\n\
+done\n\
+if [ -n "$CDP_URL" ]; then\n\
+  npx -y @playwright/mcp@latest --host 127.0.0.1 --port ${PLAYWRIGHT_MCP_PORT} --browser chromium --cdp-endpoint "$CDP_URL" --shared-browser-context &\n\
+else\n\
+  npx -y @playwright/mcp@latest --host 127.0.0.1 --port ${PLAYWRIGHT_MCP_PORT} --browser chromium --shared-browser-context &\n\
+fi\n\
+\n\
 x11vnc -display :99 -forever -nopw &\n\
 code-server --auth none --bind-addr 0.0.0.0:8080 &\n\
 ttyd -p 7681 bash &\n\
@@ -120,6 +135,6 @@ sleep infinity\n\
 \n' > /home/ubuntu/start.sh \
     && chmod +x /home/ubuntu/start.sh
 
-EXPOSE 8080 7681 9222 9223
+EXPOSE 8080 7681 9222 9223 11000
 
 CMD ["bash", "-c", "cd /home/ubuntu/ && ./start.sh"]

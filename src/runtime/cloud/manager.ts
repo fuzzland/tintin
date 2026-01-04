@@ -6,6 +6,7 @@ import type { Logger } from "../log.js";
 import type { SessionManager } from "../sessionManager.js";
 import { nowMs } from "../util.js";
 import type { Sandbox } from "modal";
+import type { PlaywrightServerInfo } from "../playwrightMcp.js";
 import { resolveCodexHomeFromSessionsRoot, resolveSessionsRoot } from "../codex.js";
 import { resolveClaudeConfigDirFromSessionsRoot, resolveClaudeSessionJsonlPath } from "../claudeCode.js";
 import { LocalCloudProvider } from "./localProvider.js";
@@ -17,6 +18,7 @@ import { buildCloneUrl } from "./git.js";
 import { ensureGithubAppToken } from "./githubApp.js";
 import { findRemoteJsonlFiles, getRemoteFileSize, RemoteLogSync } from "./modalLogs.js";
 import { createProxyToken } from "./proxy.js";
+import { getAgentAdapter } from "../agents.js";
 import {
   addRunRepo,
   createCloudRun,
@@ -328,6 +330,22 @@ export class CloudManager {
     return args;
   }
 
+  private buildRemotePlaywrightArgs(agent: SessionAgent): string[] {
+    if (this.provider.id === "local") return [];
+    const cfg = this.config.playwright_mcp;
+    if (!cfg?.enabled) return [];
+    const port = cfg.port_start;
+    const server: PlaywrightServerInfo = {
+      port,
+      url: `http://127.0.0.1:${port}/mcp`,
+      userDataDir: "",
+      outputDir: "",
+    };
+    const startupSec = Math.ceil(cfg.timeout_ms / 1000);
+    const adapter = getAgentAdapter(agent);
+    return adapter.buildPlaywrightCliArgs({ server, playwrightStartupTimeoutSec: startupSec });
+  }
+
   private async startRemoteSession(opts: {
     identityId: string;
     platform: string;
@@ -491,6 +509,7 @@ export class CloudManager {
     let configDir: string | null = null;
     let cmd = "";
     let env: Record<string, string> = {};
+    const playwrightArgs = this.buildRemotePlaywrightArgs(opts.agent);
 
     if (opts.agent === "claude_code") {
       if (!this.config.claude_code) throw new Error("Claude Code is not configured.");
@@ -500,6 +519,7 @@ export class CloudManager {
       await this.ensureRemoteDir(sandbox, toPosix(configDir), modalCfg.command_timeout_ms);
       await this.ensureRemoteDir(sandbox, path.posix.join(toPosix(configDir), "projects"), modalCfg.command_timeout_ms);
       const args = this.buildClaudeArgs(agentSessionId);
+      args.push(...playwrightArgs);
       cmd = `${modalCfg.claude_binary} ${args.map(shellQuote).join(" ")} < ${shellQuote(promptFile)}`;
       env = {
         ...this.config.claude_code.env,
@@ -512,6 +532,7 @@ export class CloudManager {
       await this.ensureRemoteDir(sandbox, toPosix(sessionsRoot), modalCfg.command_timeout_ms);
       await this.ensureRemoteDir(sandbox, toPosix(homeDir), modalCfg.command_timeout_ms);
       const args = this.buildCodexArgs(opts.cwd);
+      args.push(...playwrightArgs);
       cmd = `${modalCfg.codex_binary} ${args.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
       env = {
         ...this.config.codex.env,
@@ -593,6 +614,7 @@ export class CloudManager {
     let configDir: string | null = null;
     let cmd = "";
     let env: Record<string, string> = {};
+    const playwrightArgs = this.buildRemotePlaywrightArgs(opts.agent);
 
     if (opts.agent === "claude_code") {
       if (!this.config.claude_code) throw new Error("Claude Code is not configured.");
@@ -602,6 +624,7 @@ export class CloudManager {
       await this.ensureRemoteDir(sandbox, toPosix(configDir), modalCfg.command_timeout_ms);
       await this.ensureRemoteDir(sandbox, path.posix.join(toPosix(configDir), "projects"), modalCfg.command_timeout_ms);
       const args = this.buildClaudeResumeArgs(opts.agentSessionId);
+      args.push(...playwrightArgs);
       cmd = `${modalCfg.claude_binary} ${args.map(shellQuote).join(" ")} < ${shellQuote(promptFile)}`;
       env = {
         ...this.config.claude_code.env,
@@ -614,6 +637,7 @@ export class CloudManager {
       await this.ensureRemoteDir(sandbox, toPosix(sessionsRoot), modalCfg.command_timeout_ms);
       await this.ensureRemoteDir(sandbox, toPosix(homeDir), modalCfg.command_timeout_ms);
       const args = this.buildCodexArgs(opts.cwd);
+      args.push(...playwrightArgs);
       args.push("resume", opts.agentSessionId);
       cmd = `${modalCfg.codex_binary} ${args.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
       env = {
