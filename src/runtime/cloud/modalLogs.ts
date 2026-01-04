@@ -118,7 +118,15 @@ export class RemoteLogSync {
     const cmd = `tail -c +${start} ${shellQuote(this.remotePath)}`;
     try {
       const result = await runShell(this.sandbox, cmd, this.commandTimeoutMs);
-      if (result.exitCode !== 0) return;
+      if (result.exitCode !== 0) {
+        const err = String(result.stderr ?? "").trim();
+        if (err) {
+          this.logger.debug(`[cloud][modal] log sync error: exit=${result.exitCode} stderr=${err}`);
+        } else {
+          this.logger.debug(`[cloud][modal] log sync error: exit=${result.exitCode}`);
+        }
+        return;
+      }
       const chunk = result.stdout ?? "";
       if (!chunk) return;
       await appendFile(this.localPath, chunk);

@@ -5,6 +5,7 @@ import type { Db, SessionAgent, SessionStatus } from "../db.js";
 import type { Logger } from "../log.js";
 import type { SessionManager } from "../sessionManager.js";
 import { nowMs } from "../util.js";
+import { redactText } from "../redact.js";
 import type { Sandbox } from "modal";
 import type { PlaywrightServerInfo } from "../playwrightMcp.js";
 import { resolveCodexHomeFromSessionsRoot, resolveSessionsRoot } from "../codex.js";
@@ -41,6 +42,10 @@ function shellQuote(value: string): string {
 type RemoteHandle = {
   wait(): Promise<number>;
   pid: number | null;
+};
+type RemoteDebug = {
+  sandbox: Sandbox;
+  errPath: string;
 };
 
 export class CloudManager {
@@ -310,6 +315,23 @@ export class CloudManager {
     return env;
   }
 
+  private ensureModalEnv(env: Record<string, string>): Record<string, string> {
+    if (this.provider.id !== "modal") return env;
+    const base: Record<string, string> = {
+      HOME: "/home/ubuntu",
+      USER: "ubuntu",
+      LOGNAME: "ubuntu",
+      SHELL: "/bin/bash",
+      PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      LANG: "C.UTF-8",
+      LC_ALL: "C.UTF-8",
+    };
+    for (const [key, value] of Object.entries(base)) {
+      if (!(key in env)) env[key] = value;
+    }
+    return env;
+  }
+
   private async injectModalSecretsBashrc(identityId: string, workspace: CloudWorkspace): Promise<void> {
     if (this.provider.id !== "modal") return;
     const modal = this.getModalProvider();
@@ -455,7 +477,7 @@ export class CloudManager {
       this.logger.info(
         `[cloud] spawn agent=${opts.agent} session=${sessionId} cwd=${opts.projectPath} env_keys=${Object.keys(envOverrides).length}`,
       );
-      const { handle, agentSessionId, logSyncers } = await this.spawnRemoteAgent({
+      const { handle, agentSessionId, logSyncers, debug } = await this.spawnRemoteAgent({
         sessionId,
         prompt: opts.prompt,
         cwd: opts.projectPath,
@@ -476,6 +498,7 @@ export class CloudManager {
         handle,
         logSyncers,
         workspace: opts.workspace,
+        debug,
       });
     } catch (e) {
       this.logger.warn(`[cloud] failed to spawn agent session=${sessionId}: ${String(e)}`);
@@ -559,7 +582,7 @@ export class CloudManager {
     agent: SessionAgent;
     workspace: CloudWorkspace;
     envOverrides: Record<string, string>;
-  }): Promise<{ handle: RemoteHandle; agentSessionId: string; logSyncers: RemoteLogSync[] }> {
+  }): Promise<{ handle: RemoteHandle; agentSessionId: string; logSyncers: RemoteLogSync[]; debug: RemoteDebug }> {
     const modal = this.getModalProvider();
     const sandbox = modal.getSandbox(opts.workspace.id);
     const modalCfg = this.config.cloud?.modal;
@@ -604,6 +627,23 @@ export class CloudManager {
         ...opts.envOverrides,
         CODEX_HOME: toPosix(homeDir),
       };
+    }
+
+    env = this.ensureModalEnv(env);
+
+    const errPath = `/tmp/tintin-agent-${opts.sessionId}.err`;
+    cmd = `${cmd} 2> ${shellQuote(errPath)}`;
+
+    if (this.provider.id === "modal" && this.config.playwright_mcp?.enabled) {
+      const port = this.config.playwright_mcp.port_start;
+      const check = await this.runRemoteDebugCommand(
+        sandbox,
+        `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:${port}/mcp`,
+        modalCfg.command_timeout_ms,
+      );
+      this.logger.info(
+        `[cloud] playwright mcp check status=${check.stdout.trim() || "?"} exit=${check.exitCode} port=${port}`,
+      );
     }
 
     if (this.provider.id === "modal") {
@@ -672,7 +712,7 @@ export class CloudManager {
       logSyncers.push(syncer);
     }
 
-    return { handle, agentSessionId, logSyncers };
+    return { handle, agentSessionId, logSyncers, debug: { sandbox, errPath } };
   }
 
   private async runRemoteDebugCommand(
@@ -697,7 +737,7 @@ export class CloudManager {
     agent: SessionAgent;
     workspace: CloudWorkspace;
     envOverrides: Record<string, string>;
-  }): Promise<{ handle: RemoteHandle; logSyncers: RemoteLogSync[] }> {
+  }): Promise<{ handle: RemoteHandle; logSyncers: RemoteLogSync[]; debug: RemoteDebug }> {
     const modal = this.getModalProvider();
     const sandbox = modal.getSandbox(opts.workspace.id);
     const modalCfg = this.config.cloud?.modal;
@@ -743,6 +783,11 @@ export class CloudManager {
         CODEX_HOME: toPosix(homeDir),
       };
     }
+
+    env = this.ensureModalEnv(env);
+
+    const errPath = `/tmp/tintin-agent-${opts.sessionId}.err`;
+    cmd = `${cmd} 2> ${shellQuote(errPath)}`;
 
     let remoteFiles: string[] = [];
     if (opts.agent === "claude_code") {
@@ -803,7 +848,7 @@ export class CloudManager {
       logSyncers.push(syncer);
     }
 
-    return { handle, logSyncers };
+    return { handle, logSyncers, debug: { sandbox, errPath } };
   }
 
   private async monitorRemoteSession(opts: {
@@ -811,6 +856,7 @@ export class CloudManager {
     handle: RemoteHandle;
     logSyncers: RemoteLogSync[];
     workspace: CloudWorkspace;
+    debug?: RemoteDebug;
   }) {
     let status: SessionStatus = "error";
     let exitCode: number | null = null;
@@ -818,11 +864,17 @@ export class CloudManager {
       const result = await opts.handle.wait();
       exitCode = result;
       status = result === 0 ? "finished" : "error";
+      this.logger.info(`[cloud] agent exit session=${opts.sessionId} code=${String(exitCode)}`);
     } catch (e) {
       exitCode = e && typeof e === "object" && "exitCode" in e ? (e as any).exitCode : null;
       status = "error";
       this.logger.warn(`[cloud] remote agent failed session=${opts.sessionId}: ${String(e)}`);
     } finally {
+      if (opts.debug) {
+        await this.logRemoteAgentError(opts.debug).catch((e) => {
+          this.logger.warn(`[cloud] failed to read agent stderr: ${String(e)}`);
+        });
+      }
       for (const syncer of opts.logSyncers) syncer.stop();
       for (const syncer of opts.logSyncers) await syncer.drain().catch(() => {});
       await updateSession(this.db, opts.sessionId, {
@@ -833,6 +885,17 @@ export class CloudManager {
       });
       await this.handleSessionFinished(opts.sessionId, status);
     }
+  }
+
+  private async logRemoteAgentError(debug: RemoteDebug): Promise<void> {
+    const tail = await this.runRemoteDebugCommand(
+      debug.sandbox,
+      `tail -c 4000 ${shellQuote(debug.errPath)} 2>/dev/null || true`,
+      10_000,
+    );
+    const raw = tail.stdout.trim();
+    if (!raw) return;
+    this.logger.warn(`[cloud] agent stderr tail:\n${redactText(raw)}`);
   }
 
   async resumeCloudSession(session: SessionRow, prompt: string): Promise<"resumed" | "expired" | "not_cloud"> {
@@ -854,7 +917,7 @@ export class CloudManager {
 
     const workspace = this.workspaceFromId(run.workspace_id);
     const envOverrides = this.applyProxyEnv(await this.buildAgentEnv(run.identity_id), run.identity_id, session.agent);
-    const { handle, logSyncers } = await this.spawnRemoteResume({
+    const { handle, logSyncers, debug } = await this.spawnRemoteResume({
       sessionId: session.id,
       agentSessionId: session.codex_session_id,
       prompt,
@@ -871,6 +934,7 @@ export class CloudManager {
       handle,
       logSyncers,
       workspace,
+      debug,
     });
 
     return "resumed";
