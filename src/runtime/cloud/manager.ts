@@ -842,7 +842,7 @@ export class CloudManager {
           sessionsRoot: primaryRoot,
           sessionId: null,
           timeoutMs: 10_000,
-          pollMs: 200,
+          pollMs: 100,
         });
         this.logger.info(`[cloud] log search agent=codex root=${primaryRoot} matches=${discovered.length}`);
         if (discovered.length > 0) {
@@ -853,7 +853,7 @@ export class CloudManager {
             sessionsRoot: fallbackRoot,
             sessionId: null,
             timeoutMs: 2_000,
-            pollMs: 200,
+            pollMs: 100,
           });
           this.logger.info(`[cloud] log search agent=codex root=${fallbackRoot} matches=${fallbackFound.length}`);
           if (fallbackFound.length > 0) remoteFiles.push(...fallbackFound);
@@ -1062,7 +1062,7 @@ export class CloudManager {
           sessionsRoot: primaryRoot,
           sessionId: opts.agentSessionId,
           timeoutMs: 10_000,
-          pollMs: 200,
+          pollMs: 100,
         });
         this.logger.info(`[cloud] log search agent=codex root=${primaryRoot} matches=${discovered.length}`);
         if (discovered.length > 0) {
@@ -1073,7 +1073,7 @@ export class CloudManager {
             sessionsRoot: fallbackRoot,
             sessionId: opts.agentSessionId,
             timeoutMs: 2_000,
-            pollMs: 200,
+            pollMs: 100,
           });
           this.logger.info(`[cloud] log search agent=codex root=${fallbackRoot} matches=${fallbackFound.length}`);
           if (fallbackFound.length > 0) remoteFiles.push(...fallbackFound);
