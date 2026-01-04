@@ -358,7 +358,22 @@ export class BotController {
       }
       const identity = await getOrCreateIdentity(this.db, { platform: "telegram", workspaceId: null, userId });
       if (settingsIntent.cmd.kind === "list") {
-        const result = formatSettingsSummary(this.config, settingsIntent.defaultAgent, "telegram", identity.keepalive_minutes);
+        let cloudKeyStatus: { openai: boolean; anthropic: boolean } | null = null;
+        if (this.config.cloud?.enabled) {
+          const secrets = await listSecrets(this.db, identity.id);
+          const names = new Set(secrets.map((s) => s.name));
+          cloudKeyStatus = {
+            openai: names.has("OPENAI_API_KEY"),
+            anthropic: names.has("ANTHROPIC_API_KEY"),
+          };
+        }
+        const result = formatSettingsSummary(
+          this.config,
+          settingsIntent.defaultAgent,
+          "telegram",
+          identity.keepalive_minutes,
+          cloudKeyStatus,
+        );
         await this.telegram.sendMessage({
           chatId,
           messageThreadId: forumThreadId,
@@ -1761,7 +1776,22 @@ export class BotController {
       if (settingsIntent) {
         const identity = await getOrCreateIdentity(this.db, { platform: "slack", workspaceId: teamId ?? null, userId });
         if (settingsIntent.cmd.kind === "list") {
-          const result = formatSettingsSummary(this.config, settingsIntent.defaultAgent, "slack", identity.keepalive_minutes);
+          let cloudKeyStatus: { openai: boolean; anthropic: boolean } | null = null;
+          if (this.config.cloud?.enabled) {
+            const secrets = await listSecrets(this.db, identity.id);
+            const names = new Set(secrets.map((s) => s.name));
+            cloudKeyStatus = {
+              openai: names.has("OPENAI_API_KEY"),
+              anthropic: names.has("ANTHROPIC_API_KEY"),
+            };
+          }
+          const result = formatSettingsSummary(
+            this.config,
+            settingsIntent.defaultAgent,
+            "slack",
+            identity.keepalive_minutes,
+            cloudKeyStatus,
+          );
           await this.slack.postEphemeral({
             channel: channelId,
             user: userId,
@@ -2513,7 +2543,7 @@ function applySettingsCommand(
   defaultAgent: SessionAgent,
   platform: "telegram" | "slack",
 ): string {
-  if (cmd.kind === "list") return formatSettingsSummary(config, defaultAgent, platform, null);
+  if (cmd.kind === "list") return formatSettingsSummary(config, defaultAgent, platform, null, null);
 
   const parsed = resolveSettingTarget(cmd.target, defaultAgent);
   if (!parsed) return `Unknown setting "${cmd.target}".\nSupported: ${formatSupportedSettingKeys()}`;
@@ -2768,6 +2798,8 @@ function formatSupportedSettingKeys(): string {
     "`claude_code.env.<KEY>`",
     "`mcp.<NAME>`",
     "`cloud.keepalive_minutes`",
+    "`cloud.openai_api_key`",
+    "`cloud.anthropic_api_key`",
   ].join(", ");
 }
 
@@ -2776,6 +2808,7 @@ function formatSettingsSummary(
   agent: SessionAgent,
   platform: "telegram" | "slack",
   identityKeepaliveMinutes: number | null,
+  cloudKeyStatus: { openai: boolean; anthropic: boolean } | null,
 ): string {
   const adapter = getAgentAdapter(agent);
   let section;
@@ -2820,7 +2853,15 @@ function formatSettingsSummary(
         : config.cloud.keepalive_minutes;
     const suffix =
       typeof identityKeepaliveMinutes === "number" && Number.isFinite(identityKeepaliveMinutes) ? " (per-user)" : " (default)";
-    lines.push("", "Cloud settings:", `- \`cloud.keepalive_minutes\`: ${String(effective)}${suffix}`);
+    const openaiStatus = cloudKeyStatus?.openai ? "set (per-user)" : "not set";
+    const anthropicStatus = cloudKeyStatus?.anthropic ? "set (per-user)" : "not set";
+    lines.push(
+      "",
+      "Cloud settings:",
+      `- \`cloud.keepalive_minutes\`: ${String(effective)}${suffix}`,
+      `- \`cloud.openai_api_key\`: ${openaiStatus}`,
+      `- \`cloud.anthropic_api_key\`: ${anthropicStatus}`,
+    );
   }
 
   lines.push(
@@ -2829,7 +2870,11 @@ function formatSettingsSummary(
     `- ${cmdPrefix}settings set ${prefix}.timeout_seconds 1800`,
     `- ${cmdPrefix}settings set mcp.SEARCH http://localhost:3000`,
     `- ${cmdPrefix}settings set cloud.keepalive_minutes 10`,
+    `- ${cmdPrefix}settings set cloud.openai_api_key sk-...`,
+    `- ${cmdPrefix}settings set cloud.anthropic_api_key sk-ant-...`,
     `- ${cmdPrefix}settings unset cloud.keepalive_minutes`,
+    `- ${cmdPrefix}settings unset cloud.openai_api_key`,
+    `- ${cmdPrefix}settings unset cloud.anthropic_api_key`,
     `- ${cmdPrefix}settings unset mcp.SEARCH`,
   );
   return lines.join("\n");
@@ -2843,23 +2888,41 @@ async function applyCloudSettingsCommand(opts: {
 }): Promise<string | null> {
   if (opts.cmd.kind === "list") return null;
   const target = opts.cmd.target.trim().toLowerCase();
-  if (target !== "cloud.keepalive_minutes") return null;
+  if (target !== "cloud.keepalive_minutes" && target !== "cloud.openai_api_key" && target !== "cloud.anthropic_api_key") return null;
   if (!opts.config.cloud) return "Cloud configuration is missing.";
 
   if (opts.cmd.kind === "unset") {
-    await setIdentityKeepaliveMinutes(opts.db, opts.identityId, null);
-    return "`cloud.keepalive_minutes` reset to default.";
+    if (target === "cloud.keepalive_minutes") {
+      await setIdentityKeepaliveMinutes(opts.db, opts.identityId, null);
+      return "`cloud.keepalive_minutes` reset to default.";
+    }
+    const name = target === "cloud.openai_api_key" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY";
+    const ok = await deleteSecret(opts.db, opts.identityId, name);
+    return ok ? `\`${target}\` cleared (per-user).` : `\`${target}\` was already unset.`;
+  }
+
+  if (target === "cloud.keepalive_minutes") {
+    if (opts.cmd.kind !== "set") {
+      return `Use "settings set cloud.keepalive_minutes <number>" to change it.`;
+    }
+    const n = Number(opts.cmd.value);
+    if (!Number.isFinite(n)) return "Expected a number for `cloud.keepalive_minutes`.";
+    const next = Math.floor(n);
+    if (next < 0) return "`cloud.keepalive_minutes` must be >= 0.";
+    await setIdentityKeepaliveMinutes(opts.db, opts.identityId, next);
+    return `cloud.keepalive_minutes updated (per-user) -> ${String(next)}.`;
   }
 
   if (opts.cmd.kind !== "set") {
-    return `Use "settings set cloud.keepalive_minutes <number>" to change it.`;
+    return `Use "settings set ${target} <key>" to change it.`;
   }
-  const n = Number(opts.cmd.value);
-  if (!Number.isFinite(n)) return "Expected a number for `cloud.keepalive_minutes`.";
-  const next = Math.floor(n);
-  if (next < 0) return "`cloud.keepalive_minutes` must be >= 0.";
-  await setIdentityKeepaliveMinutes(opts.db, opts.identityId, next);
-  return `cloud.keepalive_minutes updated (per-user) -> ${String(next)}.`;
+  const value = opts.cmd.value.trim();
+  if (!value) return `\`${target}\` cannot be empty.`;
+  if (!opts.config.cloud.secrets_key) return "Cloud secrets are not configured (cloud.secrets_key is empty).";
+  const encrypted = encryptSecret(value, opts.config.cloud.secrets_key);
+  const name = target === "cloud.openai_api_key" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY";
+  await setSecret(opts.db, { identityId: opts.identityId, name, encryptedValue: encrypted });
+  return `\`${target}\` updated (per-user).`;
 }
 
 function formatEnvValue(value: string): string {
