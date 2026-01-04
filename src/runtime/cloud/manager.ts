@@ -544,7 +544,6 @@ export class CloudManager {
     const proc = await sandbox.exec(["/bin/sh", "-lc", cmd], {
       workdir: toPosix(opts.cwd),
       env,
-      timeoutMs: 0,
       stdout: "ignore",
       stderr: "ignore",
       mode: "text",
@@ -679,7 +678,6 @@ export class CloudManager {
     const proc = await sandbox.exec(["/bin/sh", "-lc", cmd], {
       workdir: toPosix(opts.cwd),
       env,
-      timeoutMs: 0,
       stdout: "ignore",
       stderr: "ignore",
       mode: "text",
