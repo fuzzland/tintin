@@ -52,7 +52,7 @@ API access in cloud mode:
 Key commands (chat):
 - `connect github|gitlab|local`
 - `repos`, `repo select <id>`, `repo share <id>`
-- `action run <prompt>` / `action status <runId>` / `action pull <runId>`
+- `run <prompt>` / `status <runId>` / `pull <runId>`
 - `secrets set|list|delete`
 
 CLI (cloud binary): `tinc`

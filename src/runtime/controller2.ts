@@ -1076,7 +1076,7 @@ export class BotController {
         }
         const prompt = cmd.prompt.trim();
         if (!prompt) {
-          await reply("Provide a prompt for the action.");
+          await reply("Provide a prompt for the run.");
           return true;
         }
         try {
@@ -2555,6 +2555,26 @@ function parseCloudCommand(text: string): CloudCommand | null {
     if (sub === "unshare" && tokens.length >= 1) return { kind: "repo_unshare", target: tokens.join(" ") };
   }
   if (head === "actions") return { kind: "actions_list" };
+  if (head === "run") {
+    const repoIds: string[] = [];
+    const promptParts: string[] = [];
+    for (let i = 0; i < tokens.length; i++) {
+      const t = tokens[i]!;
+      if (t.startsWith("--repos=")) {
+        repoIds.push(...t.split("=", 2)[1]!.split(",").map((v) => v.trim()).filter(Boolean));
+        continue;
+      }
+      if (t === "--repos" && tokens[i + 1]) {
+        repoIds.push(...tokens[i + 1]!.split(",").map((v) => v.trim()).filter(Boolean));
+        i++;
+        continue;
+      }
+      promptParts.push(t);
+    }
+    return { kind: "action_run", prompt: promptParts.join(" "), repoIds };
+  }
+  if (head === "status" && tokens.length >= 1) return { kind: "action_status", runId: tokens[0]! };
+  if (head === "pull" && tokens.length >= 1) return { kind: "action_pull", runId: tokens[0]! };
   if (head === "action" && tokens.length >= 1) {
     const sub = tokens.shift()!.toLowerCase();
     if (sub === "run") {
@@ -2789,10 +2809,10 @@ function buildCloudHelpText(platform: "telegram" | "slack"): string {
     "3) Share to a group (optional)",
     `- ${repoShareCmd}`,
     "4) Run an action",
-    `- \`${cmd("action run <prompt>")}\` (multi-repo: \`--repos id1,id2\`)`,
+    `- \`${cmd("run <prompt>")}\` (multi-repo: \`--repos id1,id2\`)`,
     "5) Check results",
-    `- \`${cmd("action status <runId>")}\``,
-    `- \`${cmd("action pull <runId>")}\``,
+    `- \`${cmd("status <runId>")}\``,
+    `- \`${cmd("pull <runId>")}\``,
     "6) Secrets (optional)",
     `- \`${cmd("secrets create NAME VALUE")}\``,
     `- \`${cmd("secrets update NAME VALUE")}\``,
