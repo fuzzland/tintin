@@ -67,6 +67,7 @@ export class ModalCloudProvider implements CloudProvider {
     const params: SandboxCreateParams = {
       timeoutMs: this.timeoutMs > 0 ? this.timeoutMs : undefined,
       idleTimeoutMs: this.idleTimeoutMs > 0 ? this.idleTimeoutMs : undefined,
+      encryptedPorts: [8080, 9223],
     };
     if (this.blockNetwork) {
       params.blockNetwork = true;
@@ -80,6 +81,14 @@ export class ModalCloudProvider implements CloudProvider {
 
     const root = toPosix(this.workspaceRoot);
     await this.runCommand(sandbox, `mkdir -p ${shellQuote(root)}`, { cwd: "/" });
+    await this.runCommand(
+      sandbox,
+      "if [ -x /home/ubuntu/start.sh ]; then sudo -u ubuntu /home/ubuntu/start.sh > /home/ubuntu/start.log 2>&1 & fi",
+      { cwd: "/" },
+    );
+    await sandbox.tunnels(60_000).catch((e) => {
+      this.logger.debug(`[cloud][modal] tunnel init failed: ${String(e)}`);
+    });
 
     return { id, rootPath: root };
   }

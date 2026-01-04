@@ -41,3 +41,4 @@ config2.toml
 
 # Finder (MacOS) folder config
 .DS_Store
+demo/
