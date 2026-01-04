@@ -7,6 +7,8 @@ import * as spaceEmoji0003 from "./migrations/0003_space_emoji.js";
 import * as sessionAgent0004 from "./migrations/0004_session_agent.js";
 import * as cloud0005 from "./migrations/0005_cloud_mode.js";
 import * as cloudKeepalive0006 from "./migrations/0006_cloud_keepalive.js";
+import * as cloudUi0007 from "./migrations/0007_cloud_ui.js";
+import * as setupSpecSnapshot0008 from "./migrations/0008_setup_spec_snapshot.js";
 
 const provider = {
   async getMigrations() {
@@ -17,6 +19,8 @@ const provider = {
       "0004_session_agent": sessionAgent0004,
       "0005_cloud_mode": cloud0005,
       "0006_cloud_keepalive": cloudKeepalive0006,
+      "0007_cloud_ui": cloudUi0007,
+      "0008_setup_spec_snapshot": setupSpecSnapshot0008,
     };
   },
 };

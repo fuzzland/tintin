@@ -257,6 +257,38 @@ export async function getCloudRunBySession(db: Db, sessionId: string) {
   return await db.selectFrom("cloud_runs").selectAll().where("session_id", "=", sessionId).executeTakeFirst();
 }
 
+export async function addCloudRunScreenshot(db: Db, opts: {
+  runId: string;
+  sessionId?: string | null;
+  s3Key: string;
+  mimeType?: string | null;
+  tool?: string | null;
+}) {
+  const id = crypto.randomUUID();
+  await db
+    .insertInto("cloud_run_screenshots")
+    .values({
+      id,
+      run_id: opts.runId,
+      session_id: opts.sessionId ?? null,
+      s3_key: opts.s3Key,
+      mime_type: opts.mimeType ?? null,
+      tool: opts.tool ?? null,
+      created_at: nowMs(),
+    })
+    .execute();
+  return id;
+}
+
+export async function listCloudRunScreenshots(db: Db, runId: string) {
+  return await db
+    .selectFrom("cloud_run_screenshots")
+    .selectAll()
+    .where("run_id", "=", runId)
+    .orderBy("created_at", "asc")
+    .execute();
+}
+
 export async function listCloudRunsForRepo(db: Db, repoId: string, limit = 20) {
   return await db
     .selectFrom("cloud_runs")
@@ -265,6 +297,15 @@ export async function listCloudRunsForRepo(db: Db, repoId: string, limit = 20) {
     .orderBy("created_at", "desc")
     .limit(limit)
     .execute();
+}
+
+export async function listCloudRunsForIdentity(db: Db, opts: { identityId: string; limit?: number; before?: number | null }) {
+  const limit = typeof opts.limit === "number" && Number.isFinite(opts.limit) && opts.limit > 0 ? Math.floor(opts.limit) : 20;
+  let query = db.selectFrom("cloud_runs").selectAll().where("identity_id", "=", opts.identityId);
+  if (typeof opts.before === "number" && Number.isFinite(opts.before)) {
+    query = query.where("created_at", "<", Math.floor(opts.before));
+  }
+  return await query.orderBy("created_at", "desc").limit(limit).execute();
 }
 
 export async function setSecret(db: Db, opts: { identityId: string; name: string; encryptedValue: string }) {
@@ -337,7 +378,15 @@ export async function putSetupSpec(db: Db, opts: { repoId: string; ymlBlob: stri
   const id = crypto.randomUUID();
   await db
     .insertInto("setup_specs")
-    .values({ id, repo_id: opts.repoId, yml_blob: opts.ymlBlob, hash: opts.hash, created_at: now, updated_at: now })
+    .values({
+      id,
+      repo_id: opts.repoId,
+      yml_blob: opts.ymlBlob,
+      hash: opts.hash,
+      snapshot_id: null,
+      created_at: now,
+      updated_at: now,
+    })
     .execute();
   return id;
 }
@@ -350,6 +399,14 @@ export async function getLatestSetupSpec(db: Db, repoId: string) {
     .orderBy("created_at", "desc")
     .limit(1)
     .executeTakeFirst();
+}
+
+export async function updateSetupSpecSnapshot(db: Db, opts: { id: string; snapshotId: string | null }) {
+  await db
+    .updateTable("setup_specs")
+    .set({ snapshot_id: opts.snapshotId, updated_at: nowMs() })
+    .where("id", "=", opts.id)
+    .execute();
 }
 
 export async function shareRepo(db: Db, opts: {

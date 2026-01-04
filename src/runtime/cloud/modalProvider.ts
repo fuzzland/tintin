@@ -64,33 +64,13 @@ export class ModalCloudProvider implements CloudProvider {
   async createWorkspace(opts: { prefix?: string }): Promise<CloudWorkspace> {
     const app = await this.getApp();
     const image = await this.getImage();
-    const params: SandboxCreateParams = {
-      timeoutMs: this.timeoutMs > 0 ? this.timeoutMs : undefined,
-      idleTimeoutMs: this.idleTimeoutMs > 0 ? this.idleTimeoutMs : undefined,
-      encryptedPorts: [8080, 9223],
-    };
-    if (this.blockNetwork) {
-      params.blockNetwork = true;
-    } else if (this.cidrAllowlist.length > 0) {
-      params.cidrAllowlist = this.cidrAllowlist;
-    }
+    return await this.createWorkspaceWithImage(app, image);
+  }
 
-    const sandbox = await this.client.sandboxes.create(app, image, params);
-    const id = sandbox.sandboxId;
-    this.sandboxes.set(id, sandbox);
-
-    const root = toPosix(this.workspaceRoot);
-    await this.runCommand(sandbox, `mkdir -p ${shellQuote(root)}`, { cwd: "/" });
-    await this.runCommand(
-      sandbox,
-      "if [ -x /home/ubuntu/start.sh ]; then sudo -u ubuntu /home/ubuntu/start.sh > /home/ubuntu/start.log 2>&1 & fi",
-      { cwd: "/" },
-    );
-    await sandbox.tunnels(60_000).catch((e) => {
-      this.logger.debug(`[cloud][modal] tunnel init failed: ${String(e)}`);
-    });
-
-    return { id, rootPath: root };
+  async createWorkspaceFromSnapshot(snapshotId: string): Promise<CloudWorkspace> {
+    const app = await this.getApp();
+    const image = await this.client.images.fromId(snapshotId);
+    return await this.createWorkspaceWithImage(app, image);
   }
 
   async uploadFiles(workspace: CloudWorkspace, files: CloudUploadFile[]): Promise<void> {
@@ -172,6 +152,36 @@ export class ModalCloudProvider implements CloudProvider {
       this.image = this.client.images.fromRegistry(this.imageTag);
     }
     return this.image;
+  }
+
+  private async createWorkspaceWithImage(app: App, image: Image): Promise<CloudWorkspace> {
+    const params: SandboxCreateParams = {
+      timeoutMs: this.timeoutMs > 0 ? this.timeoutMs : undefined,
+      idleTimeoutMs: this.idleTimeoutMs > 0 ? this.idleTimeoutMs : undefined,
+      encryptedPorts: [8080, 9223],
+    };
+    if (this.blockNetwork) {
+      params.blockNetwork = true;
+    } else if (this.cidrAllowlist.length > 0) {
+      params.cidrAllowlist = this.cidrAllowlist;
+    }
+
+    const sandbox = await this.client.sandboxes.create(app, image, params);
+    const id = sandbox.sandboxId;
+    this.sandboxes.set(id, sandbox);
+
+    const root = toPosix(this.workspaceRoot);
+    await this.runCommand(sandbox, `mkdir -p ${shellQuote(root)}`, { cwd: "/" });
+    await this.runCommand(
+      sandbox,
+      "if [ -x /home/ubuntu/start.sh ]; then sudo -u ubuntu /home/ubuntu/start.sh > /home/ubuntu/start.log 2>&1 & fi",
+      { cwd: "/" },
+    );
+    await sandbox.tunnels(60_000).catch((e) => {
+      this.logger.debug(`[cloud][modal] tunnel init failed: ${String(e)}`);
+    });
+
+    return { id, rootPath: root };
   }
 
   private async runCommand(

@@ -27,6 +27,7 @@ import {
   getLatestSetupSpec,
   listSecrets,
   putSetupSpec,
+  updateSetupSpecSnapshot,
   updateCloudRun,
 } from "./store.js";
 import { createSession, deleteSessionOffsets, updateSession, upsertSessionOffset, type SessionRow } from "../store.js";
@@ -211,8 +212,25 @@ export class CloudManager {
     if (opts.repoIds.length === 0) throw new Error("No repo selected.");
     const primaryRepoId = opts.repoIds[0]!;
 
-    const workspace = await this.provider.createWorkspace({ prefix: "cloud" });
-    this.logger.info(`[cloud] workspace created id=${workspace.id} root=${workspace.rootPath}`);
+    let setupSpec = await getLatestSetupSpec(this.db, primaryRepoId);
+    let setupSnapshotId: string | null = setupSpec?.snapshot_id ?? null;
+    let usedSnapshot = false;
+    let workspace: CloudWorkspace;
+    if (setupSnapshotId && this.provider.id === "modal") {
+      try {
+        workspace = await this.getModalProvider().createWorkspaceFromSnapshot(setupSnapshotId);
+        usedSnapshot = true;
+        this.logger.info(`[cloud] workspace restored id=${workspace.id} snapshot=${setupSnapshotId}`);
+      } catch (e) {
+        this.logger.warn(`[cloud] snapshot restore failed (${setupSnapshotId}): ${String(e)}; falling back to base image`);
+        workspace = await this.provider.createWorkspace({ prefix: "cloud" });
+      }
+    } else {
+      workspace = await this.provider.createWorkspace({ prefix: "cloud" });
+    }
+    if (!usedSnapshot) {
+      this.logger.info(`[cloud] workspace created id=${workspace.id} root=${workspace.rootPath}`);
+    }
     if (this.provider.id === "modal") {
       await this.injectModalSecretsBashrc(opts.identityId, workspace).catch((e) => {
         this.logger.warn(`[cloud][modal] failed to inject secrets into .bashrc: ${String(e)}`);
@@ -237,49 +255,27 @@ export class CloudManager {
         const absPath = this.joinWorkspacePath(workspace.rootPath, mountPath);
         repoMounts.push({ repoId, mountPath, absPath });
         await addRunRepo(this.db, { runId: run.id, repoId, mountPath });
-
-        const repo = await this.db.selectFrom("repos").selectAll().where("id", "=", repoId).executeTakeFirstOrThrow();
-        const conn = await this.db
-          .selectFrom("connections")
-          .selectAll()
-          .where("id", "=", repo.connection_id)
-          .executeTakeFirstOrThrow();
-        let cloneToken = conn.access_token;
-        let cloneUser: string | undefined;
-        if (conn.type === "github" && this.config.cloud?.github_app) {
-          const token = await ensureGithubAppToken({ db: this.db, config: this.config.cloud.github_app, connection: conn });
-          cloneToken = token.token;
-          cloneUser = "x-access-token";
+        const { repo, clone } = await this.resolveCloneInfo(repoId);
+        if (usedSnapshot) {
+          this.logger.info(`[cloud] refresh repo=${repo.name} url=${clone.redacted}`);
+          await this.refreshRepo({ workspace, absPath, cloneUrl: clone.url });
+        } else {
+          this.logger.info(`[cloud] clone repo=${repo.name} url=${clone.redacted}`);
+          await this.cloneRepo({ workspace, absPath, cloneUrl: clone.url });
         }
-        const clone = buildCloneUrl(repo.url, cloneToken, cloneUser ? { username: cloneUser } : undefined);
-        this.logger.info(`[cloud] clone repo=${repo.name} url=${clone.redacted}`);
-        const parentDir = path.dirname(absPath);
-        await this.provider.runCommands({
-          workspace,
-          cwd: workspace.rootPath,
-          commands: [`mkdir -p ${shellQuote(parentDir)}`],
-        });
-        await this.provider.runCommands({
-          workspace,
-          cwd: workspace.rootPath,
-          commands: [`git clone --depth 1 ${shellQuote(clone.url)} ${shellQuote(absPath)}`],
-          env: { GIT_TERMINAL_PROMPT: "0" },
-        });
       }
 
       // Apply setup spec if present (DB or repo file).
-      let setupSpec = await getLatestSetupSpec(this.db, primaryRepoId);
       if (!setupSpec) {
         const specPath = path.join(repoMounts[0]!.absPath, "tintin-setup.yml");
         const specText = await readFile(specPath, "utf8").catch(() => null);
         if (specText) {
           const hash = hashSetupSpec(specText);
           await putSetupSpec(this.db, { repoId: primaryRepoId, ymlBlob: specText, hash });
-          setupSpec = { id: "file", repo_id: primaryRepoId, yml_blob: specText, hash, created_at: nowMs(), updated_at: nowMs() } as any;
+          setupSpec = await getLatestSetupSpec(this.db, primaryRepoId);
         }
       }
-      let setupSnapshotId: string | null = null;
-      if (setupSpec) {
+      if (setupSpec && !usedSnapshot) {
         const spec = parseSetupSpec(setupSpec.yml_blob);
         const secrets = await this.loadSecretsMap(opts.identityId);
         const envVars: Record<string, string> = {};
@@ -302,6 +298,15 @@ export class CloudManager {
         }
         setupSnapshotId = await this.provider.snapshotWorkspace(workspace, "setup");
         await updateCloudRun(this.db, run.id, { snapshot_id: setupSnapshotId });
+        if (setupSpec.id) {
+          await updateSetupSpecSnapshot(this.db, { id: setupSpec.id, snapshotId: setupSnapshotId });
+        }
+      } else if (usedSnapshot && setupSpec?.snapshot_id) {
+        setupSnapshotId = setupSpec.snapshot_id;
+      } else if (usedSnapshot && setupSnapshotId) {
+        if (setupSpec?.id) {
+          await updateSetupSpecSnapshot(this.db, { id: setupSpec.id, snapshotId: setupSnapshotId });
+        }
       }
 
       const mainRepoPath = repoMounts[0]!.absPath;
@@ -510,6 +515,58 @@ export class CloudManager {
   private getModalProvider(): ModalCloudProvider {
     if (this.provider.id !== "modal") throw new Error("Modal provider is not configured.");
     return this.provider as ModalCloudProvider;
+  }
+
+  private async resolveCloneInfo(repoId: string): Promise<{ repo: any; clone: { url: string; redacted: string } }> {
+    const repo = await this.db.selectFrom("repos").selectAll().where("id", "=", repoId).executeTakeFirstOrThrow();
+    const conn = await this.db
+      .selectFrom("connections")
+      .selectAll()
+      .where("id", "=", repo.connection_id)
+      .executeTakeFirstOrThrow();
+    let cloneToken = conn.access_token;
+    let cloneUser: string | undefined;
+    if (conn.type === "github" && this.config.cloud?.github_app) {
+      const token = await ensureGithubAppToken({ db: this.db, config: this.config.cloud.github_app, connection: conn });
+      cloneToken = token.token;
+      cloneUser = "x-access-token";
+    }
+    const clone = buildCloneUrl(repo.url, cloneToken, cloneUser ? { username: cloneUser } : undefined);
+    return { repo, clone };
+  }
+
+  private async cloneRepo(opts: { workspace: CloudWorkspace; absPath: string; cloneUrl: string }) {
+    const parentDir = path.dirname(opts.absPath);
+    await this.provider.runCommands({
+      workspace: opts.workspace,
+      cwd: opts.workspace.rootPath,
+      commands: [
+        `mkdir -p ${shellQuote(parentDir)}`,
+        `git clone --depth 1 ${shellQuote(opts.cloneUrl)} ${shellQuote(opts.absPath)}`,
+      ],
+      env: { GIT_TERMINAL_PROMPT: "0" },
+    });
+  }
+
+  private async refreshRepo(opts: { workspace: CloudWorkspace; absPath: string; cloneUrl: string }) {
+    const parentDir = path.dirname(opts.absPath);
+    const gitDir = path.join(opts.absPath, ".git");
+    const script = [
+      `if [ -d ${shellQuote(gitDir)} ]; then`,
+      `  git -C ${shellQuote(opts.absPath)} remote set-url origin ${shellQuote(opts.cloneUrl)}`,
+      `  git -C ${shellQuote(opts.absPath)} fetch --depth 1 origin`,
+      "  git -C " + shellQuote(opts.absPath) + " reset --hard FETCH_HEAD",
+      "  git -C " + shellQuote(opts.absPath) + " clean -fdx",
+      "else",
+      `  git clone --depth 1 ${shellQuote(opts.cloneUrl)} ${shellQuote(opts.absPath)}`,
+      "fi",
+    ].join("\n");
+    await this.provider.runCommands({
+      workspace: opts.workspace,
+      cwd: opts.workspace.rootPath,
+      commands: [`mkdir -p ${shellQuote(parentDir)}`, script],
+      env: { GIT_TERMINAL_PROMPT: "0" },
+    });
   }
 
   private buildCodexArgs(cwd: string): string[] {
@@ -1232,8 +1289,30 @@ export class CloudManager {
       throw new Error(`Cloud run ${run.id} has no repos`);
     }
 
-    const workspace = await this.provider.createWorkspace({ prefix: "cloud" });
-    this.logger.info(`[cloud] workspace recreated id=${workspace.id} run=${run.id} session=${session.id}`);
+    const primaryRepoId = run.primary_repo_id ?? runRepos[0]!.repo_id;
+    let setupSpec = primaryRepoId ? await getLatestSetupSpec(this.db, primaryRepoId) : null;
+    let setupSnapshotId: string | null = setupSpec?.snapshot_id ?? run.snapshot_id ?? null;
+    let usedSnapshot = false;
+    let workspace: CloudWorkspace;
+    if (setupSnapshotId && this.provider.id === "modal") {
+      try {
+        workspace = await this.getModalProvider().createWorkspaceFromSnapshot(setupSnapshotId);
+        usedSnapshot = true;
+        this.logger.info(
+          `[cloud] workspace restored id=${workspace.id} snapshot=${setupSnapshotId} run=${run.id} session=${session.id}`,
+        );
+      } catch (e) {
+        this.logger.warn(
+          `[cloud] snapshot restore failed (${setupSnapshotId}): ${String(e)}; falling back to base image`,
+        );
+        workspace = await this.provider.createWorkspace({ prefix: "cloud" });
+      }
+    } else {
+      workspace = await this.provider.createWorkspace({ prefix: "cloud" });
+    }
+    if (!usedSnapshot) {
+      this.logger.info(`[cloud] workspace recreated id=${workspace.id} run=${run.id} session=${session.id}`);
+    }
     if (this.provider.id === "modal") {
       await this.injectModalSecretsBashrc(run.identity_id, workspace).catch((e) => {
         this.logger.warn(`[cloud][modal] failed to inject secrets into .bashrc: ${String(e)}`);
@@ -1241,7 +1320,6 @@ export class CloudManager {
     }
 
     try {
-      const primaryRepoId = run.primary_repo_id ?? runRepos[0]!.repo_id;
       const repoMounts = runRepos
         .map((r) => ({
           repoId: r.repo_id,
@@ -1255,55 +1333,26 @@ export class CloudManager {
         });
 
       for (const mount of repoMounts) {
-        const repo = await this.db.selectFrom("repos").selectAll().where("id", "=", mount.repoId).executeTakeFirstOrThrow();
-        const conn = await this.db
-          .selectFrom("connections")
-          .selectAll()
-          .where("id", "=", repo.connection_id)
-          .executeTakeFirstOrThrow();
-        let cloneToken = conn.access_token;
-        let cloneUser: string | undefined;
-        if (conn.type === "github" && this.config.cloud?.github_app) {
-          const token = await ensureGithubAppToken({ db: this.db, config: this.config.cloud.github_app, connection: conn });
-          cloneToken = token.token;
-          cloneUser = "x-access-token";
+        const { repo, clone } = await this.resolveCloneInfo(mount.repoId);
+        if (usedSnapshot) {
+          this.logger.info(`[cloud] refresh repo=${repo.name} url=${clone.redacted}`);
+          await this.refreshRepo({ workspace, absPath: mount.absPath, cloneUrl: clone.url });
+        } else {
+          this.logger.info(`[cloud] clone repo=${repo.name} url=${clone.redacted}`);
+          await this.cloneRepo({ workspace, absPath: mount.absPath, cloneUrl: clone.url });
         }
-        const clone = buildCloneUrl(repo.url, cloneToken, cloneUser ? { username: cloneUser } : undefined);
-        this.logger.info(`[cloud] clone repo=${repo.name} url=${clone.redacted}`);
-        const parentDir = path.dirname(mount.absPath);
-        await this.provider.runCommands({
-          workspace,
-          cwd: workspace.rootPath,
-          commands: [`mkdir -p ${shellQuote(parentDir)}`],
-        });
-        await this.provider.runCommands({
-          workspace,
-          cwd: workspace.rootPath,
-          commands: [`git clone --depth 1 ${shellQuote(clone.url)} ${shellQuote(mount.absPath)}`],
-          env: { GIT_TERMINAL_PROMPT: "0" },
-        });
       }
 
-      let setupSpec = primaryRepoId ? await getLatestSetupSpec(this.db, primaryRepoId) : null;
       if (!setupSpec) {
         const specPath = path.join(repoMounts[0]!.absPath, "tintin-setup.yml");
         const specText = await readFile(specPath, "utf8").catch(() => null);
         if (specText && primaryRepoId) {
           const hash = hashSetupSpec(specText);
           await putSetupSpec(this.db, { repoId: primaryRepoId, ymlBlob: specText, hash });
-          setupSpec = {
-            id: "file",
-            repo_id: primaryRepoId,
-            yml_blob: specText,
-            hash,
-            created_at: nowMs(),
-            updated_at: nowMs(),
-          } as any;
+          setupSpec = await getLatestSetupSpec(this.db, primaryRepoId);
         }
       }
-
-      let setupSnapshotId: string | null = null;
-      if (setupSpec) {
+      if (setupSpec && !usedSnapshot) {
         const spec = parseSetupSpec(setupSpec.yml_blob);
         const secrets = await this.loadSecretsMap(run.identity_id);
         const envVars: Record<string, string> = {};
@@ -1325,6 +1374,15 @@ export class CloudManager {
           await this.provider.runCommands({ workspace, cwd: mainRepoPath, commands: spec.commands, env: envVars });
         }
         setupSnapshotId = await this.provider.snapshotWorkspace(workspace, "setup");
+        if (setupSpec.id) {
+          await updateSetupSpecSnapshot(this.db, { id: setupSpec.id, snapshotId: setupSnapshotId });
+        }
+      } else if (usedSnapshot && setupSpec?.snapshot_id) {
+        setupSnapshotId = setupSpec.snapshot_id;
+      } else if (usedSnapshot && setupSnapshotId) {
+        if (setupSpec?.id) {
+          await updateSetupSpecSnapshot(this.db, { id: setupSpec.id, snapshotId: setupSnapshotId });
+        }
       }
 
       const mainRepoPath = repoMounts[0]!.absPath;

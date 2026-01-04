@@ -140,6 +140,16 @@ export interface CloudRunReposTable {
   mount_path: string;
 }
 
+export interface CloudRunScreenshotsTable {
+  id: string;
+  run_id: string;
+  session_id: string | null;
+  s3_key: string;
+  mime_type: string | null;
+  tool: string | null;
+  created_at: number;
+}
+
 export interface SecretsTable {
   id: string;
   identity_id: string;
@@ -154,6 +164,7 @@ export interface SetupSpecsTable {
   repo_id: string;
   yml_blob: string;
   hash: string;
+  snapshot_id: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -191,6 +202,7 @@ export interface DatabaseSchema {
   repos: ReposTable;
   cloud_runs: CloudRunsTable;
   cloud_run_repos: CloudRunReposTable;
+  cloud_run_screenshots: CloudRunScreenshotsTable;
   secrets: SecretsTable;
   setup_specs: SetupSpecsTable;
   shared_repos: SharedReposTable;
