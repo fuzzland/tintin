@@ -136,6 +136,12 @@ export class CloudManager {
     const primaryRepoId = opts.repoIds[0]!;
 
     const workspace = await this.provider.createWorkspace({ prefix: "cloud" });
+    this.logger.info(`[cloud] workspace created id=${workspace.id} root=${workspace.rootPath}`);
+    if (this.provider.id === "modal") {
+      await this.injectModalSecretsBashrc(opts.identityId, workspace).catch((e) => {
+        this.logger.warn(`[cloud][modal] failed to inject secrets into .bashrc: ${String(e)}`);
+      });
+    }
     const run = await createCloudRun(this.db, {
       identityId: opts.identityId,
       primaryRepoId,
@@ -145,6 +151,9 @@ export class CloudManager {
     });
 
     try {
+      this.logger.info(
+        `[cloud] run start id=${run.id} agent=${opts.agent} repos=${opts.repoIds.length} workspace=${workspace.id}`,
+      );
       const repoMounts: Array<{ repoId: string; mountPath: string; absPath: string }> = [];
       for (let i = 0; i < opts.repoIds.length; i++) {
         const repoId = opts.repoIds[i]!;
@@ -212,6 +221,7 @@ export class CloudManager {
 
         const mainRepoPath = repoMounts[0]!.absPath;
         if (spec.commands && spec.commands.length > 0) {
+          this.logger.info(`[cloud] applying setup spec commands count=${spec.commands.length}`);
           await this.provider.runCommands({ workspace, cwd: mainRepoPath, commands: spec.commands, env: envVars });
         }
         setupSnapshotId = await this.provider.snapshotWorkspace(workspace, "setup");
@@ -222,6 +232,7 @@ export class CloudManager {
       const projectId = `cloud:${primaryRepoId}`;
       let sessionId: string;
       if (this.provider.id !== "local") {
+        this.logger.info(`[cloud] starting remote session run=${run.id} workspace=${workspace.id}`);
         sessionId = await this.startRemoteSession({
           identityId: opts.identityId,
           platform: opts.platform,
@@ -260,6 +271,7 @@ export class CloudManager {
 
       return { runId: run.id, sessionId };
     } catch (e) {
+      this.logger.warn(`[cloud] run failed id=${run.id}: ${String(e)}`);
       await updateCloudRun(this.db, run.id, { status: "error", finished_at: nowMs() });
       if (this.provider.id !== "local") {
         await this.provider.terminateWorkspace(workspace).catch(() => {});
@@ -296,6 +308,55 @@ export class CloudManager {
       }
     }
     return env;
+  }
+
+  private async injectModalSecretsBashrc(identityId: string, workspace: CloudWorkspace): Promise<void> {
+    if (this.provider.id !== "modal") return;
+    const modal = this.getModalProvider();
+    const sandbox = modal.getSandbox(workspace.id);
+    const env = await this.buildAgentEnv(identityId);
+    const names = Object.keys(env);
+    const startMarker = "# tintin:secrets:start";
+    const endMarker = "# tintin:secrets:end";
+    const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    let current = "";
+    try {
+      const handle = await sandbox.open("/home/ubuntu/.bashrc", "r");
+      const bytes = await handle.read();
+      await handle.close();
+      current = Buffer.from(bytes).toString("utf8");
+    } catch {
+      current = "";
+    }
+
+    const blockPattern = new RegExp(`${escapeRegExp(startMarker)}[\\s\\S]*?${escapeRegExp(endMarker)}\\n?`, "g");
+    const stripped = current.replace(blockPattern, "").trimEnd();
+
+    if (names.length === 0) {
+      if (stripped !== current.trimEnd()) {
+        const handle = await sandbox.open("/home/ubuntu/.bashrc", "w");
+        await handle.write(Buffer.from(stripped + (stripped ? "\n" : ""), "utf8"));
+        await handle.flush();
+        await handle.close();
+      }
+      this.logger.info("[cloud][modal] no secrets to inject into .bashrc");
+      return;
+    }
+
+    const lines = [
+      startMarker,
+      ...names.sort().map((name) => `export ${name}=${shellQuote(env[name] ?? "")}`),
+      endMarker,
+      "",
+    ];
+    const block = lines.join("\n");
+    const next = stripped ? `${stripped}\n\n${block}` : block;
+    const handle = await sandbox.open("/home/ubuntu/.bashrc", "w");
+    await handle.write(Buffer.from(next, "utf8"));
+    await handle.flush();
+    await handle.close();
+    this.logger.info(`[cloud][modal] injected ${names.length} secrets into .bashrc`);
   }
 
   private joinWorkspacePath(root: string, rel: string): string {
@@ -391,6 +452,9 @@ export class CloudManager {
     try {
       let envOverrides = await this.buildAgentEnv(opts.identityId);
       envOverrides = this.applyProxyEnv(envOverrides, opts.identityId, opts.agent);
+      this.logger.info(
+        `[cloud] spawn agent=${opts.agent} session=${sessionId} cwd=${opts.projectPath} env_keys=${Object.keys(envOverrides).length}`,
+      );
       const { handle, agentSessionId, logSyncers } = await this.spawnRemoteAgent({
         sessionId,
         prompt: opts.prompt,
@@ -414,6 +478,7 @@ export class CloudManager {
         workspace: opts.workspace,
       });
     } catch (e) {
+      this.logger.warn(`[cloud] failed to spawn agent session=${sessionId}: ${String(e)}`);
       await updateSession(this.db, sessionId, { status: "error", finished_at: nowMs() });
       throw e;
     }
@@ -541,6 +606,23 @@ export class CloudManager {
       };
     }
 
+    if (this.provider.id === "modal") {
+      const binary = opts.agent === "claude_code" ? modalCfg.claude_binary : modalCfg.codex_binary;
+      const check = await this.runRemoteDebugCommand(sandbox, `command -v ${shellQuote(binary)}`, modalCfg.command_timeout_ms);
+      const stdout = check.stdout.trim();
+      const stderr = check.stderr.trim();
+      this.logger.info(
+        `[cloud] binary check agent=${opts.agent} cmd=${binary} exit=${check.exitCode} path=${stdout || "(not found)"}`,
+      );
+      if (stderr) {
+        this.logger.info(`[cloud] binary check stderr: ${stderr.slice(0, 500)}`);
+      }
+    }
+
+    this.logger.info(
+      `[cloud] exec agent=${opts.agent} session=${opts.sessionId} agent_session=${agentSessionId} cmd=${cmd} env_keys=${Object.keys(env).length}`,
+    );
+
     const proc = await sandbox.exec(["/bin/sh", "-lc", cmd], {
       workdir: toPosix(opts.cwd),
       env,
@@ -566,6 +648,8 @@ export class CloudManager {
 
     if (remoteFiles.length === 0) {
       this.logger.warn(`[cloud] could not locate remote JSONL logs for session ${opts.sessionId}.`);
+    } else {
+      this.logger.info(`[cloud] located ${remoteFiles.length} remote log file(s) for session ${opts.sessionId}.`);
     }
 
     const logsDir = path.join(this.config.cloud!.workspaces_dir, "logs", opts.sessionId);
@@ -589,6 +673,20 @@ export class CloudManager {
     }
 
     return { handle, agentSessionId, logSyncers };
+  }
+
+  private async runRemoteDebugCommand(
+    sandbox: Sandbox,
+    command: string,
+    timeoutMs: number,
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const proc = await sandbox.exec(["/bin/sh", "-lc", command], {
+      workdir: "/",
+      timeoutMs,
+      mode: "text",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.readText(), proc.stderr.readText(), proc.wait()]);
+    return { stdout: stdout ?? "", stderr: stderr ?? "", exitCode };
   }
 
   private async spawnRemoteResume(opts: {
