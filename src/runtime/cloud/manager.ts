@@ -423,7 +423,7 @@ export class CloudManager {
     const port = cfg.port_start;
     const server: PlaywrightServerInfo = {
       port,
-      url: `http://127.0.0.1:${port}/mcp`,
+      url: `http://localhost:${port}/mcp`,
       userDataDir: "",
       outputDir: "",
     };
@@ -748,7 +748,7 @@ export class CloudManager {
     return [
       "TINTIN_MCP_READY=0",
       `for i in $(seq 1 ${timeoutSec}); do`,
-      `  status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 http://127.0.0.1:${port}/mcp || true)`,
+      `  status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 http://localhost:${port}/mcp || true)`,
       `  if [ -n "$status" ] && [ "$status" != "000" ]; then`,
       "    TINTIN_MCP_READY=1",
       "    break",
