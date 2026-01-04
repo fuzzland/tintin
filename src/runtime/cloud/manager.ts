@@ -900,6 +900,13 @@ export class CloudManager {
     lines.push("    f.write(base64.b64decode(data.encode()))");
     lines.push("PY");
     lines.push("fi");
+    lines.push('if [ -z "$HOME" ]; then');
+    lines.push('  export HOME="/home/ubuntu"');
+    lines.push("fi");
+    lines.push("if command -v git >/dev/null 2>&1; then");
+    lines.push('  git config --global user.name "tintin[bot]"');
+    lines.push('  git config --global user.email "tintin@fuzz.land"');
+    lines.push("fi");
 
     const dirs: string[] = [];
     if (opts.sessionsRoot) dirs.push(opts.sessionsRoot);
