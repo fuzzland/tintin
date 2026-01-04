@@ -53,6 +53,9 @@ RUN wget -q https://github.com/tsl0922/ttyd/releases/download/1.7.3/ttyd.x86_64 
 RUN curl -fsSL https://code-server.dev/install.sh | sh \
     && rm -rf /root/.cache /tmp/* /var/tmp/*
 
+COPY tintin-log-agent.mjs /usr/local/bin/tintin-log-agent
+RUN chmod +x /usr/local/bin/tintin-log-agent
+
 RUN mkdir -p /home/ubuntu/.image
 RUN chown -R ubuntu:ubuntu /home/ubuntu
 RUN chown -R ubuntu:ubuntu /home/ubuntu/.image

@@ -52,6 +52,8 @@ export class CloudManager {
   private readonly provider: CloudProvider;
   private sessionManager: SessionManager | null;
   private readonly workspaceTerminateTimers = new Map<string, NodeJS.Timeout>();
+  private readonly agentTokens = new Map<string, { token: string; exp: number }>();
+  private readonly agentLogPaths = new Map<string, string>();
 
   constructor(
     private readonly config: AppConfig,
@@ -103,6 +105,75 @@ export class CloudManager {
       return Math.min(keepalive, modalTimeout);
     }
     return keepalive;
+  }
+
+  private issueAgentToken(sessionId: string): string {
+    const token = crypto.randomUUID();
+    const exp = Date.now() + 60 * 60 * 1000;
+    this.agentTokens.set(sessionId, { token, exp });
+    return token;
+  }
+
+  verifyAgentToken(sessionId: string, token: string): boolean {
+    const entry = this.agentTokens.get(sessionId);
+    if (!entry) return false;
+    if (entry.exp <= Date.now()) {
+      this.agentTokens.delete(sessionId);
+      return false;
+    }
+    return entry.token === token;
+  }
+
+  private buildAgentRelayUrl(sessionId: string): string | null {
+    const base = this.config.cloud?.public_base_url ?? "";
+    if (!base) return null;
+    const trimmed = base.replace(/\/+$/g, "");
+    return `${trimmed}/api/cloud/agent/logs/${sessionId}`;
+  }
+
+  private async ensureAgentLogPath(sessionId: string, label: string): Promise<string> {
+    const existing = this.agentLogPaths.get(sessionId);
+    if (existing) return existing;
+    const logsDir = path.join(this.config.cloud!.workspaces_dir, "logs", sessionId);
+    await mkdir(logsDir, { recursive: true });
+    const filePath = path.join(logsDir, `agent-${label}-${Date.now()}.jsonl`);
+    await writeFile(filePath, "", "utf8");
+    await upsertSessionOffset(this.db, {
+      id: crypto.randomUUID(),
+      session_id: sessionId,
+      jsonl_path: filePath,
+      byte_offset: 0,
+      updated_at: nowMs(),
+    });
+    this.agentLogPaths.set(sessionId, filePath);
+    return filePath;
+  }
+
+  async getOrCreateAgentLogPath(sessionId: string): Promise<string | null> {
+    if (!this.config.cloud?.workspaces_dir) return null;
+    return await this.ensureAgentLogPath(sessionId, "ingest");
+  }
+
+  private wrapAgentRelayCommand(cmd: string, opts: { sessionId: string; agent: SessionAgent; token: string; url: string }): string {
+    const fifo = `/tmp/tintin-log-${opts.sessionId}.fifo`;
+    const envPrefix = [
+      `TINTIN_AGENT_URL=${shellQuote(opts.url)}`,
+      `TINTIN_AGENT_TOKEN=${shellQuote(opts.token)}`,
+      `TINTIN_AGENT_SESSION=${shellQuote(opts.sessionId)}`,
+      `TINTIN_AGENT_AGENT=${shellQuote(opts.agent)}`,
+    ].join(" ");
+    const agentCmd = `${envPrefix} tintin-log-agent`;
+    return [
+      `rm -f ${shellQuote(fifo)}`,
+      `mkfifo ${shellQuote(fifo)}`,
+      `${agentCmd} < ${shellQuote(fifo)} &`,
+      "AGENT_PID=$!",
+      `(${cmd}) > ${shellQuote(fifo)}`,
+      "CODEX_EXIT=$?",
+      `rm -f ${shellQuote(fifo)}`,
+      "wait $AGENT_PID || true",
+      "exit $CODEX_EXIT",
+    ].join("\n");
   }
 
   private clearWorkspaceTermination(workspaceId: string) {
@@ -650,7 +721,7 @@ export class CloudManager {
     let sessionsRoot = "";
     let configDir: string | null = null;
     let codexHome: string | null = null;
-    let codexStdoutPath: string | null = null;
+    let relayConfig: { token: string; url: string } | null = null;
     let cmd = "";
     let env: Record<string, string> = {};
     const mcpEnabled = this.provider.id === "modal" && this.config.playwright_mcp?.enabled;
@@ -681,17 +752,13 @@ export class CloudManager {
       sessionsRoot = resolveSessionsRoot(opts.cwd, this.config.codex.sessions_dir);
       const homeDir = resolveCodexHomeFromSessionsRoot(sessionsRoot);
       codexHome = toPosix(homeDir);
-      codexStdoutPath = `/tmp/tintin-codex-${opts.sessionId}-exec.jsonl`;
       await this.ensureRemoteDir(sandbox, toPosix(sessionsRoot), modalCfg.command_timeout_ms);
       await this.ensureRemoteDir(sandbox, toPosix(homeDir), modalCfg.command_timeout_ms);
-      await this.writeRemoteText(sandbox, codexStdoutPath, "");
-      this.logger.info(`[cloud] codex stdout capture=${codexStdoutPath}`);
       const baseArgs = this.buildCodexArgs(opts.cwd);
-      const stdoutRedirect = `> ${shellQuote(codexStdoutPath)}`;
-      const baseCmd = `${modalCfg.codex_binary} ${baseArgs.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)} ${stdoutRedirect}`;
+      const baseCmd = `${modalCfg.codex_binary} ${baseArgs.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
       if (mcpEnabled && playwrightArgs.length > 0) {
         const argsWithMcp = [...baseArgs, ...playwrightArgs];
-        const mcpCmd = `${modalCfg.codex_binary} ${argsWithMcp.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)} ${stdoutRedirect}`;
+        const mcpCmd = `${modalCfg.codex_binary} ${argsWithMcp.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
         cmd = this.wrapMcpWaitCommand(mcpCmd, baseCmd, this.config.playwright_mcp!.port_start, this.config.playwright_mcp!.timeout_ms);
       } else {
         cmd = baseCmd;
@@ -707,6 +774,15 @@ export class CloudManager {
     if (opts.agent === "codex" && codexHome) {
       await this.ensureRemoteCodexAuthFile(sandbox, env, codexHome, modalCfg.command_timeout_ms);
     }
+    const relayUrl = this.buildAgentRelayUrl(opts.sessionId);
+    if (relayUrl) {
+      const token = this.issueAgentToken(opts.sessionId);
+      relayConfig = { token, url: relayUrl };
+      await this.ensureAgentLogPath(opts.sessionId, "exec");
+      this.logger.info(`[cloud] log relay enabled session=${opts.sessionId} url=${relayUrl}`);
+    } else {
+      this.logger.info(`[cloud] log relay disabled session=${opts.sessionId} (missing cloud.public_base_url)`);
+    }
     const openaiKeyLen = typeof env.OPENAI_API_KEY === "string" ? env.OPENAI_API_KEY.length : 0;
     const anthropicKeyLen = typeof env.ANTHROPIC_API_KEY === "string" ? env.ANTHROPIC_API_KEY.length : 0;
     const openaiBase = env.OPENAI_BASE_URL || env.OPENAI_API_BASE || "";
@@ -715,6 +791,14 @@ export class CloudManager {
       `[cloud] env check openai_key=${openaiKeyLen > 0 ? `len=${openaiKeyLen}` : "missing"} openai_base=${openaiBase || "(none)"} anthropic_key=${anthropicKeyLen > 0 ? `len=${anthropicKeyLen}` : "missing"} anthropic_base=${anthropicBase || "(none)"}`,
     );
     const errPath = `/tmp/tintin-agent-${opts.sessionId}.err`;
+    if (relayConfig) {
+      cmd = this.wrapAgentRelayCommand(cmd, {
+        sessionId: opts.sessionId,
+        agent: opts.agent,
+        token: relayConfig.token,
+        url: relayConfig.url,
+      });
+    }
     cmd = `${cmd} 2> ${shellQuote(errPath)}`;
 
     if (this.provider.id === "modal") {
@@ -743,69 +827,68 @@ export class CloudManager {
     });
     const handle: RemoteHandle = { pid: null, wait: () => proc.wait() };
 
-    let remoteFiles: string[] = [];
-    if (opts.agent === "claude_code") {
-      if (!configDir) throw new Error("Claude config dir not resolved.");
-      remoteFiles = [toPosix(resolveClaudeSessionJsonlPath(configDir, opts.cwd, agentSessionId))];
-    } else {
-      const primaryRoot = toPosix(sessionsRoot);
-      const homeDir = typeof env.HOME === "string" && env.HOME ? toPosix(env.HOME) : "/home/ubuntu";
-      const fallbackRoot = path.posix.join(homeDir, ".codex", "sessions");
-      if (codexStdoutPath) {
-        remoteFiles.push(codexStdoutPath);
-      }
-      const discovered = await findRemoteJsonlFiles({
-        sandbox,
-        sessionsRoot: primaryRoot,
-        sessionId: null,
-        timeoutMs: 10_000,
-        pollMs: 200,
-      });
-      this.logger.info(`[cloud] log search agent=codex root=${primaryRoot} matches=${discovered.length}`);
-      if (discovered.length > 0) {
-        remoteFiles.push(...discovered);
-      } else if (fallbackRoot !== primaryRoot) {
-        const fallbackFound = await findRemoteJsonlFiles({
+    const logSyncers: RemoteLogSync[] = [];
+    if (!relayConfig) {
+      let remoteFiles: string[] = [];
+      if (opts.agent === "claude_code") {
+        if (!configDir) throw new Error("Claude config dir not resolved.");
+        remoteFiles = [toPosix(resolveClaudeSessionJsonlPath(configDir, opts.cwd, agentSessionId))];
+      } else {
+        const primaryRoot = toPosix(sessionsRoot);
+        const homeDir = typeof env.HOME === "string" && env.HOME ? toPosix(env.HOME) : "/home/ubuntu";
+        const fallbackRoot = path.posix.join(homeDir, ".codex", "sessions");
+        const discovered = await findRemoteJsonlFiles({
           sandbox,
-          sessionsRoot: fallbackRoot,
+          sessionsRoot: primaryRoot,
           sessionId: null,
-          timeoutMs: 2_000,
+          timeoutMs: 10_000,
           pollMs: 200,
         });
-        this.logger.info(`[cloud] log search agent=codex root=${fallbackRoot} matches=${fallbackFound.length}`);
-        if (fallbackFound.length > 0) remoteFiles.push(...fallbackFound);
+        this.logger.info(`[cloud] log search agent=codex root=${primaryRoot} matches=${discovered.length}`);
+        if (discovered.length > 0) {
+          remoteFiles.push(...discovered);
+        } else if (fallbackRoot !== primaryRoot) {
+          const fallbackFound = await findRemoteJsonlFiles({
+            sandbox,
+            sessionsRoot: fallbackRoot,
+            sessionId: null,
+            timeoutMs: 2_000,
+            pollMs: 200,
+          });
+          this.logger.info(`[cloud] log search agent=codex root=${fallbackRoot} matches=${fallbackFound.length}`);
+          if (fallbackFound.length > 0) remoteFiles.push(...fallbackFound);
+        }
+        remoteFiles = Array.from(new Set(remoteFiles));
       }
-      remoteFiles = Array.from(new Set(remoteFiles));
-    }
 
-    if (remoteFiles.length === 0) {
-      this.logger.warn(
-        `[cloud] could not locate remote JSONL logs for session ${opts.sessionId} (sessions_root=${toPosix(
-          sessionsRoot,
-        )}).`,
-      );
-    } else {
-      this.logger.info(`[cloud] located ${remoteFiles.length} remote log file(s) for session ${opts.sessionId}.`);
-    }
+      if (remoteFiles.length === 0) {
+        this.logger.warn(
+          `[cloud] could not locate remote JSONL logs for session ${opts.sessionId} (sessions_root=${toPosix(
+            sessionsRoot,
+          )}).`,
+        );
+      } else {
+        this.logger.info(`[cloud] located ${remoteFiles.length} remote log file(s) for session ${opts.sessionId}.`);
+      }
 
-    const logsDir = path.join(this.config.cloud!.workspaces_dir, "logs", opts.sessionId);
-    await mkdir(logsDir, { recursive: true });
-    const logSyncers: RemoteLogSync[] = [];
-    for (let i = 0; i < remoteFiles.length; i++) {
-      const remotePath = remoteFiles[i]!;
-      const base = path.posix.basename(remotePath);
-      const localPath = path.join(logsDir, `${i}-${base}`);
-      await writeFile(localPath, "", "utf8");
-      await upsertSessionOffset(this.db, {
-        id: crypto.randomUUID(),
-        session_id: opts.sessionId,
-        jsonl_path: localPath,
-        byte_offset: 0,
-        updated_at: nowMs(),
-      });
-      const syncer = new RemoteLogSync(sandbox, remotePath, localPath, this.logger, 500, modalCfg.command_timeout_ms, 0);
-      syncer.start();
-      logSyncers.push(syncer);
+      const logsDir = path.join(this.config.cloud!.workspaces_dir, "logs", opts.sessionId);
+      await mkdir(logsDir, { recursive: true });
+      for (let i = 0; i < remoteFiles.length; i++) {
+        const remotePath = remoteFiles[i]!;
+        const base = path.posix.basename(remotePath);
+        const localPath = path.join(logsDir, `${i}-${base}`);
+        await writeFile(localPath, "", "utf8");
+        await upsertSessionOffset(this.db, {
+          id: crypto.randomUUID(),
+          session_id: opts.sessionId,
+          jsonl_path: localPath,
+          byte_offset: 0,
+          updated_at: nowMs(),
+        });
+        const syncer = new RemoteLogSync(sandbox, remotePath, localPath, this.logger, 500, modalCfg.command_timeout_ms, 0);
+        syncer.start();
+        logSyncers.push(syncer);
+      }
     }
 
     return { handle, agentSessionId, logSyncers, debug: { sandbox, errPath } };
@@ -878,7 +961,7 @@ export class CloudManager {
     let sessionsRoot = "";
     let configDir: string | null = null;
     let codexHome: string | null = null;
-    let codexStdoutPath: string | null = null;
+    let relayConfig: { token: string; url: string } | null = null;
     let cmd = "";
     let env: Record<string, string> = {};
     const mcpEnabled = this.provider.id === "modal" && this.config.playwright_mcp?.enabled;
@@ -909,17 +992,13 @@ export class CloudManager {
       sessionsRoot = resolveSessionsRoot(opts.cwd, this.config.codex.sessions_dir);
       const homeDir = resolveCodexHomeFromSessionsRoot(sessionsRoot);
       codexHome = toPosix(homeDir);
-      codexStdoutPath = `/tmp/tintin-codex-${opts.sessionId}-resume-${Date.now()}.jsonl`;
       await this.ensureRemoteDir(sandbox, toPosix(sessionsRoot), modalCfg.command_timeout_ms);
       await this.ensureRemoteDir(sandbox, toPosix(homeDir), modalCfg.command_timeout_ms);
-      await this.writeRemoteText(sandbox, codexStdoutPath, "");
-      this.logger.info(`[cloud] codex stdout capture=${codexStdoutPath}`);
       const baseArgs = this.buildCodexArgs(opts.cwd);
-      const stdoutRedirect = `> ${shellQuote(codexStdoutPath)}`;
-      const baseCmd = `${modalCfg.codex_binary} ${baseArgs.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)} ${stdoutRedirect}`;
+      const baseCmd = `${modalCfg.codex_binary} ${baseArgs.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
       if (mcpEnabled && playwrightArgs.length > 0) {
         const argsWithMcp = [...baseArgs, ...playwrightArgs, "resume", opts.agentSessionId];
-        const mcpCmd = `${modalCfg.codex_binary} ${argsWithMcp.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)} ${stdoutRedirect}`;
+        const mcpCmd = `${modalCfg.codex_binary} ${argsWithMcp.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
         cmd = this.wrapMcpWaitCommand(mcpCmd, baseCmd, this.config.playwright_mcp!.port_start, this.config.playwright_mcp!.timeout_ms);
       } else {
         cmd = baseCmd;
@@ -935,6 +1014,15 @@ export class CloudManager {
     if (opts.agent === "codex" && codexHome) {
       await this.ensureRemoteCodexAuthFile(sandbox, env, codexHome, modalCfg.command_timeout_ms);
     }
+    const relayUrl = this.buildAgentRelayUrl(opts.sessionId);
+    if (relayUrl) {
+      const token = this.issueAgentToken(opts.sessionId);
+      relayConfig = { token, url: relayUrl };
+      await this.ensureAgentLogPath(opts.sessionId, "resume");
+      this.logger.info(`[cloud] log relay enabled session=${opts.sessionId} url=${relayUrl}`);
+    } else {
+      this.logger.info(`[cloud] log relay disabled session=${opts.sessionId} (missing cloud.public_base_url)`);
+    }
     const openaiKeyLen = typeof env.OPENAI_API_KEY === "string" ? env.OPENAI_API_KEY.length : 0;
     const anthropicKeyLen = typeof env.ANTHROPIC_API_KEY === "string" ? env.ANTHROPIC_API_KEY.length : 0;
     const openaiBase = env.OPENAI_BASE_URL || env.OPENAI_API_BASE || "";
@@ -949,56 +1037,84 @@ export class CloudManager {
     }
 
     const errPath = `/tmp/tintin-agent-${opts.sessionId}.err`;
+    if (relayConfig) {
+      cmd = this.wrapAgentRelayCommand(cmd, {
+        sessionId: opts.sessionId,
+        agent: opts.agent,
+        token: relayConfig.token,
+        url: relayConfig.url,
+      });
+    }
     cmd = `${cmd} 2> ${shellQuote(errPath)}`;
 
-    let remoteFiles: string[] = [];
-    if (opts.agent === "claude_code") {
-      if (!configDir) throw new Error("Claude config dir not resolved.");
-      remoteFiles = [toPosix(resolveClaudeSessionJsonlPath(configDir, opts.cwd, opts.agentSessionId))];
-    } else {
-      const primaryRoot = toPosix(sessionsRoot);
-      const homeDir = typeof env.HOME === "string" && env.HOME ? toPosix(env.HOME) : "/home/ubuntu";
-      const fallbackRoot = path.posix.join(homeDir, ".codex", "sessions");
-      if (codexStdoutPath) {
-        remoteFiles.push(codexStdoutPath);
-      }
-      const discovered = await findRemoteJsonlFiles({
-        sandbox,
-        sessionsRoot: primaryRoot,
-        sessionId: opts.agentSessionId,
-        timeoutMs: 10_000,
-        pollMs: 200,
-      });
-      this.logger.info(`[cloud] log search agent=codex root=${primaryRoot} matches=${discovered.length}`);
-      if (discovered.length > 0) {
-        remoteFiles.push(...discovered);
-      } else if (fallbackRoot !== primaryRoot) {
-        const fallbackFound = await findRemoteJsonlFiles({
+    const logSyncers: RemoteLogSync[] = [];
+    if (!relayConfig) {
+      let remoteFiles: string[] = [];
+      if (opts.agent === "claude_code") {
+        if (!configDir) throw new Error("Claude config dir not resolved.");
+        remoteFiles = [toPosix(resolveClaudeSessionJsonlPath(configDir, opts.cwd, opts.agentSessionId))];
+      } else {
+        const primaryRoot = toPosix(sessionsRoot);
+        const homeDir = typeof env.HOME === "string" && env.HOME ? toPosix(env.HOME) : "/home/ubuntu";
+        const fallbackRoot = path.posix.join(homeDir, ".codex", "sessions");
+        const discovered = await findRemoteJsonlFiles({
           sandbox,
-          sessionsRoot: fallbackRoot,
+          sessionsRoot: primaryRoot,
           sessionId: opts.agentSessionId,
-          timeoutMs: 2_000,
+          timeoutMs: 10_000,
           pollMs: 200,
         });
-        this.logger.info(`[cloud] log search agent=codex root=${fallbackRoot} matches=${fallbackFound.length}`);
-        if (fallbackFound.length > 0) remoteFiles.push(...fallbackFound);
+        this.logger.info(`[cloud] log search agent=codex root=${primaryRoot} matches=${discovered.length}`);
+        if (discovered.length > 0) {
+          remoteFiles.push(...discovered);
+        } else if (fallbackRoot !== primaryRoot) {
+          const fallbackFound = await findRemoteJsonlFiles({
+            sandbox,
+            sessionsRoot: fallbackRoot,
+            sessionId: opts.agentSessionId,
+            timeoutMs: 2_000,
+            pollMs: 200,
+          });
+          this.logger.info(`[cloud] log search agent=codex root=${fallbackRoot} matches=${fallbackFound.length}`);
+          if (fallbackFound.length > 0) remoteFiles.push(...fallbackFound);
+        }
+        remoteFiles = Array.from(new Set(remoteFiles));
       }
-      remoteFiles = Array.from(new Set(remoteFiles));
-    }
 
-    if (remoteFiles.length === 0) {
-      this.logger.warn(`[cloud] could not locate remote JSONL logs for session ${opts.sessionId}.`);
-    }
+      if (remoteFiles.length === 0) {
+        this.logger.warn(`[cloud] could not locate remote JSONL logs for session ${opts.sessionId}.`);
+      }
 
-    const initialOffsets: number[] = [];
-    for (const remotePath of remoteFiles) {
-      initialOffsets.push(
-        await getRemoteFileSize({
-          sandbox,
-          remotePath,
-          timeoutMs: modalCfg.command_timeout_ms,
-        }),
-      );
+      const initialOffsets: number[] = [];
+      for (const remotePath of remoteFiles) {
+        initialOffsets.push(
+          await getRemoteFileSize({
+            sandbox,
+            remotePath,
+            timeoutMs: modalCfg.command_timeout_ms,
+          }),
+        );
+      }
+
+      const logsDir = path.join(this.config.cloud!.workspaces_dir, "logs", opts.sessionId);
+      await mkdir(logsDir, { recursive: true });
+      for (let i = 0; i < remoteFiles.length; i++) {
+        const remotePath = remoteFiles[i]!;
+        const base = path.posix.basename(remotePath);
+        const localPath = path.join(logsDir, `${Date.now()}-${i}-${base}`);
+        await writeFile(localPath, "", "utf8");
+        await upsertSessionOffset(this.db, {
+          id: crypto.randomUUID(),
+          session_id: opts.sessionId,
+          jsonl_path: localPath,
+          byte_offset: 0,
+          updated_at: nowMs(),
+        });
+        const initialOffset = initialOffsets[i] ?? 0;
+        const syncer = new RemoteLogSync(sandbox, remotePath, localPath, this.logger, 500, modalCfg.command_timeout_ms, initialOffset);
+        syncer.start();
+        logSyncers.push(syncer);
+      }
     }
 
     const proc = await sandbox.exec(["/bin/sh", "-lc", cmd], {
@@ -1009,27 +1125,6 @@ export class CloudManager {
       mode: "text",
     });
     const handle: RemoteHandle = { pid: null, wait: () => proc.wait() };
-
-    const logsDir = path.join(this.config.cloud!.workspaces_dir, "logs", opts.sessionId);
-    await mkdir(logsDir, { recursive: true });
-    const logSyncers: RemoteLogSync[] = [];
-    for (let i = 0; i < remoteFiles.length; i++) {
-      const remotePath = remoteFiles[i]!;
-      const base = path.posix.basename(remotePath);
-      const localPath = path.join(logsDir, `${Date.now()}-${i}-${base}`);
-      await writeFile(localPath, "", "utf8");
-      await upsertSessionOffset(this.db, {
-        id: crypto.randomUUID(),
-        session_id: opts.sessionId,
-        jsonl_path: localPath,
-        byte_offset: 0,
-        updated_at: nowMs(),
-      });
-      const initialOffset = initialOffsets[i] ?? 0;
-      const syncer = new RemoteLogSync(sandbox, remotePath, localPath, this.logger, 500, modalCfg.command_timeout_ms, initialOffset);
-      syncer.start();
-      logSyncers.push(syncer);
-    }
 
     return { handle, logSyncers, debug: { sandbox, errPath } };
   }
@@ -1312,6 +1407,7 @@ export class CloudManager {
       diff_summary: summary,
       finished_at: nowMs(),
     });
+    this.agentLogPaths.delete(sessionId);
     if (this.provider.id !== "local") {
       void this.scheduleWorkspaceTermination(run.workspace_id, run.identity_id);
     }

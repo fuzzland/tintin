@@ -9,12 +9,25 @@ import { CloudManager } from "./cloud/manager.js";
 import { handleOAuthCallback } from "./cloud/oauth.js";
 import { handleGithubAppCallback } from "./cloud/githubApp.js";
 import { handleProxyRequest } from "./cloud/proxy.js";
-import { JsonlStreamer } from "./streamer.js";
+import { JsonlStreamer, mapEventToFragments } from "./streamer.js";
 import { SessionManager } from "./sessionManager.js";
 import type { SendToSessionFn } from "./messaging.js";
 import type { TelegramMessage } from "./platform/telegram.js";
+import { getAgentAdapter } from "./agents.js";
+import {
+  addCloudRunScreenshot,
+  getCloudRun,
+  getCloudRunBySession,
+  listCloudRunScreenshots,
+  listCloudRunsForIdentity,
+} from "./cloud/store.js";
+import { uploadScreenshot, signScreenshotUrl } from "./cloud/s3.js";
+import { verifyUiToken, type UiTokenPayload } from "./cloud/uiTokens.js";
+import { buildRunArtifactsFromJsonl } from "./cloud/uiArtifacts.js";
 import http from "node:http";
 import { PlaywrightMcpManager } from "./playwrightMcp.js";
+import { appendFile, open, readdir, readFile } from "node:fs/promises";
+import path from "node:path";
 
 export interface BotServiceDeps {
   config: AppConfig;
@@ -57,6 +70,55 @@ function sendJson(res: http.ServerResponse, status: number, body: any) {
   res.end(JSON.stringify(body));
 }
 
+function sendSse(res: http.ServerResponse, data: unknown, event?: string) {
+  if (event) res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+async function readNewJsonlLines(filePath: string, offset: number): Promise<{ lines: string[]; newOffset: number }> {
+  const handle = await open(filePath, "r");
+  try {
+    const stat = await handle.stat();
+    if (offset >= stat.size) return { lines: [], newOffset: offset };
+
+    const maxBytes = 2_000_000;
+    const remaining = stat.size - offset;
+    const toRead = Math.min(remaining, maxBytes);
+    const buf = Buffer.allocUnsafe(toRead);
+    const { bytesRead } = await handle.read(buf, 0, toRead, offset);
+    const slice = buf.subarray(0, bytesRead);
+
+    const lastNewline = slice.lastIndexOf(0x0a);
+    if (lastNewline === -1) return { lines: [], newOffset: offset };
+
+    const complete = slice.subarray(0, lastNewline);
+    const text = complete.toString("utf8");
+    const lines = text.split("\n");
+    const newOffset = offset + lastNewline + 1;
+    return { lines, newOffset };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function listJsonlFiles(dir: string): Promise<string[]> {
+  const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+  const files = entries.filter((e) => e.isFile() && e.name.endsWith(".jsonl")).map((e) => path.join(dir, e.name));
+  files.sort();
+  return files;
+}
+
+function contentTypeForPath(filePath: string): string {
+  if (filePath.endsWith(".html")) return "text/html; charset=utf-8";
+  if (filePath.endsWith(".js")) return "application/javascript; charset=utf-8";
+  if (filePath.endsWith(".css")) return "text/css; charset=utf-8";
+  if (filePath.endsWith(".svg")) return "image/svg+xml";
+  if (filePath.endsWith(".png")) return "image/png";
+  if (filePath.endsWith(".jpg") || filePath.endsWith(".jpeg")) return "image/jpeg";
+  if (filePath.endsWith(".woff2")) return "font/woff2";
+  return "application/octet-stream";
+}
+
 function parseCloudConnectMetadata(metadataJson: string | null): CloudConnectMetadata | null {
   if (!metadataJson) return null;
   try {
@@ -86,6 +148,38 @@ export async function createBotService(deps: BotServiceDeps) {
     return (
       session.platform === "telegram" && typeof session.space_emoji === "string" && session.space_emoji.trim().length > 0
     );
+  };
+
+  const uiConfig = config.cloud?.ui ?? null;
+
+  const extractPlaywrightTool = (caption?: string): string | null => {
+    if (!caption) return null;
+    const match = caption.match(/Playwright\\s+(.+?)\\s+screenshot/i);
+    if (!match) return null;
+    const tool = match[1]?.trim();
+    if (!tool || tool.toLowerCase() === "screenshot") return null;
+    return tool;
+  };
+
+  const sanitizeFilename = (name: string): string => {
+    return name.replace(/[^A-Za-z0-9_.-]+/g, "-");
+  };
+
+  const maybeUploadScreenshot = async (sessionId: string, message: { file: Buffer; filename: string; mimeType?: string; caption?: string }) => {
+    if (!config.cloud?.enabled || !uiConfig) return;
+    if (!uiConfig.s3_bucket || !uiConfig.s3_region || !uiConfig.token_secret) return;
+    const run = await getCloudRunBySession(db, sessionId);
+    if (!run) return;
+    const safePrefix = uiConfig.s3_prefix.replace(/\/+$/g, "");
+    const key = `${safePrefix}/${run.id}/${Date.now()}-${sanitizeFilename(message.filename)}`;
+    await uploadScreenshot(uiConfig, { key, body: message.file, contentType: message.mimeType });
+    await addCloudRunScreenshot(db, {
+      runId: run.id,
+      sessionId,
+      s3Key: key,
+      mimeType: message.mimeType ?? null,
+      tool: extractPlaywrightTool(message.caption),
+    });
   };
 
   const queue = new TaskQueue(16);
@@ -409,6 +503,12 @@ export async function createBotService(deps: BotServiceDeps) {
     if (message.type === "image") {
       const caption = message.caption ?? `Playwright screenshot: ${message.path}`;
       const priority = message.priority ?? "user";
+      void maybeUploadScreenshot(sessionId, {
+        file: message.file,
+        filename: message.filename,
+        mimeType: message.mimeType,
+        caption,
+      }).catch((e) => logger.warn(`screenshot upload failed session=${sessionId}: ${String(e)}`));
       try {
         if (session.platform === "telegram") {
           if (!telegram) return;
@@ -647,6 +747,72 @@ export async function createBotService(deps: BotServiceDeps) {
       : null,
   );
 
+  const extractUiToken = (req: http.IncomingMessage, url: URL): string | null => {
+    const header = readHeader(req, "authorization");
+    if (header && header.startsWith("Bearer ")) return header.slice("Bearer ".length).trim();
+    const fromQuery = url.searchParams.get("token");
+    return fromQuery && fromQuery.length > 0 ? fromQuery : null;
+  };
+
+  const requireUiAuth = (req: http.IncomingMessage, res: http.ServerResponse, url: URL): UiTokenPayload | null => {
+    if (!uiConfig || !uiConfig.token_secret) {
+      sendText(res, 503, "UI auth not configured");
+      return null;
+    }
+    const token = extractUiToken(req, url);
+    if (!token) {
+      sendText(res, 401, "missing token");
+      return null;
+    }
+    const payload = verifyUiToken(uiConfig, token);
+    if (!payload) {
+      sendText(res, 401, "invalid token");
+      return null;
+    }
+    return payload;
+  };
+
+  const requireRunAccess = async (
+    payload: UiTokenPayload,
+    runId: string,
+    res: http.ServerResponse,
+  ): Promise<Awaited<ReturnType<typeof getCloudRun>> | null> => {
+    const run = await getCloudRun(db, runId);
+    if (!run) {
+      sendText(res, 404, "run not found");
+      return null;
+    }
+    if (payload.scope === "run" && payload.run_id !== runId) {
+      sendText(res, 403, "forbidden");
+      return null;
+    }
+    if (payload.scope === "identity" && payload.identity_id !== run.identity_id) {
+      sendText(res, 403, "forbidden");
+      return null;
+    }
+    return run;
+  };
+
+  const resolveRunLogFiles = async (sessionId: string, session: { agent: string; codex_cwd: string; codex_session_id: string | null }) => {
+    if (config.cloud?.workspaces_dir) {
+      const logsDir = path.join(config.cloud.workspaces_dir, "logs", sessionId);
+      const fromLogs = await listJsonlFiles(logsDir);
+      if (fromLogs.length > 0) return fromLogs;
+    }
+    if (!session.codex_session_id) return [];
+    const adapter = getAgentAdapter(session.agent as any);
+    const sessionsRoot = adapter.resolveSessionsRoot(session.codex_cwd, config);
+    const homeDir = adapter.resolveHomeDir(sessionsRoot);
+    return await adapter.findSessionJsonlFiles({
+      sessionsRoot,
+      homeDir,
+      cwd: session.codex_cwd,
+      sessionId: session.codex_session_id,
+      timeoutMs: 2_000,
+      pollMs: 200,
+    });
+  };
+
   if (telegram && config.telegram?.mode === "poll") {
     logger.info(
       `Telegram polling enabled (timeout=${config.telegram.poll_timeout_seconds}s rate=${config.telegram.rate_limit_msgs_per_sec} msg/s)`,
@@ -687,6 +853,222 @@ export async function createBotService(deps: BotServiceDeps) {
       if (req.method === "GET" && pathname === "/healthz") {
         sendText(res, 200, "ok");
         return;
+      }
+
+      const pathParts = pathname.split("/").filter(Boolean);
+      if (pathParts[0] === "api" && pathParts[1] === "cloud" && pathParts[2] === "agent") {
+        if (req.method !== "POST" || pathParts[3] !== "logs") {
+          sendText(res, 404, "not found");
+          return;
+        }
+        if (!cloudManager || !config.cloud?.enabled) {
+          sendText(res, 404, "cloud not enabled");
+          return;
+        }
+        const sessionId = pathParts[4] ?? "";
+        if (!sessionId) {
+          sendText(res, 400, "missing session id");
+          return;
+        }
+        const authHeader = readHeader(req, "authorization");
+        const tokenHeader = readHeader(req, "x-tintin-agent-token");
+        const token =
+          authHeader && authHeader.toLowerCase().startsWith("bearer ")
+            ? authHeader.slice("bearer ".length).trim()
+            : tokenHeader ?? "";
+        if (!token || !cloudManager.verifyAgentToken(sessionId, token)) {
+          sendText(res, 403, "forbidden");
+          return;
+        }
+        const payload = await readRequestBody(req);
+        if (!payload) {
+          sendText(res, 204, "ok");
+          return;
+        }
+        const logPath = await cloudManager.getOrCreateAgentLogPath(sessionId);
+        if (!logPath) {
+          sendText(res, 500, "log path unavailable");
+          return;
+        }
+        await appendFile(logPath, payload);
+        sendText(res, 200, "ok");
+        return;
+      }
+
+      if (pathParts[0] === "api" && pathParts[1] === "cloud") {
+        const payload = requireUiAuth(req, res, url);
+        if (!payload) return;
+
+        if (req.method === "GET" && pathParts[2] === "runs" && pathParts.length === 3) {
+          if (payload.scope === "run") {
+            const run = await getCloudRun(db, payload.run_id);
+            if (!run) {
+              sendJson(res, 200, { runs: [], nextCursor: null });
+              return;
+            }
+            sendJson(res, 200, { runs: [run], nextCursor: null });
+            return;
+          }
+          const limitRaw = url.searchParams.get("limit");
+          const cursorRaw = url.searchParams.get("cursor");
+          const limit = limitRaw ? Number(limitRaw) : undefined;
+          const before = cursorRaw ? Number(cursorRaw) : undefined;
+          const runs = await listCloudRunsForIdentity(db, {
+            identityId: payload.identity_id,
+            limit: Number.isFinite(limit) ? limit : undefined,
+            before: Number.isFinite(before) ? before : undefined,
+          });
+          const nextCursor = runs.length > 0 ? runs[runs.length - 1]!.created_at : null;
+          sendJson(res, 200, { runs, nextCursor });
+          return;
+        }
+
+        if (req.method === "GET" && pathParts[2] === "runs" && pathParts.length >= 4) {
+          const runId = pathParts[3] ?? "";
+          if (!runId) {
+            sendText(res, 400, "missing run id");
+            return;
+          }
+
+          if (pathParts[4] === "events") {
+            const run = await requireRunAccess(payload, runId, res);
+            if (!run) return;
+            if (!run.session_id) {
+              sendText(res, 404, "run has no session");
+              return;
+            }
+            const session = await db.selectFrom("sessions").selectAll().where("id", "=", run.session_id).executeTakeFirst();
+            if (!session) {
+              sendText(res, 404, "session not found");
+              return;
+            }
+
+            res.writeHead(200, {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache, no-transform",
+              Connection: "keep-alive",
+            });
+            res.flushHeaders();
+            sendSse(res, { ok: true }, "ready");
+
+            let closed = false;
+            req.on("close", () => {
+              closed = true;
+            });
+
+            const offsets = new Map<string, number>();
+            while (!closed) {
+              const files = await resolveRunLogFiles(run.session_id, session);
+              for (const file of files) {
+                const prevOffset = offsets.get(file) ?? 0;
+                const { lines, newOffset } = await readNewJsonlLines(file, prevOffset);
+                if (lines.length === 0) {
+                  offsets.set(file, newOffset);
+                  continue;
+                }
+                offsets.set(file, newOffset);
+                for (const line of lines) {
+                  const trimmed = line.trim();
+                  if (!trimmed) continue;
+                  let obj: unknown;
+                  try {
+                    obj = JSON.parse(trimmed);
+                  } catch {
+                    continue;
+                  }
+                  const fragments = mapEventToFragments(session.agent, obj, {
+                    includeUserMessages: true,
+                    verbosity: config.bot.message_verbosity,
+                  });
+                  for (const frag of fragments) {
+                    if (frag.kind === "final") continue;
+                    if (frag.kind === "plan_update") {
+                      sendSse(res, { kind: "plan_update", plan: frag.plan, explanation: frag.explanation });
+                      continue;
+                    }
+                    sendSse(res, frag);
+                  }
+                }
+              }
+              await sleep(500);
+            }
+            res.end();
+            return;
+          }
+
+          if (pathParts[4] === "artifacts") {
+            const run = await requireRunAccess(payload, runId, res);
+            if (!run) return;
+            if (!run.session_id) {
+              sendJson(res, 200, { diffs: [], commands: [] });
+              return;
+            }
+            const session = await db.selectFrom("sessions").selectAll().where("id", "=", run.session_id).executeTakeFirst();
+            if (!session) {
+              sendJson(res, 200, { diffs: [], commands: [] });
+              return;
+            }
+            const files = await resolveRunLogFiles(run.session_id, session);
+            const artifacts = await buildRunArtifactsFromJsonl(files, session.agent);
+            sendJson(res, 200, artifacts);
+            return;
+          }
+
+          if (pathParts.length === 4) {
+            const run = await requireRunAccess(payload, runId, res);
+            if (!run) return;
+            const identity = await db.selectFrom("identities").selectAll().where("id", "=", run.identity_id).executeTakeFirst();
+            const repos = await db
+              .selectFrom("cloud_run_repos")
+              .innerJoin("repos", "repos.id", "cloud_run_repos.repo_id")
+              .select([
+                "repos.id",
+                "repos.name",
+                "repos.url",
+                "repos.default_branch",
+                "cloud_run_repos.mount_path",
+              ])
+              .where("cloud_run_repos.run_id", "=", run.id)
+              .execute();
+            const session = run.session_id
+              ? await db.selectFrom("sessions").selectAll().where("id", "=", run.session_id).executeTakeFirst()
+              : null;
+            sendJson(res, 200, { run, identity, repos, session });
+            return;
+          }
+        }
+
+        if (req.method === "GET" && pathParts[2] === "screenshots") {
+          const runId = url.searchParams.get("runId") ?? "";
+          if (!runId) {
+            sendText(res, 400, "missing runId");
+            return;
+          }
+          const run = await requireRunAccess(payload, runId, res);
+          if (!run) return;
+          if (!uiConfig || !uiConfig.s3_bucket || !uiConfig.s3_region) {
+            sendText(res, 503, "S3 not configured");
+            return;
+          }
+          const rows = await listCloudRunScreenshots(db, runId);
+          const items = [];
+          for (const row of rows) {
+            try {
+              const url = await signScreenshotUrl(uiConfig, row.s3_key);
+              items.push({
+                id: row.id,
+                url,
+                tool: row.tool,
+                mime_type: row.mime_type,
+                created_at: row.created_at,
+              });
+            } catch (e) {
+              logger.warn(`sign screenshot failed id=${row.id}: ${String(e)}`);
+            }
+          }
+          sendJson(res, 200, { screenshots: items });
+          return;
+        }
       }
 
       if (config.cloud?.proxy?.enabled) {
@@ -858,6 +1240,37 @@ export async function createBotService(deps: BotServiceDeps) {
           return;
         }
         sendText(res, 200, "");
+        return;
+      }
+
+      if (uiConfig && req.method === "GET" && pathname.startsWith(uiConfig.path)) {
+        const uiRoot = path.join(config.config_dir, "frontend", "dist");
+        const relRaw = pathname.slice(uiConfig.path.length) || "/";
+        const relPath = relRaw === "/" ? "/index.html" : relRaw;
+        const filePath = path.join(uiRoot, relPath);
+        if (!filePath.startsWith(uiRoot)) {
+          sendText(res, 403, "forbidden");
+          return;
+        }
+        let data: Buffer | null = null;
+        let target = filePath;
+        try {
+          data = await readFile(filePath);
+        } catch {
+          try {
+            target = path.join(uiRoot, "index.html");
+            data = await readFile(target);
+          } catch {
+            data = null;
+          }
+        }
+        if (!data) {
+          sendText(res, 404, "not found");
+          return;
+        }
+        res.statusCode = 200;
+        res.setHeader("Content-Type", contentTypeForPath(target));
+        res.end(data);
         return;
       }
 
