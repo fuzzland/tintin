@@ -10,6 +10,7 @@ import * as cloudKeepalive0006 from "./migrations/0006_cloud_keepalive.js";
 import * as cloudUi0007 from "./migrations/0007_cloud_ui.js";
 import * as setupSpecSnapshot0008 from "./migrations/0008_setup_spec_snapshot.js";
 import * as browserbaseSession0010 from "./migrations/0010_browserbase_session.js";
+import * as gitCommitterFix0011 from "./migrations/0011_git_committer_fix.js";
 
 const provider = {
   async getMigrations() {
@@ -23,6 +24,7 @@ const provider = {
       "0007_cloud_ui": cloudUi0007,
       "0008_setup_spec_snapshot": setupSpecSnapshot0008,
       "0010_browserbase_session": browserbaseSession0010,
+      "0011_git_committer_fix": gitCommitterFix0011,
     };
   },
 };
