@@ -127,8 +127,19 @@ export class ModalCloudProvider implements CloudProvider {
 
   async pullDiff(opts: { workspace: CloudWorkspace; cwd: string }): Promise<{ diff: string; summary: string }> {
     const sandbox = this.getSandbox(opts.workspace.id);
-    const result = await this.runCommand(sandbox, "git diff", { cwd: opts.cwd });
-    const diff = result.stdout ?? "";
+    const tracked = await this.runCommand(sandbox, "git diff", { cwd: opts.cwd });
+    let diff = tracked.stdout ?? "";
+    const untracked = await this.runCommand(sandbox, "git ls-files --others --exclude-standard", { cwd: opts.cwd });
+    const files = (untracked.stdout ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    for (const file of files) {
+      const extra = await this.runCommand(sandbox, `git diff --no-index /dev/null ${shellQuote(file)}`, {
+        cwd: opts.cwd,
+      });
+      if (extra.stdout) diff += extra.stdout;
+    }
     const summary = diff.length > 0 ? diff.split("\n").slice(0, 20).join("\n") : "";
     return { diff, summary };
   }

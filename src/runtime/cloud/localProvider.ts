@@ -74,17 +74,20 @@ export class LocalCloudProvider implements CloudProvider {
   }
 
   async pullDiff(opts: { workspace: CloudWorkspace; cwd: string }): Promise<{ diff: string; summary: string }> {
-    let diff = "";
-    await new Promise<void>((resolve) => {
-      const child = spawn("git", ["diff"], { cwd: opts.cwd, stdio: ["ignore", "pipe", "pipe"] });
-      const chunks: Buffer[] = [];
-      child.stdout.on("data", (d) => chunks.push(Buffer.from(d)));
-      child.on("exit", () => {
-        diff = Buffer.concat(chunks).toString("utf8");
-        resolve();
+    const runGit = async (args: string[]): Promise<string> =>
+      await new Promise((resolve) => {
+        const child = spawn("git", args, { cwd: opts.cwd, stdio: ["ignore", "pipe", "pipe"] });
+        const chunks: Buffer[] = [];
+        child.stdout.on("data", (d) => chunks.push(Buffer.from(d)));
+        child.on("exit", () => resolve(Buffer.concat(chunks).toString("utf8")));
+        child.on("error", () => resolve(""));
       });
-      child.on("error", () => resolve());
-    });
+
+    let diff = await runGit(["diff"]);
+    const untracked = await runGit(["ls-files", "--others", "--exclude-standard"]);
+    for (const file of untracked.split("\n").map((line) => line.trim()).filter(Boolean)) {
+      diff += await runGit(["diff", "--no-index", "/dev/null", file]);
+    }
     const summary = diff.length > 0 ? diff.split("\n").slice(0, 20).join("\n") : "";
     return { diff, summary };
   }

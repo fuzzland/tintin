@@ -152,6 +152,7 @@ export async function buildRunArtifactsFromJsonl(
   let currentCommand: CommandEntry | null = null;
   const fileState = new Map<string, string>();
   const claudeToolMap = new Map<string, CommandEntry>();
+  const codexCommandMap = new Map<string, CommandEntry>();
 
   for (const file of files) {
     const raw = await readFile(file, "utf8").catch(() => "");
@@ -205,6 +206,40 @@ export async function buildRunArtifactsFromJsonl(
           }
         }
         continue;
+      }
+
+      if (obj && typeof obj === "object") {
+        const type = typeof (obj as any).type === "string" ? (obj as any).type : "";
+        const item = (obj as any).item;
+        if (type.startsWith("item.") && item && typeof item === "object") {
+          const itemType = typeof (item as any).type === "string" ? (item as any).type : "";
+          if (itemType === "command_execution") {
+            const itemId = typeof (item as any).id === "string" ? (item as any).id : `${commands.length}`;
+            const key = `${path.basename(file)}:${itemId}`;
+            let entry = codexCommandMap.get(key);
+            if (!entry) {
+              const cmd = typeof (item as any).command === "string" ? (item as any).command : "";
+              if (cmd) {
+                entry = {
+                  id: key,
+                  timestamp: ts,
+                  cwd: null,
+                  command: cmd,
+                  output: "",
+                  exitCode: null,
+                };
+                commands.push(entry);
+                codexCommandMap.set(key, entry);
+              }
+            }
+            if (entry) {
+              if (entry.timestamp === null && ts !== null) entry.timestamp = ts;
+              const output = typeof (item as any).aggregated_output === "string" ? (item as any).aggregated_output : "";
+              if (output) entry.output = output;
+              if (typeof (item as any).exit_code === "number") entry.exitCode = (item as any).exit_code;
+            }
+          }
+        }
       }
 
       if (obj.type === "event_msg" && obj.payload && typeof obj.payload === "object") {
