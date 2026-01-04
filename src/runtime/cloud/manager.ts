@@ -108,6 +108,21 @@ export class CloudManager {
     return keepalive;
   }
 
+  private async time<T>(label: string, fn: () => Promise<T>, meta?: string, level: "info" | "debug" = "info"): Promise<T> {
+    const start = Date.now();
+    const startTs = new Date(start).toISOString();
+    const suffix = meta ? ` ${meta}` : "";
+    const log = level === "debug" ? this.logger.debug.bind(this.logger) : this.logger.info.bind(this.logger);
+    log(`[cloud][timing] ${label} start ts=${startTs}${suffix}`);
+    try {
+      return await fn();
+    } finally {
+      const end = Date.now();
+      const endTs = new Date(end).toISOString();
+      log(`[cloud][timing] ${label} end ts=${endTs} ms=${end - start}${suffix}`);
+    }
+  }
+
   private issueAgentToken(sessionId: string): string {
     const token = crypto.randomUUID();
     const exp = Date.now() + 60 * 60 * 1000;
@@ -126,7 +141,9 @@ export class CloudManager {
   }
 
   private buildAgentRelayUrl(sessionId: string): string | null {
-    const base = this.config.cloud?.public_base_url ?? "";
+    const cloud = this.config.cloud;
+    if (!cloud?.log_relay_enabled) return null;
+    const base = cloud.public_base_url ?? "";
     if (!base) return null;
     const trimmed = base.replace(/\/+$/g, "");
     return `${trimmed}/api/cloud/agent/logs/${sessionId}`;
@@ -211,6 +228,11 @@ export class CloudManager {
     this.ensureEnabled();
     if (opts.repoIds.length === 0) throw new Error("No repo selected.");
     const primaryRepoId = opts.repoIds[0]!;
+    const runStartMs = Date.now();
+    const runStartTs = new Date(runStartMs).toISOString();
+    this.logger.info(
+      `[cloud][timing] run start ts=${runStartTs} identity=${opts.identityId} repos=${opts.repoIds.length} agent=${opts.agent}`,
+    );
 
     let setupSpec = await getLatestSetupSpec(this.db, primaryRepoId);
     let setupSnapshotId: string | null = setupSpec?.snapshot_id ?? null;
@@ -218,21 +240,37 @@ export class CloudManager {
     let workspace: CloudWorkspace;
     if (setupSnapshotId && this.provider.id === "modal") {
       try {
-        workspace = await this.getModalProvider().createWorkspaceFromSnapshot(setupSnapshotId);
+        workspace = await this.time(
+          "workspace.create",
+          () => this.getModalProvider().createWorkspaceFromSnapshot(setupSnapshotId),
+          `source=snapshot id=${setupSnapshotId}`,
+        );
         usedSnapshot = true;
         this.logger.info(`[cloud] workspace restored id=${workspace.id} snapshot=${setupSnapshotId}`);
       } catch (e) {
         this.logger.warn(`[cloud] snapshot restore failed (${setupSnapshotId}): ${String(e)}; falling back to base image`);
-        workspace = await this.provider.createWorkspace({ prefix: "cloud" });
+        workspace = await this.time(
+          "workspace.create",
+          () => this.provider.createWorkspace({ prefix: "cloud" }),
+          `source=base provider=${this.provider.id}`,
+        );
       }
     } else {
-      workspace = await this.provider.createWorkspace({ prefix: "cloud" });
+      workspace = await this.time(
+        "workspace.create",
+        () => this.provider.createWorkspace({ prefix: "cloud" }),
+        `source=base provider=${this.provider.id}`,
+      );
     }
     if (!usedSnapshot) {
       this.logger.info(`[cloud] workspace created id=${workspace.id} root=${workspace.rootPath}`);
     }
     if (this.provider.id === "modal") {
-      await this.injectModalSecretsBashrc(opts.identityId, workspace).catch((e) => {
+      await this.time(
+        "modal.secrets.bashrc",
+        () => this.injectModalSecretsBashrc(opts.identityId, workspace),
+        `workspace=${workspace.id}`,
+      ).catch((e) => {
         this.logger.warn(`[cloud][modal] failed to inject secrets into .bashrc: ${String(e)}`);
       });
     }
@@ -244,6 +282,7 @@ export class CloudManager {
       status: "queued",
     });
 
+    let runStatus: "ok" | "error" = "ok";
     try {
       this.logger.info(
         `[cloud] run start id=${run.id} agent=${opts.agent} repos=${opts.repoIds.length} workspace=${workspace.id}`,
@@ -255,13 +294,26 @@ export class CloudManager {
         const absPath = this.joinWorkspacePath(workspace.rootPath, mountPath);
         repoMounts.push({ repoId, mountPath, absPath });
         await addRunRepo(this.db, { runId: run.id, repoId, mountPath });
-        const { repo, clone } = await this.resolveCloneInfo(repoId);
+        const { repo, clone } = await this.time(
+          "repo.resolve",
+          () => this.resolveCloneInfo(repoId),
+          `repoId=${repoId}`,
+          "debug",
+        );
         if (usedSnapshot) {
           this.logger.info(`[cloud] refresh repo=${repo.name} url=${clone.redacted}`);
-          await this.refreshRepo({ workspace, absPath, cloneUrl: clone.url });
+          await this.time(
+            "repo.refresh",
+            () => this.refreshRepo({ workspace, absPath, cloneUrl: clone.url }),
+            `repo=${repo.name}`,
+          );
         } else {
           this.logger.info(`[cloud] clone repo=${repo.name} url=${clone.redacted}`);
-          await this.cloneRepo({ workspace, absPath, cloneUrl: clone.url });
+          await this.time(
+            "repo.clone",
+            () => this.cloneRepo({ workspace, absPath, cloneUrl: clone.url }),
+            `repo=${repo.name}`,
+          );
         }
       }
 
@@ -277,7 +329,12 @@ export class CloudManager {
       }
       if (setupSpec && !usedSnapshot) {
         const spec = parseSetupSpec(setupSpec.yml_blob);
-        const secrets = await this.loadSecretsMap(opts.identityId);
+        const secrets = await this.time(
+          "secrets.load",
+          () => this.loadSecretsMap(opts.identityId),
+          `identity=${opts.identityId}`,
+          "debug",
+        );
         const envVars: Record<string, string> = {};
         for (const entry of spec.env ?? []) {
           if (!entry.value) continue;
@@ -288,15 +345,25 @@ export class CloudManager {
           const files = spec.files
             .filter((f) => f.content !== undefined)
             .map((f) => ({ path: f.path, content: f.content ?? "", mode: f.mode }));
-          if (files.length > 0) await this.provider.uploadFiles(workspace, files);
+          if (files.length > 0) {
+            await this.time(
+              "setupSpec.uploadFiles",
+              () => this.provider.uploadFiles(workspace, files),
+              `files=${files.length}`,
+            );
+          }
         }
 
         const mainRepoPath = repoMounts[0]!.absPath;
         if (spec.commands && spec.commands.length > 0) {
           this.logger.info(`[cloud] applying setup spec commands count=${spec.commands.length}`);
-          await this.provider.runCommands({ workspace, cwd: mainRepoPath, commands: spec.commands, env: envVars });
+          await this.time(
+            "setupSpec.runCommands",
+            () => this.provider.runCommands({ workspace, cwd: mainRepoPath, commands: spec.commands, env: envVars }),
+            `commands=${spec.commands.length}`,
+          );
         }
-        setupSnapshotId = await this.provider.snapshotWorkspace(workspace, "setup");
+        setupSnapshotId = await this.time("setupSpec.snapshot", () => this.provider.snapshotWorkspace(workspace, "setup"));
         await updateCloudRun(this.db, run.id, { snapshot_id: setupSnapshotId });
         if (setupSpec.id) {
           await updateSetupSpecSnapshot(this.db, { id: setupSpec.id, snapshotId: setupSnapshotId });
@@ -314,33 +381,49 @@ export class CloudManager {
       let sessionId: string;
       if (this.provider.id !== "local") {
         this.logger.info(`[cloud] starting remote session run=${run.id} workspace=${workspace.id}`);
-        sessionId = await this.startRemoteSession({
-          identityId: opts.identityId,
-          platform: opts.platform,
-          workspaceId: opts.workspaceId,
-          chatId: opts.chatId,
-          spaceId: opts.spaceId,
-          userId: opts.userId,
-          projectId,
-          projectPath: mainRepoPath,
-          prompt: opts.prompt,
-          agent: opts.agent,
-          workspace,
-        });
+        sessionId = await this.time(
+          "session.startRemote",
+          () =>
+            this.startRemoteSession({
+              identityId: opts.identityId,
+              platform: opts.platform,
+              workspaceId: opts.workspaceId,
+              chatId: opts.chatId,
+              spaceId: opts.spaceId,
+              userId: opts.userId,
+              projectId,
+              projectPath: mainRepoPath,
+              prompt: opts.prompt,
+              agent: opts.agent,
+              workspace,
+            }),
+          `run=${run.id}`,
+        );
       } else {
         if (!this.sessionManager) throw new Error("Cloud manager is not attached to session manager.");
-        sessionId = await this.sessionManager.startNewSession({
-          platform: opts.platform,
-          workspaceId: opts.workspaceId,
-          chatId: opts.chatId,
-          spaceId: opts.spaceId,
-          userId: opts.userId,
-          projectId,
-          projectPathResolved: mainRepoPath,
-          initialPrompt: opts.prompt,
-          agent: opts.agent,
-          envOverrides: await this.buildAgentEnv(opts.identityId),
-        });
+        const envOverrides = await this.time(
+          "env.build",
+          () => this.buildAgentEnv(opts.identityId),
+          `run=${run.id} identity=${opts.identityId}`,
+          "debug",
+        );
+        sessionId = await this.time(
+          "session.startLocal",
+          () =>
+            this.sessionManager!.startNewSession({
+              platform: opts.platform,
+              workspaceId: opts.workspaceId,
+              chatId: opts.chatId,
+              spaceId: opts.spaceId,
+              userId: opts.userId,
+              projectId,
+              projectPathResolved: mainRepoPath,
+              initialPrompt: opts.prompt,
+              agent: opts.agent,
+              envOverrides,
+            }),
+          `run=${run.id}`,
+        );
       }
 
       await updateCloudRun(this.db, run.id, {
@@ -352,12 +435,19 @@ export class CloudManager {
 
       return { runId: run.id, sessionId };
     } catch (e) {
+      runStatus = "error";
       this.logger.warn(`[cloud] run failed id=${run.id}: ${String(e)}`);
       await updateCloudRun(this.db, run.id, { status: "error", finished_at: nowMs() });
       if (this.provider.id !== "local") {
         await this.provider.terminateWorkspace(workspace).catch(() => {});
       }
       throw e;
+    } finally {
+      const runEndMs = Date.now();
+      const runEndTs = new Date(runEndMs).toISOString();
+      this.logger.info(
+        `[cloud][timing] run end ts=${runEndTs} id=${run.id} status=${runStatus} ms=${runEndMs - runStartMs}`,
+      );
     }
   }
 
@@ -438,6 +528,15 @@ export class CloudManager {
 
     for (const dir of authDirs) {
       await this.ensureRemoteDir(sandbox, dir, timeoutMs);
+      const chown = await this.runRemoteCommand(sandbox, `chown -R ubuntu:ubuntu ${shellQuote(dir)}`, {
+        cwd: "/",
+        timeoutMs,
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      if (chown.exitCode !== 0) {
+        throw new Error(`Failed to chown ${dir} for codex auth`);
+      }
       const authPath = path.posix.join(dir, "auth.json");
       const current = await this.readRemoteText(sandbox, authPath);
       let next: Record<string, unknown> = {};
@@ -650,19 +749,29 @@ export class CloudManager {
     });
 
     try {
-      let envOverrides = await this.buildAgentEnv(opts.identityId);
+      let envOverrides = await this.time(
+        "env.build",
+        () => this.buildAgentEnv(opts.identityId),
+        `session=${sessionId} identity=${opts.identityId}`,
+        "debug",
+      );
       envOverrides = this.applyProxyEnv(envOverrides, opts.identityId, opts.agent);
       this.logger.info(
         `[cloud] spawn agent=${opts.agent} session=${sessionId} cwd=${opts.projectPath} env_keys=${Object.keys(envOverrides).length}`,
       );
-      const { handle, agentSessionId, logSyncers, debug } = await this.spawnRemoteAgent({
-        sessionId,
-        prompt: opts.prompt,
-        cwd: opts.projectPath,
-        agent: opts.agent,
-        workspace: opts.workspace,
-        envOverrides,
-      });
+      const { handle, agentSessionId, logSyncers, debug } = await this.time(
+        "remote.spawnAgent",
+        () =>
+          this.spawnRemoteAgent({
+            sessionId,
+            prompt: opts.prompt,
+            cwd: opts.projectPath,
+            agent: opts.agent,
+            workspace: opts.workspace,
+            envOverrides,
+          }),
+        `session=${sessionId} agent=${opts.agent}`,
+      );
 
       await updateSession(this.db, sessionId, {
         pid: handle.pid ?? null,
@@ -772,7 +881,12 @@ export class CloudManager {
 
     const promptFile = `/tmp/tintin-prompt-${opts.sessionId}.txt`;
     const promptText = opts.prompt.endsWith("\n") ? opts.prompt : `${opts.prompt}\n`;
-    await this.writeRemoteText(sandbox, promptFile, promptText);
+    await this.time(
+      "remote.writePrompt",
+      () => this.writeRemoteText(sandbox, promptFile, promptText),
+      `session=${opts.sessionId}`,
+      "debug",
+    );
 
     let agentSessionId = crypto.randomUUID();
     let sessionsRoot = "";
@@ -788,9 +902,16 @@ export class CloudManager {
       if (!this.config.claude_code) throw new Error("Claude Code is not configured.");
       sessionsRoot = resolveSessionsRoot(opts.cwd, this.config.claude_code.sessions_dir);
       configDir = resolveClaudeConfigDirFromSessionsRoot(sessionsRoot);
-      await this.ensureRemoteDir(sandbox, toPosix(sessionsRoot), modalCfg.command_timeout_ms);
-      await this.ensureRemoteDir(sandbox, toPosix(configDir), modalCfg.command_timeout_ms);
-      await this.ensureRemoteDir(sandbox, path.posix.join(toPosix(configDir), "projects"), modalCfg.command_timeout_ms);
+      await this.time(
+        "remote.ensureDirs",
+        async () => {
+          await this.ensureRemoteDir(sandbox, toPosix(sessionsRoot), modalCfg.command_timeout_ms);
+          await this.ensureRemoteDir(sandbox, toPosix(configDir), modalCfg.command_timeout_ms);
+          await this.ensureRemoteDir(sandbox, path.posix.join(toPosix(configDir), "projects"), modalCfg.command_timeout_ms);
+        },
+        `agent=${opts.agent} session=${opts.sessionId}`,
+        "debug",
+      );
       const baseArgs = this.buildClaudeArgs(agentSessionId);
       const baseCmd = `${modalCfg.claude_binary} ${baseArgs.map(shellQuote).join(" ")} < ${shellQuote(promptFile)}`;
       if (mcpEnabled && playwrightArgs.length > 0) {
@@ -809,8 +930,15 @@ export class CloudManager {
       sessionsRoot = resolveSessionsRoot(opts.cwd, this.config.codex.sessions_dir);
       const homeDir = resolveCodexHomeFromSessionsRoot(sessionsRoot);
       codexHome = toPosix(homeDir);
-      await this.ensureRemoteDir(sandbox, toPosix(sessionsRoot), modalCfg.command_timeout_ms);
-      await this.ensureRemoteDir(sandbox, toPosix(homeDir), modalCfg.command_timeout_ms);
+      await this.time(
+        "remote.ensureDirs",
+        async () => {
+          await this.ensureRemoteDir(sandbox, toPosix(sessionsRoot), modalCfg.command_timeout_ms);
+          await this.ensureRemoteDir(sandbox, toPosix(homeDir), modalCfg.command_timeout_ms);
+        },
+        `agent=${opts.agent} session=${opts.sessionId}`,
+        "debug",
+      );
       const baseArgs = this.buildCodexArgs(opts.cwd);
       const baseCmd = `${modalCfg.codex_binary} ${baseArgs.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
       if (mcpEnabled && playwrightArgs.length > 0) {
@@ -829,7 +957,12 @@ export class CloudManager {
 
     env = this.ensureModalEnv(env);
     if (opts.agent === "codex" && codexHome) {
-      await this.ensureRemoteCodexAuthFile(sandbox, env, codexHome, modalCfg.command_timeout_ms);
+      await this.time(
+        "remote.codexAuth",
+        () => this.ensureRemoteCodexAuthFile(sandbox, env, codexHome, modalCfg.command_timeout_ms),
+        `session=${opts.sessionId}`,
+        "debug",
+      );
     }
     const relayUrl = this.buildAgentRelayUrl(opts.sessionId);
     if (relayUrl) {
@@ -860,7 +993,12 @@ export class CloudManager {
 
     if (this.provider.id === "modal") {
       const binary = opts.agent === "claude_code" ? modalCfg.claude_binary : modalCfg.codex_binary;
-      const check = await this.runRemoteDebugCommand(sandbox, `command -v ${shellQuote(binary)}`, modalCfg.command_timeout_ms);
+      const check = await this.time(
+        "remote.binaryCheck",
+        () => this.runRemoteDebugCommand(sandbox, `command -v ${shellQuote(binary)}`, modalCfg.command_timeout_ms),
+        `agent=${opts.agent}`,
+        "debug",
+      );
       const stdout = check.stdout.trim();
       const stderr = check.stderr.trim();
       this.logger.info(
@@ -875,13 +1013,19 @@ export class CloudManager {
       `[cloud] exec agent=${opts.agent} session=${opts.sessionId} agent_session=${agentSessionId} cmd=${cmd} env_keys=${Object.keys(env).length}`,
     );
 
-    const proc = await sandbox.exec(["/bin/sh", "-lc", cmd], {
-      workdir: toPosix(opts.cwd),
-      env,
-      stdout: "ignore",
-      stderr: "ignore",
-      mode: "text",
-    });
+    const proc = await this.time(
+      "remote.exec",
+      () =>
+        sandbox.exec(["/bin/sh", "-lc", cmd], {
+          workdir: toPosix(opts.cwd),
+          env,
+          stdout: "ignore",
+          stderr: "ignore",
+          mode: "text",
+        }),
+      `agent=${opts.agent} session=${opts.sessionId}`,
+      "debug",
+    );
     const handle: RemoteHandle = { pid: null, wait: () => proc.wait() };
 
     const logSyncers: RemoteLogSync[] = [];
@@ -894,24 +1038,36 @@ export class CloudManager {
         const primaryRoot = toPosix(sessionsRoot);
         const homeDir = typeof env.HOME === "string" && env.HOME ? toPosix(env.HOME) : "/home/ubuntu";
         const fallbackRoot = path.posix.join(homeDir, ".codex", "sessions");
-        const discovered = await findRemoteJsonlFiles({
-          sandbox,
-          sessionsRoot: primaryRoot,
-          sessionId: null,
-          timeoutMs: 10_000,
-          pollMs: 100,
-        });
+        const discovered = await this.time(
+          "remote.logSearch",
+          () =>
+            findRemoteJsonlFiles({
+              sandbox,
+              sessionsRoot: primaryRoot,
+              sessionId: null,
+              timeoutMs: 10_000,
+              pollMs: 100,
+            }),
+          `root=${primaryRoot} session=${opts.sessionId}`,
+          "debug",
+        );
         this.logger.info(`[cloud] log search agent=codex root=${primaryRoot} matches=${discovered.length}`);
         if (discovered.length > 0) {
           remoteFiles.push(...discovered);
         } else if (fallbackRoot !== primaryRoot) {
-          const fallbackFound = await findRemoteJsonlFiles({
-            sandbox,
-            sessionsRoot: fallbackRoot,
-            sessionId: null,
-            timeoutMs: 2_000,
-            pollMs: 100,
-          });
+          const fallbackFound = await this.time(
+            "remote.logSearch",
+            () =>
+              findRemoteJsonlFiles({
+                sandbox,
+                sessionsRoot: fallbackRoot,
+                sessionId: null,
+                timeoutMs: 2_000,
+                pollMs: 100,
+              }),
+            `root=${fallbackRoot} session=${opts.sessionId}`,
+            "debug",
+          );
           this.logger.info(`[cloud] log search agent=codex root=${fallbackRoot} matches=${fallbackFound.length}`);
           if (fallbackFound.length > 0) remoteFiles.push(...fallbackFound);
         }
@@ -934,14 +1090,21 @@ export class CloudManager {
         const remotePath = remoteFiles[i]!;
         const base = path.posix.basename(remotePath);
         const localPath = path.join(logsDir, `${i}-${base}`);
-        await writeFile(localPath, "", "utf8");
-        await upsertSessionOffset(this.db, {
-          id: crypto.randomUUID(),
-          session_id: opts.sessionId,
-          jsonl_path: localPath,
-          byte_offset: 0,
-          updated_at: nowMs(),
-        });
+        await this.time(
+          "local.logInit",
+          async () => {
+            await writeFile(localPath, "", "utf8");
+            await upsertSessionOffset(this.db, {
+              id: crypto.randomUUID(),
+              session_id: opts.sessionId,
+              jsonl_path: localPath,
+              byte_offset: 0,
+              updated_at: nowMs(),
+            });
+          },
+          `session=${opts.sessionId}`,
+          "debug",
+        );
         const syncer = new RemoteLogSync(sandbox, remotePath, localPath, this.logger, 100, modalCfg.command_timeout_ms, 0);
         syncer.start();
         logSyncers.push(syncer);
@@ -1013,7 +1176,12 @@ export class CloudManager {
 
     const promptFile = `/tmp/tintin-prompt-${opts.sessionId}.txt`;
     const promptText = opts.prompt.endsWith("\n") ? opts.prompt : `${opts.prompt}\n`;
-    await this.writeRemoteText(sandbox, promptFile, promptText);
+    await this.time(
+      "remote.writePrompt",
+      () => this.writeRemoteText(sandbox, promptFile, promptText),
+      `session=${opts.sessionId}`,
+      "debug",
+    );
 
     let sessionsRoot = "";
     let configDir: string | null = null;
@@ -1028,9 +1196,16 @@ export class CloudManager {
       if (!this.config.claude_code) throw new Error("Claude Code is not configured.");
       sessionsRoot = resolveSessionsRoot(opts.cwd, this.config.claude_code.sessions_dir);
       configDir = resolveClaudeConfigDirFromSessionsRoot(sessionsRoot);
-      await this.ensureRemoteDir(sandbox, toPosix(sessionsRoot), modalCfg.command_timeout_ms);
-      await this.ensureRemoteDir(sandbox, toPosix(configDir), modalCfg.command_timeout_ms);
-      await this.ensureRemoteDir(sandbox, path.posix.join(toPosix(configDir), "projects"), modalCfg.command_timeout_ms);
+      await this.time(
+        "remote.ensureDirs",
+        async () => {
+          await this.ensureRemoteDir(sandbox, toPosix(sessionsRoot), modalCfg.command_timeout_ms);
+          await this.ensureRemoteDir(sandbox, toPosix(configDir), modalCfg.command_timeout_ms);
+          await this.ensureRemoteDir(sandbox, path.posix.join(toPosix(configDir), "projects"), modalCfg.command_timeout_ms);
+        },
+        `agent=${opts.agent} session=${opts.sessionId}`,
+        "debug",
+      );
       const baseArgs = this.buildClaudeResumeArgs(opts.agentSessionId);
       const baseCmd = `${modalCfg.claude_binary} ${baseArgs.map(shellQuote).join(" ")} < ${shellQuote(promptFile)}`;
       if (mcpEnabled && playwrightArgs.length > 0) {
@@ -1049,8 +1224,15 @@ export class CloudManager {
       sessionsRoot = resolveSessionsRoot(opts.cwd, this.config.codex.sessions_dir);
       const homeDir = resolveCodexHomeFromSessionsRoot(sessionsRoot);
       codexHome = toPosix(homeDir);
-      await this.ensureRemoteDir(sandbox, toPosix(sessionsRoot), modalCfg.command_timeout_ms);
-      await this.ensureRemoteDir(sandbox, toPosix(homeDir), modalCfg.command_timeout_ms);
+      await this.time(
+        "remote.ensureDirs",
+        async () => {
+          await this.ensureRemoteDir(sandbox, toPosix(sessionsRoot), modalCfg.command_timeout_ms);
+          await this.ensureRemoteDir(sandbox, toPosix(homeDir), modalCfg.command_timeout_ms);
+        },
+        `agent=${opts.agent} session=${opts.sessionId}`,
+        "debug",
+      );
       const baseArgs = this.buildCodexArgs(opts.cwd);
       const baseCmd = `${modalCfg.codex_binary} ${baseArgs.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
       if (mcpEnabled && playwrightArgs.length > 0) {
@@ -1069,7 +1251,12 @@ export class CloudManager {
 
     env = this.ensureModalEnv(env);
     if (opts.agent === "codex" && codexHome) {
-      await this.ensureRemoteCodexAuthFile(sandbox, env, codexHome, modalCfg.command_timeout_ms);
+      await this.time(
+        "remote.codexAuth",
+        () => this.ensureRemoteCodexAuthFile(sandbox, env, codexHome, modalCfg.command_timeout_ms),
+        `session=${opts.sessionId}`,
+        "debug",
+      );
     }
     const relayUrl = this.buildAgentRelayUrl(opts.sessionId);
     if (relayUrl) {
@@ -1114,24 +1301,36 @@ export class CloudManager {
         const primaryRoot = toPosix(sessionsRoot);
         const homeDir = typeof env.HOME === "string" && env.HOME ? toPosix(env.HOME) : "/home/ubuntu";
         const fallbackRoot = path.posix.join(homeDir, ".codex", "sessions");
-        const discovered = await findRemoteJsonlFiles({
-          sandbox,
-          sessionsRoot: primaryRoot,
-          sessionId: opts.agentSessionId,
-          timeoutMs: 10_000,
-          pollMs: 100,
-        });
+        const discovered = await this.time(
+          "remote.logSearch",
+          () =>
+            findRemoteJsonlFiles({
+              sandbox,
+              sessionsRoot: primaryRoot,
+              sessionId: opts.agentSessionId,
+              timeoutMs: 10_000,
+              pollMs: 100,
+            }),
+          `root=${primaryRoot} session=${opts.sessionId}`,
+          "debug",
+        );
         this.logger.info(`[cloud] log search agent=codex root=${primaryRoot} matches=${discovered.length}`);
         if (discovered.length > 0) {
           remoteFiles.push(...discovered);
         } else if (fallbackRoot !== primaryRoot) {
-          const fallbackFound = await findRemoteJsonlFiles({
-            sandbox,
-            sessionsRoot: fallbackRoot,
-            sessionId: opts.agentSessionId,
-            timeoutMs: 2_000,
-            pollMs: 100,
-          });
+          const fallbackFound = await this.time(
+            "remote.logSearch",
+            () =>
+              findRemoteJsonlFiles({
+                sandbox,
+                sessionsRoot: fallbackRoot,
+                sessionId: opts.agentSessionId,
+                timeoutMs: 2_000,
+                pollMs: 100,
+              }),
+            `root=${fallbackRoot} session=${opts.sessionId}`,
+            "debug",
+          );
           this.logger.info(`[cloud] log search agent=codex root=${fallbackRoot} matches=${fallbackFound.length}`);
           if (fallbackFound.length > 0) remoteFiles.push(...fallbackFound);
         }
@@ -1145,11 +1344,17 @@ export class CloudManager {
       const initialOffsets: number[] = [];
       for (const remotePath of remoteFiles) {
         initialOffsets.push(
-          await getRemoteFileSize({
-            sandbox,
-            remotePath,
-            timeoutMs: modalCfg.command_timeout_ms,
-          }),
+          await this.time(
+            "remote.logSize",
+            () =>
+              getRemoteFileSize({
+                sandbox,
+                remotePath,
+                timeoutMs: modalCfg.command_timeout_ms,
+              }),
+            `path=${path.posix.basename(remotePath)} session=${opts.sessionId}`,
+            "debug",
+          ),
         );
       }
 
@@ -1159,14 +1364,21 @@ export class CloudManager {
         const remotePath = remoteFiles[i]!;
         const base = path.posix.basename(remotePath);
         const localPath = path.join(logsDir, `${Date.now()}-${i}-${base}`);
-        await writeFile(localPath, "", "utf8");
-        await upsertSessionOffset(this.db, {
-          id: crypto.randomUUID(),
-          session_id: opts.sessionId,
-          jsonl_path: localPath,
-          byte_offset: 0,
-          updated_at: nowMs(),
-        });
+        await this.time(
+          "local.logInit",
+          async () => {
+            await writeFile(localPath, "", "utf8");
+            await upsertSessionOffset(this.db, {
+              id: crypto.randomUUID(),
+              session_id: opts.sessionId,
+              jsonl_path: localPath,
+              byte_offset: 0,
+              updated_at: nowMs(),
+            });
+          },
+          `session=${opts.sessionId}`,
+          "debug",
+        );
         const initialOffset = initialOffsets[i] ?? 0;
         const syncer = new RemoteLogSync(sandbox, remotePath, localPath, this.logger, 100, modalCfg.command_timeout_ms, initialOffset);
         syncer.start();
@@ -1174,13 +1386,19 @@ export class CloudManager {
       }
     }
 
-    const proc = await sandbox.exec(["/bin/sh", "-lc", cmd], {
-      workdir: toPosix(opts.cwd),
-      env,
-      stdout: "ignore",
-      stderr: "ignore",
-      mode: "text",
-    });
+    const proc = await this.time(
+      "remote.exec",
+      () =>
+        sandbox.exec(["/bin/sh", "-lc", cmd], {
+          workdir: toPosix(opts.cwd),
+          env,
+          stdout: "ignore",
+          stderr: "ignore",
+          mode: "text",
+        }),
+      `agent=${opts.agent} session=${opts.sessionId}`,
+      "debug",
+    );
     const handle: RemoteHandle = { pid: null, wait: () => proc.wait() };
 
     return { handle, logSyncers, debug: { sandbox, errPath } };
@@ -1251,16 +1469,30 @@ export class CloudManager {
     await updateCloudRun(this.db, run.id, { status: "running", finished_at: null, diff_patch: null, diff_summary: null });
 
     const workspace = this.workspaceFromId(run.workspace_id);
-    const envOverrides = this.applyProxyEnv(await this.buildAgentEnv(run.identity_id), run.identity_id, session.agent);
-    const { handle, logSyncers, debug } = await this.spawnRemoteResume({
-      sessionId: session.id,
-      agentSessionId: session.codex_session_id,
-      prompt,
-      cwd: session.codex_cwd,
-      agent: session.agent,
-      workspace,
-      envOverrides,
-    });
+    const envOverrides = this.applyProxyEnv(
+      await this.time(
+        "env.build",
+        () => this.buildAgentEnv(run.identity_id),
+        `session=${session.id} identity=${run.identity_id}`,
+        "debug",
+      ),
+      run.identity_id,
+      session.agent,
+    );
+    const { handle, logSyncers, debug } = await this.time(
+      "remote.resume",
+      () =>
+        this.spawnRemoteResume({
+          sessionId: session.id,
+          agentSessionId: session.codex_session_id,
+          prompt,
+          cwd: session.codex_cwd,
+          agent: session.agent,
+          workspace,
+          envOverrides,
+        }),
+      `session=${session.id} agent=${session.agent}`,
+    );
 
     await updateSession(this.db, session.id, { pid: handle.pid ?? null, status: "running", started_at: nowMs() });
 
@@ -1296,7 +1528,11 @@ export class CloudManager {
     let workspace: CloudWorkspace;
     if (setupSnapshotId && this.provider.id === "modal") {
       try {
-        workspace = await this.getModalProvider().createWorkspaceFromSnapshot(setupSnapshotId);
+        workspace = await this.time(
+          "workspace.create",
+          () => this.getModalProvider().createWorkspaceFromSnapshot(setupSnapshotId),
+          `source=snapshot id=${setupSnapshotId}`,
+        );
         usedSnapshot = true;
         this.logger.info(
           `[cloud] workspace restored id=${workspace.id} snapshot=${setupSnapshotId} run=${run.id} session=${session.id}`,
@@ -1305,16 +1541,28 @@ export class CloudManager {
         this.logger.warn(
           `[cloud] snapshot restore failed (${setupSnapshotId}): ${String(e)}; falling back to base image`,
         );
-        workspace = await this.provider.createWorkspace({ prefix: "cloud" });
+        workspace = await this.time(
+          "workspace.create",
+          () => this.provider.createWorkspace({ prefix: "cloud" }),
+          `source=base provider=${this.provider.id}`,
+        );
       }
     } else {
-      workspace = await this.provider.createWorkspace({ prefix: "cloud" });
+      workspace = await this.time(
+        "workspace.create",
+        () => this.provider.createWorkspace({ prefix: "cloud" }),
+        `source=base provider=${this.provider.id}`,
+      );
     }
     if (!usedSnapshot) {
       this.logger.info(`[cloud] workspace recreated id=${workspace.id} run=${run.id} session=${session.id}`);
     }
     if (this.provider.id === "modal") {
-      await this.injectModalSecretsBashrc(run.identity_id, workspace).catch((e) => {
+      await this.time(
+        "modal.secrets.bashrc",
+        () => this.injectModalSecretsBashrc(run.identity_id, workspace),
+        `workspace=${workspace.id}`,
+      ).catch((e) => {
         this.logger.warn(`[cloud][modal] failed to inject secrets into .bashrc: ${String(e)}`);
       });
     }
@@ -1333,13 +1581,26 @@ export class CloudManager {
         });
 
       for (const mount of repoMounts) {
-        const { repo, clone } = await this.resolveCloneInfo(mount.repoId);
+        const { repo, clone } = await this.time(
+          "repo.resolve",
+          () => this.resolveCloneInfo(mount.repoId),
+          `repoId=${mount.repoId}`,
+          "debug",
+        );
         if (usedSnapshot) {
           this.logger.info(`[cloud] refresh repo=${repo.name} url=${clone.redacted}`);
-          await this.refreshRepo({ workspace, absPath: mount.absPath, cloneUrl: clone.url });
+          await this.time(
+            "repo.refresh",
+            () => this.refreshRepo({ workspace, absPath: mount.absPath, cloneUrl: clone.url }),
+            `repo=${repo.name}`,
+          );
         } else {
           this.logger.info(`[cloud] clone repo=${repo.name} url=${clone.redacted}`);
-          await this.cloneRepo({ workspace, absPath: mount.absPath, cloneUrl: clone.url });
+          await this.time(
+            "repo.clone",
+            () => this.cloneRepo({ workspace, absPath: mount.absPath, cloneUrl: clone.url }),
+            `repo=${repo.name}`,
+          );
         }
       }
 
@@ -1354,7 +1615,12 @@ export class CloudManager {
       }
       if (setupSpec && !usedSnapshot) {
         const spec = parseSetupSpec(setupSpec.yml_blob);
-        const secrets = await this.loadSecretsMap(run.identity_id);
+        const secrets = await this.time(
+          "secrets.load",
+          () => this.loadSecretsMap(run.identity_id),
+          `identity=${run.identity_id}`,
+          "debug",
+        );
         const envVars: Record<string, string> = {};
         for (const entry of spec.env ?? []) {
           if (!entry.value) continue;
@@ -1365,15 +1631,25 @@ export class CloudManager {
           const files = spec.files
             .filter((f) => f.content !== undefined)
             .map((f) => ({ path: f.path, content: f.content ?? "", mode: f.mode }));
-          if (files.length > 0) await this.provider.uploadFiles(workspace, files);
+          if (files.length > 0) {
+            await this.time(
+              "setupSpec.uploadFiles",
+              () => this.provider.uploadFiles(workspace, files),
+              `files=${files.length}`,
+            );
+          }
         }
 
         const mainRepoPath = repoMounts[0]!.absPath;
         if (spec.commands && spec.commands.length > 0) {
           this.logger.info(`[cloud] applying setup spec commands count=${spec.commands.length}`);
-          await this.provider.runCommands({ workspace, cwd: mainRepoPath, commands: spec.commands, env: envVars });
+          await this.time(
+            "setupSpec.runCommands",
+            () => this.provider.runCommands({ workspace, cwd: mainRepoPath, commands: spec.commands, env: envVars }),
+            `commands=${spec.commands.length}`,
+          );
         }
-        setupSnapshotId = await this.provider.snapshotWorkspace(workspace, "setup");
+        setupSnapshotId = await this.time("setupSpec.snapshot", () => this.provider.snapshotWorkspace(workspace, "setup"));
         if (setupSpec.id) {
           await updateSetupSpecSnapshot(this.db, { id: setupSpec.id, snapshotId: setupSnapshotId });
         }
@@ -1398,15 +1674,29 @@ export class CloudManager {
       });
       await deleteSessionOffsets(this.db, session.id);
 
-      const envOverrides = this.applyProxyEnv(await this.buildAgentEnv(run.identity_id), run.identity_id, session.agent);
-      const { handle, agentSessionId, logSyncers, debug } = await this.spawnRemoteAgent({
-        sessionId: session.id,
-        prompt,
-        cwd: mainRepoPath,
-        agent: session.agent,
-        workspace,
-        envOverrides,
-      });
+      const envOverrides = this.applyProxyEnv(
+        await this.time(
+          "env.build",
+          () => this.buildAgentEnv(run.identity_id),
+          `session=${session.id} identity=${run.identity_id}`,
+          "debug",
+        ),
+        run.identity_id,
+        session.agent,
+      );
+      const { handle, agentSessionId, logSyncers, debug } = await this.time(
+        "remote.spawnAgent",
+        () =>
+          this.spawnRemoteAgent({
+            sessionId: session.id,
+            prompt,
+            cwd: mainRepoPath,
+            agent: session.agent,
+            workspace,
+            envOverrides,
+          }),
+        `session=${session.id} agent=${session.agent}`,
+      );
 
       await updateSession(this.db, session.id, {
         pid: handle.pid ?? null,

@@ -8,6 +8,7 @@ import type { SendToSessionFn } from "./messaging.js";
 import { redactText } from "./redact.js";
 import { nowMs, sleep } from "./util.js";
 import { listRunningSessions, listSessionOffsets, upsertSessionOffset } from "./store.js";
+import type { SessionRow } from "./store.js";
 import { PlaywrightMcpManager } from "./playwrightMcp.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -17,9 +18,9 @@ interface BufferState {
   lastFlushMs: number;
 }
 
-type MessageVerbosity = 1 | 2 | 3;
+export type MessageVerbosity = 1 | 2 | 3;
 
-type StreamFragment =
+export type StreamFragment =
   | { kind: "text"; text: string; continuous?: boolean }
   | { kind: "tool_call"; text: string }
   | { kind: "tool_output"; text: string }
@@ -27,6 +28,8 @@ type StreamFragment =
   | { kind: "final" };
 
 const USER_PRIORITY_BURST_MESSAGES = 5;
+const CLOUD_PROJECT_PREFIX = "cloud:";
+const MAX_DEBUG_EVENT_CHARS = 2000;
 
 export class JsonlStreamer {
   private readonly buffers = new Map<string, BufferState>();
@@ -155,6 +158,7 @@ export class JsonlStreamer {
           if (!trimmed) continue;
           try {
             const obj = JSON.parse(trimmed) as unknown;
+            this.logCloudCodexEvent(session, obj, trimmed);
             void this.maybeCapturePlaywrightScreenshot(session.id, obj as Record<string, unknown>);
 
             const planFragment = this.parsePlanUpdate(obj, session.id);
@@ -572,6 +576,31 @@ export class JsonlStreamer {
     }
   }
 
+  private logCloudCodexEvent(session: SessionRow, obj: unknown, rawLine: string) {
+    if (session.agent !== "codex") return;
+    if (!isCloudProjectId(session.project_id)) return;
+    if (this.config.bot.log_level !== "debug") return;
+    if (!obj || typeof obj !== "object") return;
+
+    const type = stringOrEmpty((obj as { type?: unknown }).type);
+    const payload = (obj as { payload?: unknown }).payload;
+    const payloadType = payload && typeof payload === "object" ? stringOrEmpty((payload as { type?: unknown }).type) : "";
+    const eventTs = eventTimestamp(obj as Record<string, unknown>);
+    const ts = new Date().toISOString();
+    const redacted = redactText(rawLine);
+    const clipped = truncateLogLine(redacted, MAX_DEBUG_EVENT_CHARS);
+
+    const parts = [
+      `ts=${ts}`,
+      `session=${session.id}`,
+      `type=${type || "unknown"}`,
+      payloadType ? `payload=${payloadType}` : null,
+      eventTs !== null ? `event_ts=${eventTs}` : null,
+      clipped ? `raw=${clipped}` : null,
+    ].filter(Boolean);
+    this.logger.debug(`[cloud][codex][event] ${parts.join(" ")}`);
+  }
+
   private parsePlanUpdate(obj: unknown, sessionId: string): StreamFragment | null {
     if (!obj || typeof obj !== "object") return null;
     const type = (obj as { type?: unknown }).type;
@@ -984,6 +1013,15 @@ const EVENT_MAPPERS: Record<
   claude_code: mapClaudeEventToFragments,
 };
 
+export function mapEventToFragments(
+  agent: SessionAgent,
+  obj: unknown,
+  opts?: { includeUserMessages?: boolean; verbosity?: MessageVerbosity },
+): StreamFragment[] {
+  const mapper = EVENT_MAPPERS[agent];
+  return mapper ? mapper(obj, opts) : [];
+}
+
 function extractTitleFromPayload(
   payload: Record<string, unknown>,
 ): { title: string | null; content: string | null } {
@@ -1282,6 +1320,27 @@ function formatCommand(command: unknown): string {
   if (Array.isArray(command)) return command.map((c) => String(c)).join(" ");
   if (typeof command === "string") return command;
   return "";
+}
+
+function isCloudProjectId(value: unknown): boolean {
+  return typeof value === "string" && value.startsWith(CLOUD_PROJECT_PREFIX);
+}
+
+function eventTimestamp(obj: Record<string, unknown>): number | null {
+  const direct = (obj as { timestamp?: unknown }).timestamp;
+  if (typeof direct === "number") return direct;
+  const payload = (obj as { payload?: unknown }).payload;
+  if (payload && typeof payload === "object") {
+    const payloadTs = (payload as { timestamp?: unknown }).timestamp;
+    if (typeof payloadTs === "number") return payloadTs;
+  }
+  return null;
+}
+
+function truncateLogLine(text: string, maxLen: number): string {
+  const limit = Math.max(0, Math.floor(maxLen));
+  if (!text || text.length <= limit) return text;
+  return `${text.slice(0, limit)}...`;
 }
 
 function safeJson(value: unknown): string {

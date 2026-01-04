@@ -64,13 +64,19 @@ export class ModalCloudProvider implements CloudProvider {
   async createWorkspace(opts: { prefix?: string }): Promise<CloudWorkspace> {
     const app = await this.getApp();
     const image = await this.getImage();
-    return await this.createWorkspaceWithImage(app, image);
+    return await this.createWorkspaceWithImage(app, image, {
+      source: "image",
+      label: this.imageId || this.imageTag || "image",
+    });
   }
 
   async createWorkspaceFromSnapshot(snapshotId: string): Promise<CloudWorkspace> {
     const app = await this.getApp();
     const image = await this.client.images.fromId(snapshotId);
-    return await this.createWorkspaceWithImage(app, image);
+    return await this.createWorkspaceWithImage(app, image, {
+      source: "snapshot",
+      label: snapshotId,
+    });
   }
 
   async uploadFiles(workspace: CloudWorkspace, files: CloudUploadFile[]): Promise<void> {
@@ -154,7 +160,11 @@ export class ModalCloudProvider implements CloudProvider {
     return this.image;
   }
 
-  private async createWorkspaceWithImage(app: App, image: Image): Promise<CloudWorkspace> {
+  private async createWorkspaceWithImage(
+    app: App,
+    image: Image,
+    opts?: { source?: string; label?: string },
+  ): Promise<CloudWorkspace> {
     const params: SandboxCreateParams = {
       timeoutMs: this.timeoutMs > 0 ? this.timeoutMs : undefined,
       idleTimeoutMs: this.idleTimeoutMs > 0 ? this.idleTimeoutMs : undefined,
@@ -166,9 +176,19 @@ export class ModalCloudProvider implements CloudProvider {
       params.cidrAllowlist = this.cidrAllowlist;
     }
 
+    const source = opts?.source ?? "image";
+    const label = opts?.label ?? "image";
+    const startTs = new Date().toISOString();
+    const startMs = Date.now();
+    this.logger.info(`[cloud][modal] sandbox create start ts=${startTs} source=${source} label=${label}`);
     const sandbox = await this.client.sandboxes.create(app, image, params);
     const id = sandbox.sandboxId;
     this.sandboxes.set(id, sandbox);
+    const endTs = new Date().toISOString();
+    const durationMs = Date.now() - startMs;
+    this.logger.info(
+      `[cloud][modal] sandbox create done ts=${endTs} source=${source} id=${id} ms=${durationMs}`,
+    );
 
     const root = toPosix(this.workspaceRoot);
     await this.runCommand(sandbox, `mkdir -p ${shellQuote(root)}`, { cwd: "/" });
