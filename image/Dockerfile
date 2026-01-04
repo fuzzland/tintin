@@ -98,26 +98,49 @@ RUN mkdir -p /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml \
 XML
 
 # Create startup script
-RUN echo '#!/bin/bash\n\
-Xvfb :99 -screen 0 ${WIDTH}x${HEIGHT}x24 &\n\
-sleep 1\n\
-export DISPLAY=:99\n\
+RUN echo '#!/usr/bin/env bash\n\
+\n\
+DISPLAY=${DISPLAY:-:99}\n\
+WIDTH=${WIDTH:-1920}\n\
+HEIGHT=${HEIGHT:-1080}\n\
+export DISPLAY\n\
+\n\
+rm -f /tmp/.X99-lock /tmp/.X11-unix/X99\n\
+mkdir -p /tmp/.X11-unix\n\
+\n\
+Xvfb "${DISPLAY}" -screen 0 "${WIDTH}x${HEIGHT}x24" -ac +extension RANDR &\n\
+\n\
+for i in $(seq 1 20); do\n\
+  if xdpyinfo -display "${DISPLAY}" >/dev/null 2>&1; then\n\
+    break\n\
+  fi\n\
+  sleep 0.5\n\
+done\n\
+\n\
+if command -v dbus-launch >/dev/null 2>&1; then\n\
+  eval "$(dbus-launch --sh-syntax)"\n\
+fi\n\
+\n\
 # Start XFCE session\n\
-startxfce4 &\n\
-sleep 5\n\
-# Set theme and appearance\n\
-xfconf-query -c xsettings -p /Net/ThemeName -s "Arc-Dark"\n\
-xfconf-query -c xsettings -p /Net/IconThemeName -s "Papirus-Dark"\n\
-xfconf-query -c xfwm4 -p /general/theme -s "Arc-Dark"\n\
+startxfce4 >/home/ubuntu/xfce.log 2>&1 &\n\
+sleep 2\n\
+\n\
+# Set theme and appearance (best-effort)\n\
+xfconf-query -c xsettings -p /Net/ThemeName -s "Arc-Dark" >/dev/null 2>&1 || true\n\
+xfconf-query -c xsettings -p /Net/IconThemeName -s "Papirus-Dark" >/dev/null 2>&1 || true\n\
+xfconf-query -c xfwm4 -p /general/theme -s "Arc-Dark" >/dev/null 2>&1 || true\n\
+\n\
 # Start Chrome CDP endpoint\n\
 google-chrome \\\n  --no-sandbox \\\n  --disable-setuid-sandbox \\\n  --disable-dev-shm-usage \\\n  --disable-gpu \\\n  --remote-debugging-port=9222 \\\n  --no-first-run \\\n  --no-default-browser-check \\\n  --user-data-dir=/home/ubuntu/.chrome &\n\
+\n\
 # Forward CDP port\n\
 socat TCP-LISTEN:9223,fork,reuseaddr TCP:127.0.0.1:9222 &\n\
+\n\
 # Start Playwright MCP connected to CDP\n\
 PLAYWRIGHT_MCP_PORT=${PLAYWRIGHT_MCP_PORT:-11000}\n\
 CDP_URL=""\n\
 for i in $(seq 1 15); do\n\
-  CDP_URL=$(curl -s http://127.0.0.1:9222/json/version | python3 -c "import sys, json; print(json.load(sys.stdin).get('webSocketDebuggerUrl',''))" 2>/dev/null || true)\n\
+  CDP_URL=$(curl -s http://127.0.0.1:9222/json/version | sed -n "s/.*\\\"webSocketDebuggerUrl\\\":\\\"\\([^\\\"]*\\)\\\".*/\\1/p")\n\
   if [ -n "$CDP_URL" ]; then break; fi\n\
   sleep 1\n\
 done\n\
@@ -127,12 +150,13 @@ else\n\
   npx -y @playwright/mcp@latest --host 127.0.0.1 --port ${PLAYWRIGHT_MCP_PORT} --browser chromium --shared-browser-context &\n\
 fi\n\
 \n\
-x11vnc -display :99 -forever -nopw &\n\
+x11vnc -display "${DISPLAY}" -forever -nopw -shared &\n\
 code-server --auth none --bind-addr 0.0.0.0:8080 &\n\
 ttyd -p 7681 bash &\n\
+\n\
 # Keep container alive\n\
 sleep infinity\n\
-\n' > /home/ubuntu/start.sh \
+' > /home/ubuntu/start.sh \
     && chmod +x /home/ubuntu/start.sh
 
 EXPOSE 8080 7681 9222 9223 11000
