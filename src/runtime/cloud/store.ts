@@ -235,6 +235,7 @@ export async function updateCloudRun(db: Db, runId: string, patch: Partial<{
   diff_patch: string | null;
   started_at: number | null;
   finished_at: number | null;
+  workspace_id: string | null;
 }>) {
   await db
     .updateTable("cloud_runs")

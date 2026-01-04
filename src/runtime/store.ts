@@ -178,6 +178,10 @@ export async function listSessionOffsets(db: Db, sessionId: string) {
   return db.selectFrom("session_stream_offsets").selectAll().where("session_id", "=", sessionId).execute();
 }
 
+export async function deleteSessionOffsets(db: Db, sessionId: string) {
+  await db.deleteFrom("session_stream_offsets").where("session_id", "=", sessionId).execute();
+}
+
 export async function upsertSessionOffset(db: Db, row: SessionStreamOffsetRow) {
   const now = nowMs();
   const res = await db

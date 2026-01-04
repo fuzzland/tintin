@@ -93,6 +93,7 @@ export async function createBotService(deps: BotServiceDeps) {
   const firstMessageSending = new Set<string>();
   const reviewCommitDisabled = new Set<string>();
   const lastTelegramMessageId = new Map<string, number>();
+  const telegramMessageToSession = new Map<string, string>();
   const lastSlackMessage = new Map<string, { ts: string; text: string }>();
   const planTelegramMessageId = new Map<string, number>();
   const planSlackMessageTs = new Map<string, string>();
@@ -172,6 +173,16 @@ export async function createBotService(deps: BotServiceDeps) {
       });
     }
     return elements.length > 0 ? [{ type: "actions", elements }] : undefined;
+  };
+
+  const telegramMessageKey = (chatId: string | number, messageId: number) => `${String(chatId)}:${String(messageId)}`;
+  const trackTelegramMessage = (sessionId: string, chatId: number, messageId: number) => {
+    const prev = lastTelegramMessageId.get(sessionId);
+    if (prev) {
+      telegramMessageToSession.delete(telegramMessageKey(chatId, prev));
+    }
+    lastTelegramMessageId.set(sessionId, messageId);
+    telegramMessageToSession.set(telegramMessageKey(chatId, messageId), sessionId);
   };
 
   const attachReviewAndCommitButtonsToLastMessage = async (sessionId: string, session: { platform: string; chat_id: string }) => {
@@ -353,7 +364,10 @@ export async function createBotService(deps: BotServiceDeps) {
                 forcePrimary: true,
               },
         );
-        if (sent) planTelegramMessageId.set(sessionId, sent.message_id);
+        if (sent) {
+          planTelegramMessageId.set(sessionId, sent.message_id);
+          trackTelegramMessage(sessionId, chatId, sent.message_id);
+        }
       } catch {
         // Ignore plan send failures.
       }
@@ -403,7 +417,7 @@ export async function createBotService(deps: BotServiceDeps) {
           if (Number.isNaN(chatId) || Number.isNaN(space)) return;
           const send = async (opts: { messageThreadId?: number; replyToMessageId?: number }) => {
             try {
-              await telegram.sendPhoto({
+              const sent = await telegram.sendPhoto({
                 chatId,
                 messageThreadId: opts.messageThreadId,
                 replyToMessageId: opts.replyToMessageId,
@@ -413,8 +427,9 @@ export async function createBotService(deps: BotServiceDeps) {
                 caption,
                 priority,
               });
+              trackTelegramMessage(sessionId, chatId, sent.message_id);
             } catch {
-              await telegram.sendDocument({
+              const sent = await telegram.sendDocument({
                 chatId,
                 messageThreadId: opts.messageThreadId,
                 replyToMessageId: opts.replyToMessageId,
@@ -424,6 +439,7 @@ export async function createBotService(deps: BotServiceDeps) {
                 caption,
                 priority,
               });
+              trackTelegramMessage(sessionId, chatId, sent.message_id);
             }
           };
           await send(telegramTopicSession ? { messageThreadId: space } : { replyToMessageId: space });
@@ -483,7 +499,7 @@ export async function createBotService(deps: BotServiceDeps) {
                 ? { chatId, messageThreadId: space, text: fallbackText, replyMarkup, priority, forcePrimary: true }
                 : { chatId, replyToMessageId: space, text: fallbackText, replyMarkup, priority, forcePrimary: true },
             );
-            lastTelegramMessageId.set(sessionId, sent.message_id);
+            trackTelegramMessage(sessionId, chatId, sent.message_id);
             messageSent = true;
           } catch {
             // Ignore fallback failures.
@@ -554,7 +570,7 @@ export async function createBotService(deps: BotServiceDeps) {
           } catch {
             sent = await telegram.sendMessageSingleStrict({ chatId, text, parseMode, replyMarkup, priority, forcePrimary: true });
           }
-          if (sent) lastTelegramMessageId.set(sessionId, sent.message_id);
+          if (sent) trackTelegramMessage(sessionId, chatId, sent.message_id);
           messageSent = true;
           if (isFinal && !actionsDisabled) await attachReviewAndCommitButtonsToLastMessage(sessionId, session);
           return;
@@ -570,7 +586,7 @@ export async function createBotService(deps: BotServiceDeps) {
         } catch {
           sent = await telegram.sendMessage({ chatId, text, replyMarkup, priority, forcePrimary: true });
         }
-        if (sent) lastTelegramMessageId.set(sessionId, sent.message_id);
+        if (sent) trackTelegramMessage(sessionId, chatId, sent.message_id);
         messageSent = true;
         if (isFinal && !actionsDisabled) await attachReviewAndCommitButtonsToLastMessage(sessionId, session);
         return;
@@ -626,6 +642,9 @@ export async function createBotService(deps: BotServiceDeps) {
     sendToSession,
     reviewCommitDisabled,
     cloudManager,
+    telegram
+      ? (chatId, messageId) => telegramMessageToSession.get(telegramMessageKey(chatId, messageId)) ?? null
+      : null,
   );
 
   if (telegram && config.telegram?.mode === "poll") {

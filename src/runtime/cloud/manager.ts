@@ -23,6 +23,7 @@ import { getAgentAdapter } from "../agents.js";
 import {
   addRunRepo,
   createCloudRun,
+  deleteSessionOffsets,
   getCloudRunBySession,
   getLatestSetupSpec,
   listSecrets,
@@ -1121,6 +1122,175 @@ export class CloudManager {
     });
 
     return "resumed";
+  }
+
+  async restartCloudSession(session: SessionRow, prompt: string): Promise<"restarted" | "not_cloud"> {
+    if (this.provider.id !== "modal") return "not_cloud";
+    const run = await getCloudRunBySession(this.db, session.id);
+    if (!run || run.provider !== "modal") return "not_cloud";
+
+    const runRepos = await this.db
+      .selectFrom("cloud_run_repos")
+      .selectAll()
+      .where("run_id", "=", run.id)
+      .execute();
+    if (runRepos.length === 0) {
+      throw new Error(`Cloud run ${run.id} has no repos`);
+    }
+
+    const workspace = await this.provider.createWorkspace({ prefix: "cloud" });
+    this.logger.info(`[cloud] workspace recreated id=${workspace.id} run=${run.id} session=${session.id}`);
+    if (this.provider.id === "modal") {
+      await this.injectModalSecretsBashrc(run.identity_id, workspace).catch((e) => {
+        this.logger.warn(`[cloud][modal] failed to inject secrets into .bashrc: ${String(e)}`);
+      });
+    }
+
+    try {
+      const primaryRepoId = run.primary_repo_id ?? runRepos[0]!.repo_id;
+      const repoMounts = runRepos
+        .map((r) => ({
+          repoId: r.repo_id,
+          mountPath: r.mount_path,
+          absPath: this.joinWorkspacePath(workspace.rootPath, r.mount_path),
+        }))
+        .sort((a, b) => {
+          if (a.repoId === primaryRepoId && b.repoId !== primaryRepoId) return -1;
+          if (b.repoId === primaryRepoId && a.repoId !== primaryRepoId) return 1;
+          return a.mountPath.localeCompare(b.mountPath);
+        });
+
+      for (const mount of repoMounts) {
+        const repo = await this.db.selectFrom("repos").selectAll().where("id", "=", mount.repoId).executeTakeFirstOrThrow();
+        const conn = await this.db
+          .selectFrom("connections")
+          .selectAll()
+          .where("id", "=", repo.connection_id)
+          .executeTakeFirstOrThrow();
+        let cloneToken = conn.access_token;
+        let cloneUser: string | undefined;
+        if (conn.type === "github" && this.config.cloud?.github_app) {
+          const token = await ensureGithubAppToken({ db: this.db, config: this.config.cloud.github_app, connection: conn });
+          cloneToken = token.token;
+          cloneUser = "x-access-token";
+        }
+        const clone = buildCloneUrl(repo.url, cloneToken, cloneUser ? { username: cloneUser } : undefined);
+        this.logger.info(`[cloud] clone repo=${repo.name} url=${clone.redacted}`);
+        const parentDir = path.dirname(mount.absPath);
+        await this.provider.runCommands({
+          workspace,
+          cwd: workspace.rootPath,
+          commands: [`mkdir -p ${shellQuote(parentDir)}`],
+        });
+        await this.provider.runCommands({
+          workspace,
+          cwd: workspace.rootPath,
+          commands: [`git clone --depth 1 ${shellQuote(clone.url)} ${shellQuote(mount.absPath)}`],
+          env: { GIT_TERMINAL_PROMPT: "0" },
+        });
+      }
+
+      let setupSpec = primaryRepoId ? await getLatestSetupSpec(this.db, primaryRepoId) : null;
+      if (!setupSpec) {
+        const specPath = path.join(repoMounts[0]!.absPath, "tintin-setup.yml");
+        const specText = await readFile(specPath, "utf8").catch(() => null);
+        if (specText && primaryRepoId) {
+          const hash = hashSetupSpec(specText);
+          await putSetupSpec(this.db, { repoId: primaryRepoId, ymlBlob: specText, hash });
+          setupSpec = {
+            id: "file",
+            repo_id: primaryRepoId,
+            yml_blob: specText,
+            hash,
+            created_at: nowMs(),
+            updated_at: nowMs(),
+          } as any;
+        }
+      }
+
+      let setupSnapshotId: string | null = null;
+      if (setupSpec) {
+        const spec = parseSetupSpec(setupSpec.yml_blob);
+        const secrets = await this.loadSecretsMap(run.identity_id);
+        const envVars: Record<string, string> = {};
+        for (const entry of spec.env ?? []) {
+          if (!entry.value) continue;
+          envVars[entry.name] = interpolateSecrets(entry.value, (name) => secrets.get(name) ?? null);
+        }
+
+        if (spec.files && spec.files.length > 0) {
+          const files = spec.files
+            .filter((f) => f.content !== undefined)
+            .map((f) => ({ path: f.path, content: f.content ?? "", mode: f.mode }));
+          if (files.length > 0) await this.provider.uploadFiles(workspace, files);
+        }
+
+        const mainRepoPath = repoMounts[0]!.absPath;
+        if (spec.commands && spec.commands.length > 0) {
+          this.logger.info(`[cloud] applying setup spec commands count=${spec.commands.length}`);
+          await this.provider.runCommands({ workspace, cwd: mainRepoPath, commands: spec.commands, env: envVars });
+        }
+        setupSnapshotId = await this.provider.snapshotWorkspace(workspace, "setup");
+      }
+
+      const mainRepoPath = repoMounts[0]!.absPath;
+      await updateSession(this.db, session.id, {
+        status: "starting",
+        exit_code: null,
+        finished_at: null,
+        pid: null,
+        codex_session_id: null,
+        started_at: null,
+        project_path_resolved: mainRepoPath,
+        codex_cwd: mainRepoPath,
+      });
+      await deleteSessionOffsets(this.db, session.id);
+
+      const envOverrides = this.applyProxyEnv(await this.buildAgentEnv(run.identity_id), run.identity_id, session.agent);
+      const { handle, agentSessionId, logSyncers, debug } = await this.spawnRemoteAgent({
+        sessionId: session.id,
+        prompt,
+        cwd: mainRepoPath,
+        agent: session.agent,
+        workspace,
+        envOverrides,
+      });
+
+      await updateSession(this.db, session.id, {
+        pid: handle.pid ?? null,
+        status: "running",
+        started_at: nowMs(),
+        codex_session_id: agentSessionId,
+      });
+      await updateCloudRun(this.db, run.id, {
+        status: "running",
+        workspace_id: workspace.id,
+        started_at: nowMs(),
+        finished_at: null,
+        diff_patch: null,
+        diff_summary: null,
+        snapshot_id: setupSnapshotId ?? run.snapshot_id ?? null,
+        session_id: session.id,
+      });
+
+      void this.monitorRemoteSession({
+        sessionId: session.id,
+        handle,
+        logSyncers,
+        workspace,
+        debug,
+      });
+
+      return "restarted";
+    } catch (e) {
+      this.logger.warn(`[cloud] failed to restart session=${session.id}: ${String(e)}`);
+      await updateSession(this.db, session.id, { status: "error", finished_at: nowMs(), pid: null });
+      await updateCloudRun(this.db, run.id, { status: "error", finished_at: nowMs() });
+      if (this.provider.id !== "local") {
+        await this.provider.terminateWorkspace(workspace).catch(() => {});
+      }
+      throw e;
+    }
   }
 
   async handleSessionFinished(sessionId: string, status: SessionStatus): Promise<void> {

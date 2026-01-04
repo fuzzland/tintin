@@ -76,6 +76,7 @@ export class BotController {
     private readonly sendToSession: SendToSessionFn,
     private readonly reviewCommitDisabled: Set<string>,
     private readonly cloudManager: CloudManager | null,
+    private readonly lookupTelegramSessionByReply: ((chatId: string, messageId: number) => string | null) | null,
   ) {}
 
   private markReviewCommitDisabled(sessionId: string) {
@@ -443,6 +444,39 @@ export class BotController {
     }
     if (spaceIds.length > 0) {
       this.logger.debug(`[tg] no session for space=${spaceIds.join(",")} chat=${chatId} user=${userId}`);
+    }
+
+    if (this.lookupTelegramSessionByReply && message.reply_to_message?.message_id) {
+      const replyId = message.reply_to_message.message_id;
+      const mappedSessionId = this.lookupTelegramSessionByReply(chatId, replyId);
+      if (mappedSessionId) {
+        const session = await this.db
+          .selectFrom("sessions")
+          .selectAll()
+          .where("id", "=", mappedSessionId)
+          .executeTakeFirst();
+        if (session && session.platform === "telegram" && session.chat_id === chatId) {
+          const access = await this.telegramAccessDecision(chatId, userId);
+          if (!access.allowed) {
+            this.logger.warn(
+              `[tg] rejected reply session chat=${chatId} user=${userId} session=${session.id} reason=${access.reason ?? "-"}`,
+            );
+            await this.telegram.sendMessage({
+              chatId,
+              messageThreadId: forumThreadId,
+              replyToMessageId: message.message_id,
+              text: "Not authorized.",
+              priority: "user",
+            });
+            return;
+          }
+          this.logger.debug(`[tg] reply mapped to session id=${session.id} status=${session.status} reply_to=${replyId}`);
+          await updateSession(this.db, session.id, { last_user_message_at: nowMs() });
+          await this.handleSessionMessage(session, userId, text);
+          return;
+        }
+        this.logger.debug(`[tg] reply mapped to missing session id=${mappedSessionId} reply_to=${replyId}`);
+      }
     }
 
     if (cloudEnabled && text.startsWith("/")) {
@@ -2235,7 +2269,15 @@ export class BotController {
       const resumed = await this.cloudManager.resumeCloudSession(session, text);
       if (resumed === "resumed") return;
       if (resumed === "expired") {
-        await this.sendToSession(session.id, { text: "expired, please run again", priority: "user" });
+        await this.sendToSession(session.id, { text: "Sandbox expired. Starting a new session…", priority: "user" });
+        try {
+          const restarted = await this.cloudManager.restartCloudSession(session, text);
+          if (restarted === "restarted") return;
+        } catch (e) {
+          await this.sendToSession(session.id, { text: `Failed to restart session: ${String(e)}`, priority: "user" });
+          return;
+        }
+        await this.sendToSession(session.id, { text: "Sandbox expired. Please start a new session.", priority: "user" });
         return;
       }
     }
