@@ -108,14 +108,19 @@ RUN cat <<'SCRIPT' > /home/ubuntu/start.sh
 DISPLAY=${DISPLAY:-:99}
 WIDTH=${WIDTH:-1920}
 HEIGHT=${HEIGHT:-1080}
+case "$WIDTH" in (''|*[!0-9]*) WIDTH=1920;; esac
+case "$HEIGHT" in (''|*[!0-9]*) HEIGHT=1080;; esac
 export DISPLAY
 
 rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
 
-Xvfb "${DISPLAY}" -screen 0 "${WIDTH}x${HEIGHT}x24" -ac +extension RANDR &
+echo "Starting Xvfb on ${DISPLAY} (${WIDTH}x${HEIGHT}x24)" >&2
+Xvfb "${DISPLAY}" -screen 0 "${WIDTH:-1920}x${HEIGHT:-1080}x24" -ac +extension RANDR &
 
+XVFB_READY=0
 for i in $(seq 1 20); do
   if xdpyinfo -display "${DISPLAY}" >/dev/null 2>&1; then
+    XVFB_READY=1
     break
   fi
   sleep 0.5
@@ -125,25 +130,34 @@ if command -v dbus-launch >/dev/null 2>&1; then
   eval "$(dbus-launch --sh-syntax)"
 fi
 
-# Start XFCE session
-startxfce4 >/home/ubuntu/xfce.log 2>&1 &
-sleep 2
+if [ "$XVFB_READY" -eq 1 ]; then
+  # Start XFCE session
+  startxfce4 >/home/ubuntu/xfce.log 2>&1 &
+  sleep 2
 
-# Set theme and appearance (best-effort)
-xfconf-query -c xsettings -p /Net/ThemeName -s "Arc-Dark" >/dev/null 2>&1 || true
-xfconf-query -c xsettings -p /Net/IconThemeName -s "Papirus-Dark" >/dev/null 2>&1 || true
-xfconf-query -c xfwm4 -p /general/theme -s "Arc-Dark" >/dev/null 2>&1 || true
+  # Set theme and appearance (best-effort)
+  xfconf-query -c xsettings -p /Net/ThemeName -s "Arc-Dark" >/dev/null 2>&1 || true
+  xfconf-query -c xsettings -p /Net/IconThemeName -s "Papirus-Dark" >/dev/null 2>&1 || true
+  xfconf-query -c xfwm4 -p /general/theme -s "Arc-Dark" >/dev/null 2>&1 || true
+else
+  echo "Xvfb failed to start; continuing in headless mode." >&2
+fi
 
 # Start Chrome CDP endpoint
-google-chrome \
-  --no-sandbox \
-  --disable-setuid-sandbox \
-  --disable-dev-shm-usage \
-  --disable-gpu \
-  --remote-debugging-port=9222 \
-  --no-first-run \
-  --no-default-browser-check \
-  --user-data-dir=/home/ubuntu/.chrome &
+CHROME_ARGS=(
+  --no-sandbox
+  --disable-setuid-sandbox
+  --disable-dev-shm-usage
+  --disable-gpu
+  --remote-debugging-port=9222
+  --no-first-run
+  --no-default-browser-check
+  --user-data-dir=/home/ubuntu/.chrome
+)
+if [ "$XVFB_READY" -ne 1 ]; then
+  CHROME_ARGS+=(--headless=new)
+fi
+google-chrome "${CHROME_ARGS[@]}" &
 
 # Forward CDP port
 socat TCP-LISTEN:9223,fork,reuseaddr TCP:127.0.0.1:9222 &
@@ -162,7 +176,9 @@ else
   npx -y @playwright/mcp@latest --host 127.0.0.1 --port ${PLAYWRIGHT_MCP_PORT} --browser chromium --shared-browser-context &
 fi
 
-x11vnc -display "${DISPLAY}" -forever -nopw -shared &
+if [ "$XVFB_READY" -eq 1 ]; then
+  x11vnc -display "${DISPLAY}" -forever -nopw -shared &
+fi
 code-server --auth none --bind-addr 0.0.0.0:8080 &
 ttyd -p 7681 bash &
 
