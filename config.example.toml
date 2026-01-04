@@ -154,7 +154,7 @@ s3_signed_url_ttl_ms = 300000
 
 [playwright_mcp]
 enabled = true
-provider = "local" # "local" | "browserbase"
+provider = "local" # "local" | "browserbase" | "hyperbrowser"
 package = "@playwright/mcp@latest"
 browser = "chrome"
 host = "127.0.0.1"
@@ -180,3 +180,8 @@ extension_id = ""
 context_id = ""
 # browser_settings = { timeout = 600 }
 # user_metadata = { tintin_env = "prod" }
+
+[playwright_mcp.hyperbrowser]
+api_key = "env:HYPERBROWSER_API_KEY"
+api_base_url = "https://api.hyperbrowser.ai"
+# session_params = { ... } # raw Hyperbrowser session payload

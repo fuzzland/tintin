@@ -81,6 +81,7 @@ Tintin can run the [Playwright MCP](./references/playwright-mcp/README.md) sidec
 - A single shared profile (`user_data_dir`) is used across sessions; set `executable_path` if Chrome is not on PATH.
 - Codex / Claude Code sessions are automatically pointed at the running Playwright MCP server; every Playwright MCP tool call triggers a screenshot saved under the configured `output_dir` and posted to the chat.
 - For cloud runs on Modal, you can set `playwright_mcp.provider = "browserbase"` and configure `[playwright_mcp.browserbase]` to create per-session Browserbase CDP connections.
+- Hyperbrowser is also supported via `playwright_mcp.provider = "hyperbrowser"` with `[playwright_mcp.hyperbrowser]`.
 
 ## Chat flows
 

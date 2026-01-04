@@ -167,7 +167,7 @@ export interface SlackSection {
 
 export type PlaywrightSnapshotMode = "incremental" | "full" | "none";
 export type PlaywrightImageResponseMode = "allow" | "omit";
-export type PlaywrightMcpProvider = "local" | "browserbase";
+export type PlaywrightMcpProvider = "local" | "browserbase" | "hyperbrowser";
 export type BrowserbaseProxies = boolean | Record<string, unknown> | Array<Record<string, unknown>>;
 
 export interface PlaywrightMcpBrowserbaseSection {
@@ -183,10 +183,17 @@ export interface PlaywrightMcpBrowserbaseSection {
   user_metadata?: Record<string, unknown> | null;
 }
 
+export interface PlaywrightMcpHyperbrowserSection {
+  api_key: string;
+  api_base_url?: string;
+  session_params?: Record<string, unknown> | null;
+}
+
 export interface PlaywrightMcpSection {
   enabled: boolean;
   provider: PlaywrightMcpProvider;
   browserbase?: PlaywrightMcpBrowserbaseSection | null;
+  hyperbrowser?: PlaywrightMcpHyperbrowserSection | null;
   package: string;
   browser: string;
   host: string;
@@ -306,6 +313,7 @@ function normalizePlaywrightImageResponse(value: unknown): PlaywrightImageRespon
 function normalizePlaywrightMcpProvider(value: unknown): PlaywrightMcpProvider {
   const raw = typeof value === "string" ? value.trim().toLowerCase() : "";
   if (raw === "browserbase") return "browserbase";
+  if (raw === "hyperbrowser") return "hyperbrowser";
   return "local";
 }
 
@@ -353,6 +361,27 @@ function normalizeBrowserbaseSection(value: unknown): PlaywrightMcpBrowserbaseSe
   };
 }
 
+function normalizeHyperbrowserSection(value: unknown): PlaywrightMcpHyperbrowserSection | null {
+  if (value === undefined) return null;
+  if (!isRecord(value)) throw new Error("[playwright_mcp.hyperbrowser] must be a table");
+
+  const apiKey = typeof value.api_key === "string" ? value.api_key.trim() : "";
+  const apiBaseUrl =
+    typeof value.api_base_url === "string" && value.api_base_url.trim().length > 0
+      ? value.api_base_url.trim()
+      : "https://api.hyperbrowser.ai";
+  if ((value as any).session_params !== undefined && !isRecord((value as any).session_params)) {
+    throw new Error("[playwright_mcp.hyperbrowser.session_params] must be a table");
+  }
+  const sessionParams = isRecord((value as any).session_params) ? ((value as any).session_params as Record<string, unknown>) : null;
+
+  return {
+    api_key: apiKey,
+    api_base_url: apiBaseUrl,
+    session_params: sessionParams,
+  };
+}
+
 function normalizePlaywrightMcpSection(
   value: unknown,
   opts: { configDir: string; dataDir: string },
@@ -363,6 +392,7 @@ function normalizePlaywrightMcpSection(
   const enabled = typeof value.enabled === "boolean" ? value.enabled : true;
   const provider = normalizePlaywrightMcpProvider((value as any).provider);
   const browserbase = normalizeBrowserbaseSection((value as any).browserbase);
+  const hyperbrowser = normalizeHyperbrowserSection((value as any).hyperbrowser);
   const pkg =
     typeof value.package === "string" && value.package.trim().length > 0 ? value.package.trim() : "@playwright/mcp@latest";
   const browser = typeof value.browser === "string" && value.browser.trim().length > 0 ? value.browser.trim() : "chrome";
@@ -415,6 +445,7 @@ function normalizePlaywrightMcpSection(
     enabled,
     provider,
     browserbase,
+    hyperbrowser,
     package: pkg,
     browser,
     host,

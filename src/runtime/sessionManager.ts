@@ -121,6 +121,7 @@ export class SessionManager {
       project_path_resolved: opts.projectPathResolved,
       codex_session_id: null,
       browserbase_session_id: null,
+      hyperbrowser_session_id: null,
       codex_cwd: opts.projectPathResolved,
       status: "starting",
       pid: null,

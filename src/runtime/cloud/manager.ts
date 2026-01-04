@@ -1,6 +1,6 @@
 import path from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import type { AppConfig, PlaywrightMcpBrowserbaseSection, PlaywrightMcpSection } from "../config.js";
+import type { AppConfig, PlaywrightMcpBrowserbaseSection, PlaywrightMcpHyperbrowserSection, PlaywrightMcpSection } from "../config.js";
 import type { Db, SessionAgent, SessionStatus } from "../db.js";
 import type { Logger } from "../log.js";
 import type { SessionManager } from "../sessionManager.js";
@@ -14,6 +14,7 @@ import { LocalCloudProvider } from "./localProvider.js";
 import type { CloudProvider, CloudWorkspace } from "./provider.js";
 import { ModalCloudProvider } from "./modalProvider.js";
 import { createBrowserbaseSession, releaseBrowserbaseSession } from "./browserbase.js";
+import { createHyperbrowserSession, stopHyperbrowserSession } from "./hyperbrowser.js";
 import { hashSetupSpec, parseSetupSpec } from "./setupSpec.js";
 import { decryptSecret, interpolateSecrets } from "./secrets.js";
 import { buildCloneUrl } from "./git.js";
@@ -78,6 +79,11 @@ type BrowserbaseSessionState = {
   port: number;
 };
 
+type HyperbrowserSessionState = {
+  hyperbrowserSessionId: string;
+  port: number;
+};
+
 export class CloudManager {
   private readonly provider: CloudProvider;
   private sessionManager: SessionManager | null;
@@ -85,6 +91,7 @@ export class CloudManager {
   private readonly agentTokens = new Map<string, { token: string; exp: number }>();
   private readonly agentLogPaths = new Map<string, string>();
   private readonly browserbaseSessions = new Map<string, BrowserbaseSessionState>();
+  private readonly hyperbrowserSessions = new Map<string, HyperbrowserSessionState>();
 
   constructor(
     private readonly config: AppConfig,
@@ -761,6 +768,11 @@ export class CloudManager {
     return this.provider.id === "modal" && Boolean(cfg?.enabled && cfg.provider === "browserbase");
   }
 
+  private isHyperbrowserEnabled(): boolean {
+    const cfg = this.config.playwright_mcp;
+    return this.provider.id === "modal" && Boolean(cfg?.enabled && cfg.provider === "hyperbrowser");
+  }
+
   private requireBrowserbaseConfig(): { mcp: PlaywrightMcpSection; browserbase: PlaywrightMcpBrowserbaseSection } {
     const mcp = this.config.playwright_mcp;
     if (!mcp || !mcp.enabled) throw new Error("Playwright MCP is not enabled.");
@@ -773,14 +785,26 @@ export class CloudManager {
     return { mcp, browserbase };
   }
 
-  private pickBrowserbasePort(cfg: PlaywrightMcpSection): number {
+  private requireHyperbrowserConfig(): { mcp: PlaywrightMcpSection; hyperbrowser: PlaywrightMcpHyperbrowserSection } {
+    const mcp = this.config.playwright_mcp;
+    if (!mcp || !mcp.enabled) throw new Error("Playwright MCP is not enabled.");
+    if (mcp.provider !== "hyperbrowser") throw new Error("Playwright MCP provider is not hyperbrowser.");
+    const hyperbrowser = mcp.hyperbrowser;
+    if (!hyperbrowser) throw new Error("Missing [playwright_mcp.hyperbrowser] configuration.");
+    if (!hyperbrowser.api_key) {
+      throw new Error("Hyperbrowser config missing api_key.");
+    }
+    return { mcp, hyperbrowser };
+  }
+
+  private pickRemoteMcpPort(cfg: PlaywrightMcpSection): number {
     const preferred = cfg.port_start;
     if (preferred === 11000) {
       if (cfg.port_end >= 11001) {
-        this.logger.warn("[cloud][browserbase] port_start=11000 conflicts with the Modal image default; using port=11001");
+        this.logger.warn("[cloud][playwright] port_start=11000 conflicts with the Modal image default; using port=11001");
         return 11001;
       }
-      this.logger.warn("[cloud][browserbase] port_start=11000 may conflict with the Modal image default (11000).");
+      this.logger.warn("[cloud][playwright] port_start=11000 may conflict with the Modal image default (11000).");
     }
     return preferred;
   }
@@ -883,6 +907,82 @@ export class CloudManager {
     return lines;
   }
 
+  private buildHyperbrowserBootstrapLines(opts: {
+    sessionId: string;
+    wsEndpoint: string;
+    port: number;
+    startupTimeoutSec: number;
+    config: PlaywrightMcpSection;
+  }): string[] {
+    const cfg = opts.config;
+    const args = [
+      "-y",
+      cfg.package,
+      "--host",
+      "127.0.0.1",
+      "--port",
+      String(opts.port),
+      "--browser",
+      "chromium",
+      "--cdp-endpoint",
+      opts.wsEndpoint,
+      "--shared-browser-context",
+      "--snapshot-mode",
+      cfg.snapshot_mode,
+      "--image-responses",
+      cfg.image_responses,
+      "--timeout-navigation",
+      String(Math.max(1_000, Math.min(cfg.timeout_ms, 60_000))),
+    ];
+    if (cfg.user_agent) args.push("--user-agent", cfg.user_agent);
+    if (cfg.viewport_size) args.push("--viewport-size", cfg.viewport_size);
+    const cmd = ["npx", ...args].map(shellQuote).join(" ");
+
+    const logPath = `/tmp/tintin-playwright-mcp-${opts.sessionId}.log`;
+    const pidPath = `/tmp/tintin-playwright-mcp-${opts.sessionId}.pid`;
+    const lines: string[] = [];
+    lines.push(`PLAYWRIGHT_MCP_LOG=${shellQuote(logPath)}`);
+    lines.push(`PLAYWRIGHT_MCP_PIDFILE=${shellQuote(pidPath)}`);
+    lines.push(`PLAYWRIGHT_MCP_PORT=${shellQuote(String(opts.port))}`);
+    lines.push(`PLAYWRIGHT_MCP_STARTUP_SEC=${shellQuote(String(Math.max(1, opts.startupTimeoutSec)))}`);
+    lines.push("export PLAYWRIGHT_MCP_PORT");
+    lines.push("export PLAYWRIGHT_MCP_STARTUP_SEC");
+    lines.push(`${cmd} > "$PLAYWRIGHT_MCP_LOG" 2>&1 &`);
+    lines.push('PLAYWRIGHT_MCP_PID="$!"');
+    lines.push('echo "$PLAYWRIGHT_MCP_PID" > "$PLAYWRIGHT_MCP_PIDFILE"');
+    lines.push("PLAYWRIGHT_MCP_READY=0");
+    lines.push('for i in $(seq 1 "$PLAYWRIGHT_MCP_STARTUP_SEC"); do');
+    lines.push("if python3 - <<'PY'; then");
+    lines.push("import os, socket, sys");
+    lines.push("host = '127.0.0.1'");
+    lines.push("port = int(os.environ.get('PLAYWRIGHT_MCP_PORT', '0') or '0')");
+    lines.push("s = socket.socket()");
+    lines.push("s.settimeout(1.0)");
+    lines.push("try:");
+    lines.push("    s.connect((host, port))");
+    lines.push("except Exception:");
+    lines.push("    sys.exit(1)");
+    lines.push("else:");
+    lines.push("    sys.exit(0)");
+    lines.push("finally:");
+    lines.push("    s.close()");
+    lines.push("PY");
+    lines.push("  PLAYWRIGHT_MCP_READY=1");
+    lines.push("  break");
+    lines.push("fi");
+    lines.push('  if ! kill -0 "$PLAYWRIGHT_MCP_PID" >/dev/null 2>&1; then');
+    lines.push("    break");
+    lines.push("  fi");
+    lines.push("  sleep 1");
+    lines.push("done");
+    lines.push('if [ "$PLAYWRIGHT_MCP_READY" -ne 1 ]; then');
+    lines.push('  echo "Playwright MCP failed to start" >&2');
+    lines.push('  tail -n 200 "$PLAYWRIGHT_MCP_LOG" >&2 || true');
+    lines.push("  exit 1");
+    lines.push("fi");
+    return lines;
+  }
+
   private async prepareBrowserbaseSession(opts: {
     sessionId: string;
     runId?: string | null;
@@ -906,7 +1006,7 @@ export class CloudManager {
       });
       created = await createBrowserbaseSession({ config: browserbase, userMetadata: metadata });
 
-      const port = this.pickBrowserbasePort(mcp);
+      const port = this.pickRemoteMcpPort(mcp);
       const startupTimeoutSec = Math.ceil(mcp.timeout_ms / 1000);
       const bootstrapLines = this.buildBrowserbaseBootstrapLines({
         sessionId: opts.sessionId,
@@ -946,6 +1046,59 @@ export class CloudManager {
     }
   }
 
+  private async prepareHyperbrowserSession(opts: {
+    sessionId: string;
+    runId?: string | null;
+    agent: SessionAgent;
+    projectId: string;
+    projectPath: string;
+  }): Promise<RemotePlaywrightSetup> {
+    const { mcp, hyperbrowser } = this.requireHyperbrowserConfig();
+    if (this.hyperbrowserSessions.has(opts.sessionId)) {
+      await this.releaseHyperbrowserForSession(opts.sessionId, "replaced");
+    }
+
+    let created: { id: string; wsEndpoint: string } | null = null;
+    try {
+      created = await createHyperbrowserSession({ config: hyperbrowser });
+      const port = this.pickRemoteMcpPort(mcp);
+      const startupTimeoutSec = Math.ceil(mcp.timeout_ms / 1000);
+      const bootstrapLines = this.buildHyperbrowserBootstrapLines({
+        sessionId: opts.sessionId,
+        wsEndpoint: created.wsEndpoint,
+        port,
+        startupTimeoutSec,
+        config: mcp,
+      });
+      this.hyperbrowserSessions.set(opts.sessionId, {
+        hyperbrowserSessionId: created.id,
+        port,
+      });
+      await updateSession(this.db, opts.sessionId, { hyperbrowser_session_id: created.id });
+      this.logger.info(
+        `[cloud][hyperbrowser] session created tintin_session=${opts.sessionId} hyperbrowser_session=${created.id} port=${port}`,
+      );
+      const server: PlaywrightServerInfo = {
+        port,
+        url: `http://localhost:${port}/mcp`,
+        userDataDir: "",
+        outputDir: "",
+      };
+      return { server, bootstrapLines, port };
+    } catch (e) {
+      if (created) {
+        try {
+          await stopHyperbrowserSession({ config: hyperbrowser, sessionId: created.id });
+        } catch (releaseErr) {
+          this.logger.warn(
+            `[cloud][hyperbrowser] cleanup failed after create error session=${opts.sessionId} hyperbrowser_session=${created.id}: ${String(releaseErr)}`,
+          );
+        }
+      }
+      throw e;
+    }
+  }
+
   private async releaseBrowserbaseForSession(sessionId: string, reason: string): Promise<void> {
     const entry = this.browserbaseSessions.get(sessionId);
     if (!entry) return;
@@ -972,6 +1125,32 @@ export class CloudManager {
     } catch (e) {
       this.logger.warn(
         `[cloud][browserbase] release failed tintin_session=${sessionId} browserbase_session=${entry.browserbaseSessionId} reason=${reason}: ${String(e)}`,
+      );
+    }
+  }
+
+  private async releaseHyperbrowserForSession(sessionId: string, reason: string): Promise<void> {
+    const entry = this.hyperbrowserSessions.get(sessionId);
+    if (!entry) return;
+    this.hyperbrowserSessions.delete(sessionId);
+    const cfg = this.config.playwright_mcp;
+    const hyperbrowser = cfg?.hyperbrowser;
+    if (!cfg || cfg.provider !== "hyperbrowser" || !hyperbrowser) {
+      this.logger.warn(`[cloud][hyperbrowser] release skipped session=${sessionId} reason=${reason} (missing config)`);
+      return;
+    }
+    if (!hyperbrowser.api_key) {
+      this.logger.warn(`[cloud][hyperbrowser] release skipped session=${sessionId} reason=${reason} (missing api_key)`);
+      return;
+    }
+    try {
+      await stopHyperbrowserSession({ config: hyperbrowser, sessionId: entry.hyperbrowserSessionId });
+      this.logger.info(
+        `[cloud][hyperbrowser] session released tintin_session=${sessionId} hyperbrowser_session=${entry.hyperbrowserSessionId} reason=${reason}`,
+      );
+    } catch (e) {
+      this.logger.warn(
+        `[cloud][hyperbrowser] release failed tintin_session=${sessionId} hyperbrowser_session=${entry.hyperbrowserSessionId} reason=${reason}: ${String(e)}`,
       );
     }
   }
@@ -1009,6 +1188,7 @@ export class CloudManager {
       project_path_resolved: opts.projectPath,
       codex_session_id: null,
       browserbase_session_id: null,
+      hyperbrowser_session_id: null,
       codex_cwd: opts.projectPath,
       status: "starting",
       pid: null,
@@ -1031,21 +1211,36 @@ export class CloudManager {
       this.logger.info(
         `[cloud] spawn agent=${opts.agent} session=${sessionId} cwd=${opts.projectPath} env_keys=${Object.keys(envOverrides).length}`,
       );
-      const playwrightSetup = this.isBrowserbaseEnabled()
-        ? await this.time(
-            "browserbase.create",
-            () =>
-              this.prepareBrowserbaseSession({
-                sessionId,
-                runId: opts.runId ?? null,
-                agent: opts.agent,
-                projectId: opts.projectId,
-                projectPath: opts.projectPath,
-              }),
-            `session=${sessionId}`,
-            "debug",
-          )
-        : null;
+      let playwrightSetup: RemotePlaywrightSetup | null = null;
+      if (this.isBrowserbaseEnabled()) {
+        playwrightSetup = await this.time(
+          "browserbase.create",
+          () =>
+            this.prepareBrowserbaseSession({
+              sessionId,
+              runId: opts.runId ?? null,
+              agent: opts.agent,
+              projectId: opts.projectId,
+              projectPath: opts.projectPath,
+            }),
+          `session=${sessionId}`,
+          "debug",
+        );
+      } else if (this.isHyperbrowserEnabled()) {
+        playwrightSetup = await this.time(
+          "hyperbrowser.create",
+          () =>
+            this.prepareHyperbrowserSession({
+              sessionId,
+              runId: opts.runId ?? null,
+              agent: opts.agent,
+              projectId: opts.projectId,
+              projectPath: opts.projectPath,
+            }),
+          `session=${sessionId}`,
+          "debug",
+        );
+      }
       const { handle, agentSessionId, logSyncers, debug } = await this.time(
         "remote.spawnAgent",
         () =>
@@ -1078,6 +1273,7 @@ export class CloudManager {
     } catch (e) {
       this.logger.warn(`[cloud] failed to spawn agent session=${sessionId}: ${String(e)}`);
       await this.releaseBrowserbaseForSession(sessionId, "spawn_failed").catch(() => {});
+      await this.releaseHyperbrowserForSession(sessionId, "spawn_failed").catch(() => {});
       await updateSession(this.db, sessionId, { status: "error", finished_at: nowMs() });
       throw e;
     }
@@ -1793,7 +1989,13 @@ export class CloudManager {
 
     this.clearWorkspaceTermination(run.workspace_id);
 
-    await updateSession(this.db, session.id, { status: "starting", exit_code: null, finished_at: null });
+    await updateSession(this.db, session.id, {
+      status: "starting",
+      exit_code: null,
+      finished_at: null,
+      browserbase_session_id: null,
+      hyperbrowser_session_id: null,
+    });
     await updateCloudRun(this.db, run.id, { status: "running", finished_at: null, diff_patch: null, diff_summary: null });
 
     const workspace = this.workspaceFromId(run.workspace_id);
@@ -1807,21 +2009,36 @@ export class CloudManager {
       run.identity_id,
       session.agent,
     );
-    const playwrightSetup = this.isBrowserbaseEnabled()
-      ? await this.time(
-          "browserbase.create",
-          () =>
-            this.prepareBrowserbaseSession({
-              sessionId: session.id,
-              runId: run.id,
-              agent: session.agent,
-              projectId: session.project_id,
-              projectPath: session.codex_cwd,
-            }),
-          `session=${session.id}`,
-          "debug",
-        )
-      : null;
+    let playwrightSetup: RemotePlaywrightSetup | null = null;
+    if (this.isBrowserbaseEnabled()) {
+      playwrightSetup = await this.time(
+        "browserbase.create",
+        () =>
+          this.prepareBrowserbaseSession({
+            sessionId: session.id,
+            runId: run.id,
+            agent: session.agent,
+            projectId: session.project_id,
+            projectPath: session.codex_cwd,
+          }),
+        `session=${session.id}`,
+        "debug",
+      );
+    } else if (this.isHyperbrowserEnabled()) {
+      playwrightSetup = await this.time(
+        "hyperbrowser.create",
+        () =>
+          this.prepareHyperbrowserSession({
+            sessionId: session.id,
+            runId: run.id,
+            agent: session.agent,
+            projectId: session.project_id,
+            projectPath: session.codex_cwd,
+          }),
+        `session=${session.id}`,
+        "debug",
+      );
+    }
     try {
       const { handle, logSyncers, debug } = await this.time(
         "remote.resume",
@@ -1852,6 +2069,7 @@ export class CloudManager {
       return "resumed";
     } catch (e) {
       await this.releaseBrowserbaseForSession(session.id, "resume_failed").catch(() => {});
+      await this.releaseHyperbrowserForSession(session.id, "resume_failed").catch(() => {});
       throw e;
     }
   }
@@ -2019,6 +2237,8 @@ export class CloudManager {
         finished_at: null,
         pid: null,
         codex_session_id: null,
+        browserbase_session_id: null,
+        hyperbrowser_session_id: null,
         started_at: null,
         project_path_resolved: mainRepoPath,
         codex_cwd: mainRepoPath,
@@ -2035,21 +2255,36 @@ export class CloudManager {
         run.identity_id,
         session.agent,
       );
-      const playwrightSetup = this.isBrowserbaseEnabled()
-        ? await this.time(
-            "browserbase.create",
-            () =>
-              this.prepareBrowserbaseSession({
-                sessionId: session.id,
-                runId: run.id,
-                agent: session.agent,
-                projectId: session.project_id,
-                projectPath: mainRepoPath,
-              }),
-            `session=${session.id}`,
-            "debug",
-          )
-        : null;
+      let playwrightSetup: RemotePlaywrightSetup | null = null;
+      if (this.isBrowserbaseEnabled()) {
+        playwrightSetup = await this.time(
+          "browserbase.create",
+          () =>
+            this.prepareBrowserbaseSession({
+              sessionId: session.id,
+              runId: run.id,
+              agent: session.agent,
+              projectId: session.project_id,
+              projectPath: mainRepoPath,
+            }),
+          `session=${session.id}`,
+          "debug",
+        );
+      } else if (this.isHyperbrowserEnabled()) {
+        playwrightSetup = await this.time(
+          "hyperbrowser.create",
+          () =>
+            this.prepareHyperbrowserSession({
+              sessionId: session.id,
+              runId: run.id,
+              agent: session.agent,
+              projectId: session.project_id,
+              projectPath: mainRepoPath,
+            }),
+          `session=${session.id}`,
+          "debug",
+        );
+      }
       const { handle, agentSessionId, logSyncers, debug } = await this.time(
         "remote.spawnAgent",
         () =>
@@ -2094,6 +2329,7 @@ export class CloudManager {
     } catch (e) {
       this.logger.warn(`[cloud] failed to restart session=${session.id}: ${String(e)}`);
       await this.releaseBrowserbaseForSession(session.id, "restart_failed").catch(() => {});
+      await this.releaseHyperbrowserForSession(session.id, "restart_failed").catch(() => {});
       await updateSession(this.db, session.id, { status: "error", finished_at: nowMs(), pid: null });
       await updateCloudRun(this.db, run.id, { status: "error", finished_at: nowMs() });
       await this.provider.terminateWorkspace(workspace).catch(() => {});
@@ -2124,6 +2360,7 @@ export class CloudManager {
       finished_at: nowMs(),
     });
     await this.releaseBrowserbaseForSession(sessionId, "finished").catch(() => {});
+    await this.releaseHyperbrowserForSession(sessionId, "finished").catch(() => {});
     this.agentLogPaths.delete(sessionId);
     if (this.provider.id !== "local") {
       void this.scheduleWorkspaceTermination(run.workspace_id, run.identity_id);
