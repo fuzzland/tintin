@@ -40,6 +40,7 @@ export class JsonlStreamer {
   private readonly playwrightScreenshotPendingTurn = new Map<string, number>();
   private readonly playwrightScreenshotSendingTurn = new Map<string, number>();
   private readonly playwrightScreenshotSentTurn = new Map<string, number>();
+  private readonly playwrightCloudSessions = new Set<string>();
   private readonly pendingUserPriority = new Map<string, number>();
   private readonly lastUserMessageAtSeen = new Map<string, number | null>();
   private running = false;
@@ -97,6 +98,8 @@ export class JsonlStreamer {
     for (const session of sessions) {
       if (onlySessionIds && !onlySessionIds.includes(session.id)) continue;
       runningSessionIds.add(session.id);
+      if (isCloudProjectId(session.project_id)) this.playwrightCloudSessions.add(session.id);
+      else this.playwrightCloudSessions.delete(session.id);
       this.noteUserActivity(session.id, session.last_user_message_at, session.created_at);
       if (!session.codex_session_id) continue;
       const adapter = getAgentAdapter(session.agent);
@@ -460,6 +463,7 @@ export class JsonlStreamer {
   }
 
   private markPlaywrightPendingScreenshot(sessionId: string, turnKey: number | null) {
+    if (this.playwrightCloudSessions.has(sessionId)) return;
     if (turnKey === null) return;
     if (this.playwrightScreenshotSentTurn.get(sessionId) === turnKey) return;
     this.playwrightScreenshotPendingTurn.set(sessionId, turnKey);
@@ -467,6 +471,7 @@ export class JsonlStreamer {
 
   private async maybeSendPendingPlaywrightScreenshot(sessionId: string): Promise<void> {
     if (!this.playwrightMcp || !this.config.playwright_mcp?.enabled) return;
+    if (this.playwrightCloudSessions.has(sessionId)) return;
     const turnKey = this.currentTurnKey(sessionId);
     if (turnKey === null) return;
     if (this.playwrightScreenshotSentTurn.get(sessionId) === turnKey) return;
@@ -573,6 +578,7 @@ export class JsonlStreamer {
       this.playwrightScreenshotPendingTurn.delete(id);
       this.playwrightScreenshotSendingTurn.delete(id);
       this.playwrightScreenshotSentTurn.delete(id);
+      this.playwrightCloudSessions.delete(id);
     }
   }
 
@@ -765,6 +771,22 @@ function getTextFromContentItems(content: unknown): string {
   return out.join("");
 }
 
+function extractMcpResultText(result: unknown): string {
+  if (!result || typeof result !== "object") return "";
+  const content = (result as { content?: unknown }).content;
+  if (Array.isArray(content)) {
+    const out: string[] = [];
+    for (const item of content) {
+      if (!item || typeof item !== "object") continue;
+      const text = (item as { text?: unknown }).text;
+      if (typeof text === "string") out.push(text);
+    }
+    return out.join("");
+  }
+  const text = (result as { text?: unknown }).text;
+  return typeof text === "string" ? text : "";
+}
+
 function mapCodexEventToFragments(
   obj: unknown,
   opts?: { includeUserMessages?: boolean; verbosity?: MessageVerbosity },
@@ -859,10 +881,78 @@ function mapCodexEventToFragments(
   if (typeof type === "string" && type.startsWith("item.") && (obj as { item?: unknown }).item) {
     const item = (obj as { item: unknown }).item;
     if (!item || typeof item !== "object") return [];
-    const detailsType = (item as { type?: unknown }).type;
+    const detailsType = typeof (item as { type?: unknown }).type === "string" ? (item as { type: string }).type : "";
     if (detailsType === "agent_message") {
       const text = (item as { text?: unknown }).text;
       return typeof text === "string" ? [{ kind: "text", text }] : [];
+    }
+    if (detailsType === "reasoning") {
+      if (!includeReasoning) return [];
+      const text = stringOrEmpty((item as { text?: unknown }).text);
+      if (!text) return [];
+      const { title, content } = extractTitleFromPayload({ type: "agent_reasoning", text });
+      const body = content ?? text;
+      return [{ kind: "text", text: formatTitledText(title ?? "Reasoning", body, { inline: false }) }];
+    }
+    if (detailsType === "command_execution") {
+      if (!includeTools) return [];
+      const cmd = stringOrEmpty((item as { command?: unknown }).command);
+      const status = stringOrEmpty((item as { status?: unknown }).status);
+      const output = stringOrEmpty((item as { aggregated_output?: unknown }).aggregated_output);
+      const exit = numberOrNull((item as { exit_code?: unknown }).exit_code);
+      const isStart = type === "item.started" || status === "in_progress";
+      if (isStart) {
+        return cmd ? [{ kind: "tool_call", text: `$ ${cmd}` }] : [];
+      }
+      if (output) {
+        const suffix = exit !== null ? `\n(exit ${exit})` : "";
+        return [{ kind: "tool_output", text: `${output}${suffix}` }];
+      }
+      if (exit !== null) {
+        return [{ kind: "text", text: `Command completed (exit ${exit})` }];
+      }
+      if (status === "failed") {
+        return [{ kind: "text", text: cmd ? `Command failed: ${cmd}` : "Command failed" }];
+      }
+      return cmd ? [{ kind: "text", text: `Command completed: ${cmd}` }] : [];
+    }
+    if (detailsType === "mcp_tool_call") {
+      if (!includeTools) return [];
+      const server = stringOrEmpty((item as { server?: unknown }).server);
+      const tool = stringOrEmpty((item as { tool?: unknown }).tool);
+      const args = (item as { arguments?: unknown }).arguments;
+      const status = stringOrEmpty((item as { status?: unknown }).status);
+      const label = [server, tool].filter(Boolean).join(".");
+      const argText = args === undefined ? "" : ` ${truncateJson(args, 300)}`;
+      const isStart = type === "item.started" || status === "in_progress";
+      if (isStart) {
+        return [{ kind: "tool_call", text: `${label ? `MCP ${label}` : "MCP tool"}${argText}` }];
+      }
+      const output = extractMcpResultText((item as { result?: unknown }).result);
+      const err = stringOrEmpty((item as { error?: unknown }).error);
+      let body = output || "";
+      if (err) body = body ? `${body}\nError: ${err}` : `Error: ${err}`;
+      if (!body && (item as { result?: unknown }).result !== undefined) {
+        body = truncateJson((item as { result?: unknown }).result, 800);
+      }
+      if (!body) return [{ kind: "text", text: `${label ? `MCP ${label}` : "MCP tool"} completed` }];
+      return [{ kind: "tool_output", text: truncateLogLine(body, 4000) }];
+    }
+    if (detailsType === "file_change") {
+      if (!includeEvents) return [];
+      const changes = Array.isArray((item as { changes?: unknown }).changes) ? (item as { changes: unknown[] }).changes : [];
+      const lines = changes
+        .map((change) => {
+          if (!change || typeof change !== "object") return "";
+          const kindRaw = (change as { kind?: unknown }).kind;
+          const kind = typeof kindRaw === "string" ? kindRaw : "change";
+          const label = kind === "add" ? "Added" : kind === "modify" ? "Modified" : kind === "delete" ? "Deleted" : kind;
+          const p = stringOrEmpty((change as { path?: unknown }).path);
+          return p ? `${label}: ${p}` : label;
+        })
+        .filter(Boolean);
+      const body = lines.length > 0 ? lines.join("\n") : "Files changed";
+      return [{ kind: "text", text: formatTitledText("Files changed", body, { inline: false }) }];
     }
   }
 

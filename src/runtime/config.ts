@@ -167,9 +167,26 @@ export interface SlackSection {
 
 export type PlaywrightSnapshotMode = "incremental" | "full" | "none";
 export type PlaywrightImageResponseMode = "allow" | "omit";
+export type PlaywrightMcpProvider = "local" | "browserbase";
+export type BrowserbaseProxies = boolean | Record<string, unknown> | Array<Record<string, unknown>>;
+
+export interface PlaywrightMcpBrowserbaseSection {
+  api_key: string;
+  project_id: string;
+  region?: string;
+  keep_alive: boolean;
+  timeout_sec?: number;
+  proxies?: BrowserbaseProxies;
+  extension_id?: string | null;
+  context_id?: string | null;
+  browser_settings?: Record<string, unknown> | null;
+  user_metadata?: Record<string, unknown> | null;
+}
 
 export interface PlaywrightMcpSection {
   enabled: boolean;
+  provider: PlaywrightMcpProvider;
+  browserbase?: PlaywrightMcpBrowserbaseSection | null;
   package: string;
   browser: string;
   host: string;
@@ -286,6 +303,56 @@ function normalizePlaywrightImageResponse(value: unknown): PlaywrightImageRespon
   return "allow";
 }
 
+function normalizePlaywrightMcpProvider(value: unknown): PlaywrightMcpProvider {
+  const raw = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (raw === "browserbase") return "browserbase";
+  return "local";
+}
+
+function normalizeBrowserbaseSection(value: unknown): PlaywrightMcpBrowserbaseSection | null {
+  if (value === undefined) return null;
+  if (!isRecord(value)) throw new Error("[playwright_mcp.browserbase] must be a table");
+
+  const apiKey = typeof value.api_key === "string" ? value.api_key.trim() : "";
+  const projectId = typeof value.project_id === "string" ? value.project_id.trim() : "";
+  const region = typeof value.region === "string" ? value.region.trim() : "";
+  const keepAlive = typeof value.keep_alive === "boolean" ? value.keep_alive : false;
+  const timeoutSec =
+    typeof value.timeout_sec === "number" && Number.isFinite(value.timeout_sec) ? Math.max(1, Math.floor(value.timeout_sec)) : undefined;
+
+  let proxies: BrowserbaseProxies | undefined;
+  const proxiesRaw = (value as any).proxies;
+  if (typeof proxiesRaw === "boolean") proxies = proxiesRaw;
+  else if (Array.isArray(proxiesRaw)) proxies = proxiesRaw as BrowserbaseProxies;
+  else if (isRecord(proxiesRaw)) proxies = proxiesRaw as BrowserbaseProxies;
+  else if (proxiesRaw !== undefined) throw new Error("[playwright_mcp.browserbase.proxies] must be a boolean, array, or table");
+
+  const extensionId = typeof value.extension_id === "string" ? value.extension_id.trim() : "";
+  const contextId = typeof value.context_id === "string" ? value.context_id.trim() : "";
+
+  if ((value as any).browser_settings !== undefined && !isRecord((value as any).browser_settings)) {
+    throw new Error("[playwright_mcp.browserbase.browser_settings] must be a table");
+  }
+  if ((value as any).user_metadata !== undefined && !isRecord((value as any).user_metadata)) {
+    throw new Error("[playwright_mcp.browserbase.user_metadata] must be a table");
+  }
+  const browserSettings = isRecord((value as any).browser_settings) ? ((value as any).browser_settings as Record<string, unknown>) : null;
+  const userMetadata = isRecord((value as any).user_metadata) ? ((value as any).user_metadata as Record<string, unknown>) : null;
+
+  return {
+    api_key: apiKey,
+    project_id: projectId,
+    region: region.length > 0 ? region : undefined,
+    keep_alive: keepAlive,
+    timeout_sec: timeoutSec,
+    proxies,
+    extension_id: extensionId.length > 0 ? extensionId : null,
+    context_id: contextId.length > 0 ? contextId : null,
+    browser_settings: browserSettings,
+    user_metadata: userMetadata,
+  };
+}
+
 function normalizePlaywrightMcpSection(
   value: unknown,
   opts: { configDir: string; dataDir: string },
@@ -294,6 +361,8 @@ function normalizePlaywrightMcpSection(
   if (!isRecord(value)) throw new Error("[playwright_mcp] must be a table");
 
   const enabled = typeof value.enabled === "boolean" ? value.enabled : true;
+  const provider = normalizePlaywrightMcpProvider((value as any).provider);
+  const browserbase = normalizeBrowserbaseSection((value as any).browserbase);
   const pkg =
     typeof value.package === "string" && value.package.trim().length > 0 ? value.package.trim() : "@playwright/mcp@latest";
   const browser = typeof value.browser === "string" && value.browser.trim().length > 0 ? value.browser.trim() : "chrome";
@@ -344,6 +413,8 @@ function normalizePlaywrightMcpSection(
 
   return {
     enabled,
+    provider,
+    browserbase,
     package: pkg,
     browser,
     host,

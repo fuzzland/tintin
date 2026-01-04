@@ -120,6 +120,7 @@ export class SessionManager {
       project_id: opts.projectId,
       project_path_resolved: opts.projectPathResolved,
       codex_session_id: null,
+      browserbase_session_id: null,
       codex_cwd: opts.projectPathResolved,
       status: "starting",
       pid: null,

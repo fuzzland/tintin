@@ -154,6 +154,7 @@ s3_signed_url_ttl_ms = 300000
 
 [playwright_mcp]
 enabled = true
+provider = "local" # "local" | "browserbase"
 package = "@playwright/mcp@latest"
 browser = "chrome"
 host = "127.0.0.1"
@@ -166,3 +167,16 @@ user_data_dir = "./data/playwright/profile"
 output_dir = "./data/playwright/artifacts"
 timeout_ms = 20000
 # executable_path = "/path/to/chrome"
+
+# Browserbase provider (cloud)
+[playwright_mcp.browserbase]
+api_key = "env:BROWSERBASE_API_KEY"
+project_id = "env:BROWSERBASE_PROJECT_ID"
+region = "us-west-2"
+keep_alive = false
+timeout_sec = 600
+proxies = true
+extension_id = ""
+context_id = ""
+# browser_settings = { timeout = 600 }
+# user_metadata = { tintin_env = "prod" }

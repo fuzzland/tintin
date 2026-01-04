@@ -1,6 +1,6 @@
 import path from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import type { AppConfig } from "../config.js";
+import type { AppConfig, PlaywrightMcpBrowserbaseSection, PlaywrightMcpSection } from "../config.js";
 import type { Db, SessionAgent, SessionStatus } from "../db.js";
 import type { Logger } from "../log.js";
 import type { SessionManager } from "../sessionManager.js";
@@ -13,6 +13,7 @@ import { resolveClaudeConfigDirFromSessionsRoot, resolveClaudeSessionJsonlPath }
 import { LocalCloudProvider } from "./localProvider.js";
 import type { CloudProvider, CloudWorkspace } from "./provider.js";
 import { ModalCloudProvider } from "./modalProvider.js";
+import { createBrowserbaseSession, releaseBrowserbaseSession } from "./browserbase.js";
 import { hashSetupSpec, parseSetupSpec } from "./setupSpec.js";
 import { decryptSecret, interpolateSecrets } from "./secrets.js";
 import { buildCloneUrl } from "./git.js";
@@ -40,6 +41,10 @@ function shellQuote(value: string): string {
   return JSON.stringify(value);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 type RemoteHandle = {
   wait(): Promise<number>;
   pid: number | null;
@@ -49,12 +54,26 @@ type RemoteDebug = {
   errPath: string;
 };
 
+type RemotePlaywrightSetup = {
+  server: PlaywrightServerInfo;
+  bootstrapLines: string[];
+  port: number;
+};
+
+type BrowserbaseSessionState = {
+  browserbaseSessionId: string;
+  projectId: string;
+  keepAlive: boolean;
+  port: number;
+};
+
 export class CloudManager {
   private readonly provider: CloudProvider;
   private sessionManager: SessionManager | null;
   private readonly workspaceTerminateTimers = new Map<string, NodeJS.Timeout>();
   private readonly agentTokens = new Map<string, { token: string; exp: number }>();
   private readonly agentLogPaths = new Map<string, string>();
+  private readonly browserbaseSessions = new Map<string, BrowserbaseSessionState>();
 
   constructor(
     private readonly config: AppConfig,
@@ -385,7 +404,7 @@ export class CloudManager {
         this.logger.info(`[cloud] starting remote session run=${run.id} workspace=${workspace.id}`);
         sessionId = await this.time(
           "session.startRemote",
-          () =>
+              () =>
             this.startRemoteSession({
               identityId: opts.identityId,
               platform: opts.platform,
@@ -393,6 +412,7 @@ export class CloudManager {
               chatId: opts.chatId,
               spaceId: opts.spaceId,
               userId: opts.userId,
+              runId: run.id,
               projectId,
               projectPath: mainRepoPath,
               prompt: opts.prompt,
@@ -709,20 +729,232 @@ export class CloudManager {
     return args;
   }
 
-  private buildRemotePlaywrightArgs(agent: SessionAgent): string[] {
+  private buildRemotePlaywrightArgs(agent: SessionAgent, serverOverride?: PlaywrightServerInfo): string[] {
     if (this.provider.id === "local") return [];
     const cfg = this.config.playwright_mcp;
     if (!cfg?.enabled) return [];
-    const port = cfg.port_start;
-    const server: PlaywrightServerInfo = {
-      port,
-      url: `http://localhost:${port}/mcp`,
-      userDataDir: "",
-      outputDir: "",
-    };
+    const server: PlaywrightServerInfo =
+      serverOverride ?? {
+        port: cfg.port_start,
+        url: `http://localhost:${cfg.port_start}/mcp`,
+        userDataDir: "",
+        outputDir: "",
+      };
     const startupSec = Math.ceil(cfg.timeout_ms / 1000);
     const adapter = getAgentAdapter(agent);
     return adapter.buildPlaywrightCliArgs({ server, playwrightStartupTimeoutSec: startupSec });
+  }
+
+  private isBrowserbaseEnabled(): boolean {
+    const cfg = this.config.playwright_mcp;
+    return this.provider.id === "modal" && Boolean(cfg?.enabled && cfg.provider === "browserbase");
+  }
+
+  private requireBrowserbaseConfig(): { mcp: PlaywrightMcpSection; browserbase: PlaywrightMcpBrowserbaseSection } {
+    const mcp = this.config.playwright_mcp;
+    if (!mcp || !mcp.enabled) throw new Error("Playwright MCP is not enabled.");
+    if (mcp.provider !== "browserbase") throw new Error("Playwright MCP provider is not browserbase.");
+    const browserbase = mcp.browserbase;
+    if (!browserbase) throw new Error("Missing [playwright_mcp.browserbase] configuration.");
+    if (!browserbase.api_key || !browserbase.project_id) {
+      throw new Error("Browserbase config missing api_key or project_id.");
+    }
+    return { mcp, browserbase };
+  }
+
+  private pickBrowserbasePort(cfg: PlaywrightMcpSection): number {
+    const preferred = cfg.port_start;
+    if (preferred === 11000) {
+      if (cfg.port_end >= 11001) {
+        this.logger.warn("[cloud][browserbase] port_start=11000 conflicts with the Modal image default; using port=11001");
+        return 11001;
+      }
+      this.logger.warn("[cloud][browserbase] port_start=11000 may conflict with the Modal image default (11000).");
+    }
+    return preferred;
+  }
+
+  private buildBrowserbaseUserMetadata(
+    base: Record<string, unknown> | null,
+    extra: Record<string, unknown>,
+  ): Record<string, unknown> | undefined {
+    const cleaned = Object.fromEntries(
+      Object.entries(extra).filter(([, value]) => value !== undefined && value !== null && value !== ""),
+    );
+    if (!base && Object.keys(cleaned).length === 0) return undefined;
+    const merged: Record<string, unknown> = base ? { ...base } : {};
+    const existingTintin = isRecord(merged.tintin) ? { ...(merged.tintin as Record<string, unknown>) } : {};
+    merged.tintin = { ...existingTintin, ...cleaned };
+    return merged;
+  }
+
+  private buildBrowserbaseBootstrapLines(opts: {
+    sessionId: string;
+    connectUrl: string;
+    port: number;
+    startupTimeoutSec: number;
+    config: PlaywrightMcpSection;
+  }): string[] {
+    const cfg = opts.config;
+    const args = [
+      "-y",
+      cfg.package,
+      "--host",
+      "127.0.0.1",
+      "--port",
+      String(opts.port),
+      "--browser",
+      "chromium",
+      "--cdp-endpoint",
+      opts.connectUrl,
+      "--shared-browser-context",
+      "--snapshot-mode",
+      cfg.snapshot_mode,
+      "--image-responses",
+      cfg.image_responses,
+      "--timeout-navigation",
+      String(Math.max(1_000, Math.min(cfg.timeout_ms, 60_000))),
+    ];
+    if (cfg.user_agent) args.push("--user-agent", cfg.user_agent);
+    if (cfg.viewport_size) args.push("--viewport-size", cfg.viewport_size);
+    const cmd = ["npx", ...args].map(shellQuote).join(" ");
+
+    const logPath = `/tmp/tintin-playwright-mcp-${opts.sessionId}.log`;
+    const pidPath = `/tmp/tintin-playwright-mcp-${opts.sessionId}.pid`;
+    const lines: string[] = [];
+    lines.push(`PLAYWRIGHT_MCP_LOG=${shellQuote(logPath)}`);
+    lines.push(`PLAYWRIGHT_MCP_PIDFILE=${shellQuote(pidPath)}`);
+    lines.push(`PLAYWRIGHT_MCP_PORT=${shellQuote(String(opts.port))}`);
+    lines.push(`PLAYWRIGHT_MCP_STARTUP_SEC=${shellQuote(String(Math.max(1, opts.startupTimeoutSec)))}`);
+    lines.push("export PLAYWRIGHT_MCP_PORT");
+    lines.push("export PLAYWRIGHT_MCP_STARTUP_SEC");
+    lines.push(`${cmd} > "$PLAYWRIGHT_MCP_LOG" 2>&1 &`);
+    lines.push('PLAYWRIGHT_MCP_PID="$!"');
+    lines.push('echo "$PLAYWRIGHT_MCP_PID" > "$PLAYWRIGHT_MCP_PIDFILE"');
+    lines.push("PLAYWRIGHT_MCP_READY=0");
+    lines.push('for i in $(seq 1 "$PLAYWRIGHT_MCP_STARTUP_SEC"); do');
+    lines.push("if python3 - <<'PY'; then");
+    lines.push("import os, socket, sys");
+    lines.push("host = '127.0.0.1'");
+    lines.push("port = int(os.environ.get('PLAYWRIGHT_MCP_PORT', '0') or '0')");
+    lines.push("s = socket.socket()");
+    lines.push("s.settimeout(1.0)");
+    lines.push("try:");
+    lines.push("    s.connect((host, port))");
+    lines.push("except Exception:");
+    lines.push("    sys.exit(1)");
+    lines.push("else:");
+    lines.push("    sys.exit(0)");
+    lines.push("finally:");
+    lines.push("    s.close()");
+    lines.push("PY");
+    lines.push("  PLAYWRIGHT_MCP_READY=1");
+    lines.push("  break");
+    lines.push("fi");
+    lines.push('  if ! kill -0 "$PLAYWRIGHT_MCP_PID" >/dev/null 2>&1; then');
+    lines.push("    break");
+    lines.push("  fi");
+    lines.push("  sleep 1");
+    lines.push("done");
+    lines.push('if [ "$PLAYWRIGHT_MCP_READY" -ne 1 ]; then');
+    lines.push('  echo "Playwright MCP failed to start" >&2');
+    lines.push('  tail -n 200 "$PLAYWRIGHT_MCP_LOG" >&2 || true');
+    lines.push("  exit 1");
+    lines.push("fi");
+    return lines;
+  }
+
+  private async prepareBrowserbaseSession(opts: {
+    sessionId: string;
+    runId?: string | null;
+    agent: SessionAgent;
+    projectId: string;
+    projectPath: string;
+  }): Promise<RemotePlaywrightSetup> {
+    const { mcp, browserbase } = this.requireBrowserbaseConfig();
+    if (this.browserbaseSessions.has(opts.sessionId)) {
+      await this.releaseBrowserbaseForSession(opts.sessionId, "replaced");
+    }
+
+    let created: { id: string; connectUrl: string } | null = null;
+    try {
+      const metadata = this.buildBrowserbaseUserMetadata(browserbase.user_metadata ?? null, {
+        session_id: opts.sessionId,
+        run_id: opts.runId ?? undefined,
+        agent: opts.agent,
+        project_id: opts.projectId,
+        project_path: opts.projectPath,
+      });
+      created = await createBrowserbaseSession({ config: browserbase, userMetadata: metadata });
+
+      const port = this.pickBrowserbasePort(mcp);
+      const startupTimeoutSec = Math.ceil(mcp.timeout_ms / 1000);
+      const bootstrapLines = this.buildBrowserbaseBootstrapLines({
+        sessionId: opts.sessionId,
+        connectUrl: created.connectUrl,
+        port,
+        startupTimeoutSec,
+        config: mcp,
+      });
+      this.browserbaseSessions.set(opts.sessionId, {
+        browserbaseSessionId: created.id,
+        projectId: browserbase.project_id,
+        keepAlive: browserbase.keep_alive,
+        port,
+      });
+      await updateSession(this.db, opts.sessionId, { browserbase_session_id: created.id });
+      this.logger.info(
+        `[cloud][browserbase] session created tintin_session=${opts.sessionId} browserbase_session=${created.id} region=${browserbase.region ?? "default"} keepAlive=${browserbase.keep_alive} port=${port}`,
+      );
+      const server: PlaywrightServerInfo = {
+        port,
+        url: `http://localhost:${port}/mcp`,
+        userDataDir: "",
+        outputDir: "",
+      };
+      return { server, bootstrapLines, port };
+    } catch (e) {
+      if (created) {
+        try {
+          await releaseBrowserbaseSession({ config: browserbase, sessionId: created.id });
+        } catch (releaseErr) {
+          this.logger.warn(
+            `[cloud][browserbase] cleanup failed after create error session=${opts.sessionId} browserbase_session=${created.id}: ${String(releaseErr)}`,
+          );
+        }
+      }
+      throw e;
+    }
+  }
+
+  private async releaseBrowserbaseForSession(sessionId: string, reason: string): Promise<void> {
+    const entry = this.browserbaseSessions.get(sessionId);
+    if (!entry) return;
+    this.browserbaseSessions.delete(sessionId);
+    const cfg = this.config.playwright_mcp;
+    const browserbase = cfg?.browserbase;
+    if (!cfg || cfg.provider !== "browserbase" || !browserbase) {
+      this.logger.warn(
+        `[cloud][browserbase] release skipped session=${sessionId} reason=${reason} (missing config)`,
+      );
+      return;
+    }
+    if (!browserbase.api_key || !browserbase.project_id) {
+      this.logger.warn(
+        `[cloud][browserbase] release skipped session=${sessionId} reason=${reason} (missing api_key/project_id)`,
+      );
+      return;
+    }
+    try {
+      await releaseBrowserbaseSession({ config: browserbase, sessionId: entry.browserbaseSessionId });
+      this.logger.info(
+        `[cloud][browserbase] session released tintin_session=${sessionId} browserbase_session=${entry.browserbaseSessionId} reason=${reason}`,
+      );
+    } catch (e) {
+      this.logger.warn(
+        `[cloud][browserbase] release failed tintin_session=${sessionId} browserbase_session=${entry.browserbaseSessionId} reason=${reason}: ${String(e)}`,
+      );
+    }
   }
 
   private async startRemoteSession(opts: {
@@ -732,6 +964,7 @@ export class CloudManager {
     chatId: string;
     spaceId: string;
     userId: string;
+    runId?: string | null;
     projectId: string;
     projectPath: string;
     prompt: string;
@@ -756,6 +989,7 @@ export class CloudManager {
       project_id: opts.projectId,
       project_path_resolved: opts.projectPath,
       codex_session_id: null,
+      browserbase_session_id: null,
       codex_cwd: opts.projectPath,
       status: "starting",
       pid: null,
@@ -778,6 +1012,21 @@ export class CloudManager {
       this.logger.info(
         `[cloud] spawn agent=${opts.agent} session=${sessionId} cwd=${opts.projectPath} env_keys=${Object.keys(envOverrides).length}`,
       );
+      const playwrightSetup = this.isBrowserbaseEnabled()
+        ? await this.time(
+            "browserbase.create",
+            () =>
+              this.prepareBrowserbaseSession({
+                sessionId,
+                runId: opts.runId ?? null,
+                agent: opts.agent,
+                projectId: opts.projectId,
+                projectPath: opts.projectPath,
+              }),
+            `session=${sessionId}`,
+            "debug",
+          )
+        : null;
       const { handle, agentSessionId, logSyncers, debug } = await this.time(
         "remote.spawnAgent",
         () =>
@@ -788,6 +1037,7 @@ export class CloudManager {
             agent: opts.agent,
             workspace: opts.workspace,
             envOverrides,
+            playwright: playwrightSetup,
           }),
         `session=${sessionId} agent=${opts.agent}`,
       );
@@ -808,6 +1058,7 @@ export class CloudManager {
       });
     } catch (e) {
       this.logger.warn(`[cloud] failed to spawn agent session=${sessionId}: ${String(e)}`);
+      await this.releaseBrowserbaseForSession(sessionId, "spawn_failed").catch(() => {});
       await updateSession(this.db, sessionId, { status: "error", finished_at: nowMs() });
       throw e;
     }
@@ -892,6 +1143,7 @@ export class CloudManager {
     configDir?: string | null;
     codexHome?: string | null;
     includeCodexAuth: boolean;
+    extraLines?: string[] | null;
   }): string {
     const lines: string[] = ["set -e"];
     lines.push('BOOTSTRAP_START=$(date +%s)');
@@ -971,6 +1223,10 @@ export class CloudManager {
       lines.push("fi");
     }
 
+    if (opts.extraLines && opts.extraLines.length > 0) {
+      lines.push(...opts.extraLines);
+    }
+
     lines.push('BOOTSTRAP_END=$(date +%s)');
     lines.push('BOOTSTRAP_END_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")');
     lines.push(
@@ -986,6 +1242,7 @@ export class CloudManager {
     agent: SessionAgent;
     workspace: CloudWorkspace;
     envOverrides: Record<string, string>;
+    playwright?: RemotePlaywrightSetup | null;
   }): Promise<{ handle: RemoteHandle; agentSessionId: string; logSyncers: RemoteLogSync[]; debug: RemoteDebug }> {
     const modal = this.getModalProvider();
     const sandbox = modal.getSandbox(opts.workspace.id);
@@ -1003,7 +1260,7 @@ export class CloudManager {
     let cmd = "";
     let env: Record<string, string> = {};
     const mcpEnabled = this.provider.id === "modal" && this.config.playwright_mcp?.enabled;
-    const playwrightArgs = mcpEnabled ? this.buildRemotePlaywrightArgs(opts.agent) : [];
+    const playwrightArgs = mcpEnabled ? this.buildRemotePlaywrightArgs(opts.agent, opts.playwright?.server) : [];
 
     if (opts.agent === "claude_code") {
       if (!this.config.claude_code) throw new Error("Claude Code is not configured.");
@@ -1052,6 +1309,7 @@ export class CloudManager {
       configDir: configDir ? toPosix(configDir) : null,
       codexHome,
       includeCodexAuth: opts.agent === "codex",
+      extraLines: opts.playwright?.bootstrapLines ?? null,
     });
     cmd = `${bootstrap}\n${cmd}`;
     const relayUrl = this.buildAgentRelayUrl(opts.sessionId);
@@ -1231,6 +1489,7 @@ export class CloudManager {
     agent: SessionAgent;
     workspace: CloudWorkspace;
     envOverrides: Record<string, string>;
+    playwright?: RemotePlaywrightSetup | null;
   }): Promise<{ handle: RemoteHandle; logSyncers: RemoteLogSync[]; debug: RemoteDebug }> {
     const modal = this.getModalProvider();
     const sandbox = modal.getSandbox(opts.workspace.id);
@@ -1247,7 +1506,7 @@ export class CloudManager {
     let cmd = "";
     let env: Record<string, string> = {};
     const mcpEnabled = this.provider.id === "modal" && this.config.playwright_mcp?.enabled;
-    const playwrightArgs = mcpEnabled ? this.buildRemotePlaywrightArgs(opts.agent) : [];
+    const playwrightArgs = mcpEnabled ? this.buildRemotePlaywrightArgs(opts.agent, opts.playwright?.server) : [];
 
     if (opts.agent === "claude_code") {
       if (!this.config.claude_code) throw new Error("Claude Code is not configured.");
@@ -1296,6 +1555,7 @@ export class CloudManager {
       configDir: configDir ? toPosix(configDir) : null,
       codexHome,
       includeCodexAuth: opts.agent === "codex",
+      extraLines: opts.playwright?.bootstrapLines ?? null,
     });
     cmd = `${bootstrap}\n${cmd}`;
     const relayUrl = this.buildAgentRelayUrl(opts.sessionId);
@@ -1315,8 +1575,9 @@ export class CloudManager {
       `[cloud] env check openai_key=${openaiKeyLen > 0 ? `len=${openaiKeyLen}` : "missing"} openai_base=${openaiBase || "(none)"} anthropic_key=${anthropicKeyLen > 0 ? `len=${anthropicKeyLen}` : "missing"} anthropic_base=${anthropicBase || "(none)"}`,
     );
     if (mcpEnabled) {
+      const mcpPort = opts.playwright?.port ?? this.config.playwright_mcp!.port_start;
       this.logger.info(
-        `[cloud] playwright mcp enabled (startup_timeout=${this.config.playwright_mcp!.timeout_ms}ms, port=${this.config.playwright_mcp!.port_start})`,
+        `[cloud] playwright mcp enabled (startup_timeout=${this.config.playwright_mcp!.timeout_ms}ms, port=${mcpPort})`,
       );
     }
 
@@ -1527,32 +1788,53 @@ export class CloudManager {
       run.identity_id,
       session.agent,
     );
-    const { handle, logSyncers, debug } = await this.time(
-      "remote.resume",
-      () =>
-        this.spawnRemoteResume({
-          sessionId: session.id,
-          agentSessionId,
-          prompt,
-          cwd: session.codex_cwd,
-          agent: session.agent,
-          workspace,
-          envOverrides,
-        }),
-      `session=${session.id} agent=${session.agent}`,
-    );
+    const playwrightSetup = this.isBrowserbaseEnabled()
+      ? await this.time(
+          "browserbase.create",
+          () =>
+            this.prepareBrowserbaseSession({
+              sessionId: session.id,
+              runId: run.id,
+              agent: session.agent,
+              projectId: session.project_id,
+              projectPath: session.codex_cwd,
+            }),
+          `session=${session.id}`,
+          "debug",
+        )
+      : null;
+    try {
+      const { handle, logSyncers, debug } = await this.time(
+        "remote.resume",
+        () =>
+          this.spawnRemoteResume({
+            sessionId: session.id,
+            agentSessionId,
+            prompt,
+            cwd: session.codex_cwd,
+            agent: session.agent,
+            workspace,
+            envOverrides,
+            playwright: playwrightSetup,
+          }),
+        `session=${session.id} agent=${session.agent}`,
+      );
 
-    await updateSession(this.db, session.id, { pid: handle.pid ?? null, status: "running", started_at: nowMs() });
+      await updateSession(this.db, session.id, { pid: handle.pid ?? null, status: "running", started_at: nowMs() });
 
-    void this.monitorRemoteSession({
-      sessionId: session.id,
-      handle,
-      logSyncers,
-      workspace,
-      debug,
-    });
+      void this.monitorRemoteSession({
+        sessionId: session.id,
+        handle,
+        logSyncers,
+        workspace,
+        debug,
+      });
 
-    return "resumed";
+      return "resumed";
+    } catch (e) {
+      await this.releaseBrowserbaseForSession(session.id, "resume_failed").catch(() => {});
+      throw e;
+    }
   }
 
   async restartCloudSession(session: SessionRow, prompt: string): Promise<"restarted" | "not_cloud"> {
@@ -1734,6 +2016,21 @@ export class CloudManager {
         run.identity_id,
         session.agent,
       );
+      const playwrightSetup = this.isBrowserbaseEnabled()
+        ? await this.time(
+            "browserbase.create",
+            () =>
+              this.prepareBrowserbaseSession({
+                sessionId: session.id,
+                runId: run.id,
+                agent: session.agent,
+                projectId: session.project_id,
+                projectPath: mainRepoPath,
+              }),
+            `session=${session.id}`,
+            "debug",
+          )
+        : null;
       const { handle, agentSessionId, logSyncers, debug } = await this.time(
         "remote.spawnAgent",
         () =>
@@ -1744,6 +2041,7 @@ export class CloudManager {
             agent: session.agent,
             workspace,
             envOverrides,
+            playwright: playwrightSetup,
           }),
         `session=${session.id} agent=${session.agent}`,
       );
@@ -1776,6 +2074,7 @@ export class CloudManager {
       return "restarted";
     } catch (e) {
       this.logger.warn(`[cloud] failed to restart session=${session.id}: ${String(e)}`);
+      await this.releaseBrowserbaseForSession(session.id, "restart_failed").catch(() => {});
       await updateSession(this.db, session.id, { status: "error", finished_at: nowMs(), pid: null });
       await updateCloudRun(this.db, run.id, { status: "error", finished_at: nowMs() });
       await this.provider.terminateWorkspace(workspace).catch(() => {});
@@ -1805,6 +2104,7 @@ export class CloudManager {
       diff_summary: summary,
       finished_at: nowMs(),
     });
+    await this.releaseBrowserbaseForSession(sessionId, "finished").catch(() => {});
     this.agentLogPaths.delete(sessionId);
     if (this.provider.id !== "local") {
       void this.scheduleWorkspaceTermination(run.workspace_id, run.identity_id);

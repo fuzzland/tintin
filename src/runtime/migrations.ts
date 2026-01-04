@@ -9,6 +9,7 @@ import * as cloud0005 from "./migrations/0005_cloud_mode.js";
 import * as cloudKeepalive0006 from "./migrations/0006_cloud_keepalive.js";
 import * as cloudUi0007 from "./migrations/0007_cloud_ui.js";
 import * as setupSpecSnapshot0008 from "./migrations/0008_setup_spec_snapshot.js";
+import * as browserbaseSession0010 from "./migrations/0010_browserbase_session.js";
 
 const provider = {
   async getMigrations() {
@@ -21,6 +22,7 @@ const provider = {
       "0006_cloud_keepalive": cloudKeepalive0006,
       "0007_cloud_ui": cloudUi0007,
       "0008_setup_spec_snapshot": setupSpecSnapshot0008,
+      "0010_browserbase_session": browserbaseSession0010,
     };
   },
 };

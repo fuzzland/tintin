@@ -70,6 +70,7 @@ export interface SessionRow {
   project_id: string;
   project_path_resolved: string;
   codex_session_id: string | null;
+  browserbase_session_id: string | null;
   codex_cwd: string;
   status: SessionStatus;
   pid: number | null;
