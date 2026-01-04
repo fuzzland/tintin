@@ -11,6 +11,7 @@ export interface IdentityRow {
   onboarded_at: number | null;
   keepalive_minutes: number | null;
   message_verbosity: number | null;
+  branch_name_rule: string | null;
   git_user_name: string | null;
   git_user_email: string | null;
   created_at: number;
@@ -45,6 +46,7 @@ export async function getOrCreateIdentity(
     onboarded_at: null,
     keepalive_minutes: null,
     message_verbosity: null,
+    branch_name_rule: null,
     git_user_name: null,
     git_user_email: null,
     created_at: now,
@@ -66,6 +68,14 @@ export async function setIdentityMessageVerbosity(db: Db, identityId: string, ve
   await db
     .updateTable("identities")
     .set({ message_verbosity: verbosity, updated_at: nowMs() })
+    .where("id", "=", identityId)
+    .execute();
+}
+
+export async function setIdentityBranchNameRule(db: Db, identityId: string, rule: string | null): Promise<void> {
+  await db
+    .updateTable("identities")
+    .set({ branch_name_rule: rule, updated_at: nowMs() })
     .where("id", "=", identityId)
     .execute();
 }
@@ -324,6 +334,17 @@ export async function listCloudRunsForRepo(db: Db, repoId: string, limit = 20) {
     .selectFrom("cloud_runs")
     .selectAll()
     .where("primary_repo_id", "=", repoId)
+    .orderBy("created_at", "desc")
+    .limit(limit)
+    .execute();
+}
+
+export async function listCloudRunsForPlayground(db: Db, identityId: string, limit = 20) {
+  return await db
+    .selectFrom("cloud_runs")
+    .selectAll()
+    .where("identity_id", "=", identityId)
+    .where("primary_repo_id", "is", null)
     .orderBy("created_at", "desc")
     .limit(limit)
     .execute();

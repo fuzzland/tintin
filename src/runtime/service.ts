@@ -4,7 +4,7 @@ import type { Logger } from "./log.js";
 import { sleep, TaskQueue } from "./util.js";
 import { TelegramClient } from "./platform/telegram.js";
 import { SlackClient, verifySlackSignature } from "./platform/slack.js";
-import { BotController } from "./controller2.js";
+import { BotController, type CommitProposal, type CommitProposalStore } from "./controller2.js";
 import { CloudManager } from "./cloud/manager.js";
 import { handleOAuthCallback } from "./cloud/oauth.js";
 import { handleGithubAppCallback } from "./cloud/githubApp.js";
@@ -197,6 +197,21 @@ export async function createBotService(deps: BotServiceDeps) {
   const planTelegramMessageId = new Map<string, number>();
   const planSlackMessageTs = new Map<string, string>();
 
+  type PendingCommitProposal = {
+    sessionId: string;
+    platform: "telegram" | "slack";
+    chatId: string;
+    userId: string;
+    spaceId: string;
+    isTelegramTopic: boolean;
+    gitUserName: string | null;
+    gitUserEmail: string | null;
+    buffer: string;
+  };
+
+  const pendingCommitProposals = new Map<string, PendingCommitProposal>();
+  const commitProposals = new Map<string, CommitProposal>();
+
   const telegram = config.telegram ? new TelegramClient(config.telegram, logger) : null;
   const slack = config.slack ? new SlackClient(config.slack, logger) : null;
   const playwrightMcp = config.playwright_mcp?.enabled ? new PlaywrightMcpManager(config.playwright_mcp, logger) : null;
@@ -236,15 +251,28 @@ export async function createBotService(deps: BotServiceDeps) {
     return t.startsWith("```") && t.endsWith("```");
   };
 
-  const buildTelegramInlineKeyboard = (opts: { sessionId: string; includeKill: boolean; includeReview: boolean; includeCommit: boolean }) => {
+  const buildTelegramInlineKeyboard = (opts: {
+    sessionId: string;
+    includeKill: boolean;
+    includeReview: boolean;
+    includeCommit: boolean;
+    includeStopSandbox: boolean;
+  }) => {
     const row: Array<{ text: string; callback_data: string }> = [];
     if (opts.includeKill) row.push({ text: "Stop", callback_data: `kill:${opts.sessionId}` });
+    if (opts.includeStopSandbox) row.push({ text: "Stop Sandbox", callback_data: `stop_sandbox:${opts.sessionId}` });
     if (opts.includeReview) row.push({ text: "Review", callback_data: `review:${opts.sessionId}` });
     if (opts.includeCommit) row.push({ text: "Commit", callback_data: `commit:${opts.sessionId}` });
     return row.length > 0 ? { inline_keyboard: [row] } : undefined;
   };
 
-  const buildSlackButtons = (opts: { sessionId: string; includeKill: boolean; includeReview: boolean; includeCommit: boolean }) => {
+  const buildSlackButtons = (opts: {
+    sessionId: string;
+    includeKill: boolean;
+    includeReview: boolean;
+    includeCommit: boolean;
+    includeStopSandbox: boolean;
+  }) => {
     const elements: any[] = [];
     if (opts.includeKill) {
       elements.push({
@@ -252,6 +280,15 @@ export async function createBotService(deps: BotServiceDeps) {
         text: { type: "plain_text", text: "Stop" },
         style: "danger",
         action_id: "kill_session",
+        value: opts.sessionId,
+      });
+    }
+    if (opts.includeStopSandbox) {
+      elements.push({
+        type: "button",
+        text: { type: "plain_text", text: "Stop Sandbox" },
+        style: "danger",
+        action_id: "stop_sandbox",
         value: opts.sessionId,
       });
     }
@@ -274,6 +311,206 @@ export async function createBotService(deps: BotServiceDeps) {
     return elements.length > 0 ? [{ type: "actions", elements }] : undefined;
   };
 
+  const buildCommitProposalTelegramKeyboard = (proposalId: string) => ({
+    inline_keyboard: [
+      [
+        { text: "Cancel", callback_data: `cpr:${proposalId}:cancel` },
+        { text: "Commit & Push", callback_data: `cpr:${proposalId}:push` },
+      ],
+      [{ text: "Create PR", callback_data: `cpr:${proposalId}:pr` }],
+    ],
+  });
+
+  const buildCommitProposalSlackBlocks = (proposalId: string) => [
+    {
+      type: "actions",
+      elements: [
+        { type: "button", text: { type: "plain_text", text: "Cancel" }, style: "danger", action_id: "commit_cancel", value: proposalId },
+        {
+          type: "button",
+          text: { type: "plain_text", text: "Commit & Push" },
+          action_id: "commit_push",
+          value: proposalId,
+        },
+        { type: "button", text: { type: "plain_text", text: "Create PR" }, action_id: "commit_pr", value: proposalId },
+      ],
+    },
+  ];
+
+  const extractCommitProposalPayload = (
+    raw: string,
+  ): { commitMessage: string; branchName: string; summary: string } | null => {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    let candidate = trimmed;
+    const fence = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+    if (fence && fence[1]) candidate = fence[1].trim();
+    const jsonMatch = candidate.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      const commitMessage = String(parsed.commit_message ?? parsed.commitMessage ?? "").trim();
+      const branchName = String(parsed.branch_name ?? parsed.branchName ?? "").trim();
+      const summary = String(parsed.summary ?? parsed.description ?? "").trim();
+      if (!commitMessage || !branchName) return null;
+      return { commitMessage, branchName, summary };
+    } catch {
+      return null;
+    }
+  };
+
+  const formatCommitProposalText = (proposal: CommitProposal) => {
+    const summary = proposal.summary?.trim();
+    const summaryLine = summary ? summary : "_(no summary provided)_";
+    return [
+      "*Commit proposal*",
+      `*Branch*: \`${proposal.branchName}\``,
+      `*Commit*: \`${proposal.commitMessage}\``,
+      `*Summary*: ${summaryLine}`,
+      "",
+      "Choose an action:",
+    ].join("\n");
+  };
+
+  const sendCommitProposalMessage = async (opts: {
+    pending: PendingCommitProposal;
+    text: string;
+    proposalId: string;
+  }) => {
+    if (opts.pending.platform === "telegram") {
+      if (!telegram) return;
+      const chatId = Number(opts.pending.chatId);
+      const space = Number(opts.pending.spaceId);
+      if (Number.isNaN(chatId)) return;
+      const replyMarkup = buildCommitProposalTelegramKeyboard(opts.proposalId);
+      if (opts.pending.isTelegramTopic && Number.isFinite(space)) {
+        await telegram.sendMessage({
+          chatId,
+          messageThreadId: Number(space),
+          text: opts.text,
+          replyMarkup,
+          priority: "user",
+        });
+        return;
+      }
+      if (Number.isFinite(space)) {
+        await telegram.sendMessage({
+          chatId,
+          replyToMessageId: Number(space),
+          text: opts.text,
+          replyMarkup,
+          priority: "user",
+        });
+        return;
+      }
+      await telegram.sendMessage({ chatId, text: opts.text, replyMarkup, priority: "user" });
+      return;
+    }
+
+    if (opts.pending.platform === "slack") {
+      if (!slack) return;
+      const threadTs = config.slack?.session_mode === "thread" ? opts.pending.spaceId : undefined;
+      await slack.postMessageDetailed({
+        channel: opts.pending.chatId,
+        thread_ts: threadTs,
+        text: opts.text,
+        blocks: buildCommitProposalSlackBlocks(opts.proposalId),
+        blocksOnLastChunk: false,
+      });
+    }
+  };
+
+  const sendCommitProposalNotice = async (pending: PendingCommitProposal, text: string) => {
+    if (pending.platform === "telegram") {
+      if (!telegram) return;
+      const chatId = Number(pending.chatId);
+      const space = Number(pending.spaceId);
+      if (Number.isNaN(chatId)) return;
+      if (pending.isTelegramTopic && Number.isFinite(space)) {
+        await telegram.sendMessage({ chatId, messageThreadId: Number(space), text, priority: "user" });
+        return;
+      }
+      if (Number.isFinite(space)) {
+        await telegram.sendMessage({ chatId, replyToMessageId: Number(space), text, priority: "user" });
+        return;
+      }
+      await telegram.sendMessage({ chatId, text, priority: "user" });
+      return;
+    }
+    if (pending.platform === "slack") {
+      if (!slack) return;
+      const threadTs = config.slack?.session_mode === "thread" ? pending.spaceId : undefined;
+      await slack.postMessageDetailed({
+        channel: pending.chatId,
+        thread_ts: threadTs,
+        text,
+        blocksOnLastChunk: false,
+      });
+    }
+  };
+
+  const sendCommitProposalError = async (pending: PendingCommitProposal, reason: string) => {
+    const text = `*Commit proposal failed.* ${reason}`;
+    await sendCommitProposalNotice(pending, text);
+  };
+
+  const commitProposalStore: CommitProposalStore = {
+    startProposal: (opts) => {
+      pendingCommitProposals.set(opts.sessionId, { ...opts, buffer: "" });
+    },
+    getProposal: (id) => commitProposals.get(id) ?? null,
+    consumeProposal: (id) => {
+      const proposal = commitProposals.get(id) ?? null;
+      if (proposal) commitProposals.delete(id);
+      return proposal;
+    },
+    clearPendingForSession: (sessionId) => {
+      pendingCommitProposals.delete(sessionId);
+    },
+  };
+
+  const maybeHandleCommitProposalMessage = async (sessionId: string, message: { type?: string; text?: string; final?: boolean }) => {
+    const pending = pendingCommitProposals.get(sessionId);
+    if (!pending) return false;
+    if (message.type === "plan_update" || message.type === "image") return true;
+    const text = typeof message.text === "string" ? message.text : "";
+    if (text || message.final) {
+      pending.buffer = pending.buffer ? `${pending.buffer}\n${text}` : text;
+      if (pending.buffer.length > 40_000) {
+        pendingCommitProposals.delete(sessionId);
+        await sendCommitProposalError(pending, "Output too large. Try again.");
+        return true;
+      }
+      const parsed = extractCommitProposalPayload(pending.buffer);
+      if (parsed) {
+        pendingCommitProposals.delete(sessionId);
+        const proposal: CommitProposal = {
+          id: crypto.randomUUID(),
+          sessionId: pending.sessionId,
+          platform: pending.platform,
+          chatId: pending.chatId,
+          userId: pending.userId,
+          commitMessage: parsed.commitMessage,
+          branchName: parsed.branchName,
+          summary: parsed.summary,
+          gitUserName: pending.gitUserName,
+          gitUserEmail: pending.gitUserEmail,
+          createdAt: Date.now(),
+        };
+        commitProposals.set(proposal.id, proposal);
+        const text = formatCommitProposalText(proposal);
+        await sendCommitProposalMessage({ pending, text, proposalId: proposal.id });
+        return true;
+      }
+      if (message.final) {
+        pendingCommitProposals.delete(sessionId);
+        await sendCommitProposalError(pending, "Could not parse a JSON proposal. Try again.");
+        return true;
+      }
+    }
+    return true;
+  };
+
   const telegramMessageKey = (chatId: string | number, messageId: number) => `${String(chatId)}:${String(messageId)}`;
   const trackTelegramMessage = (sessionId: string, chatId: number, messageId: number) => {
     const prev = lastTelegramMessageId.get(sessionId);
@@ -284,7 +521,11 @@ export async function createBotService(deps: BotServiceDeps) {
     telegramMessageToSession.set(telegramMessageKey(chatId, messageId), sessionId);
   };
 
-  const attachReviewAndCommitButtonsToLastMessage = async (sessionId: string, session: { platform: string; chat_id: string }) => {
+  const attachReviewAndCommitButtonsToLastMessage = async (
+    sessionId: string,
+    session: { platform: string; chat_id: string; project_id: string | null },
+  ) => {
+    const includeStopSandbox = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
     if (session.platform === "telegram") {
       if (!telegram) return false;
       const chatId = Number(session.chat_id);
@@ -294,7 +535,13 @@ export async function createBotService(deps: BotServiceDeps) {
         await telegram.editMessageReplyMarkup({
           chatId,
           messageId,
-          replyMarkup: buildTelegramInlineKeyboard({ sessionId, includeKill: false, includeReview: true, includeCommit: true }),
+          replyMarkup: buildTelegramInlineKeyboard({
+            sessionId,
+            includeKill: false,
+            includeReview: true,
+            includeCommit: true,
+            includeStopSandbox,
+          }),
           priority: "user",
         });
         return true;
@@ -313,7 +560,13 @@ export async function createBotService(deps: BotServiceDeps) {
           channel,
           ts: last.ts,
           text: last.text,
-          blocks: buildSlackButtons({ sessionId, includeKill: false, includeReview: true, includeCommit: true }),
+          blocks: buildSlackButtons({
+            sessionId,
+            includeKill: false,
+            includeReview: true,
+            includeCommit: true,
+            includeStopSandbox,
+          }),
         });
         return true;
       } catch {
@@ -499,6 +752,9 @@ export async function createBotService(deps: BotServiceDeps) {
   const sendToSession: SendToSessionFn = async (sessionId, message) => {
     const session = await db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
     if (!session) return;
+    const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
+    const handledCommitProposal = await maybeHandleCommitProposalMessage(sessionId, message);
+    if (handledCommitProposal) return;
     const actionsDisabled = reviewCommitDisabled.has(sessionId);
     const telegramTopicSession = isTelegramTopicSession(session);
     if (message.type === "plan_update") {
@@ -596,7 +852,13 @@ export async function createBotService(deps: BotServiceDeps) {
           if (Number.isNaN(chatId) || Number.isNaN(space)) return;
           const replyMarkup = actionsDisabled
             ? undefined
-            : buildTelegramInlineKeyboard({ sessionId, includeKill: false, includeReview: true, includeCommit: true });
+            : buildTelegramInlineKeyboard({
+                sessionId,
+                includeKill: false,
+                includeReview: true,
+                includeCommit: true,
+                includeStopSandbox: isCloudSession,
+              });
           const priority = "user" as const;
           try {
             const sent = await telegram.sendMessageSingleStrict(
@@ -620,7 +882,13 @@ export async function createBotService(deps: BotServiceDeps) {
               text: fallbackText,
               blocks: actionsDisabled
                 ? undefined
-                : buildSlackButtons({ sessionId, includeKill: false, includeReview: true, includeCommit: true }),
+                : buildSlackButtons({
+                    sessionId,
+                    includeKill: false,
+                    includeReview: true,
+                    includeCommit: true,
+                    includeStopSandbox: isCloudSession,
+                  }),
               blocksOnLastChunk: false,
             });
             if (posted.lastTs && posted.lastText !== null) {
@@ -645,6 +913,7 @@ export async function createBotService(deps: BotServiceDeps) {
           includeKill: includeKillButton,
           includeReview: includeReviewButton,
           includeCommit: includeCommitButton,
+          includeStopSandbox: false,
         });
 
         if (isFencedCodeBlock(text)) {
@@ -706,6 +975,7 @@ export async function createBotService(deps: BotServiceDeps) {
           includeKill: includeKillButton,
           includeReview: includeReviewButton,
           includeCommit: includeCommitButton,
+          includeStopSandbox: false,
         });
         const posted = await slack.postMessageDetailed({ channel, thread_ts: threadTs, text, blocks, blocksOnLastChunk: false });
         if (posted.lastTs && posted.lastText !== null) {
@@ -747,6 +1017,7 @@ export async function createBotService(deps: BotServiceDeps) {
     sendToSession,
     reviewCommitDisabled,
     cloudManager,
+    commitProposalStore,
     telegram
       ? (chatId, messageId) => telegramMessageToSession.get(telegramMessageKey(chatId, messageId)) ?? null
       : null,

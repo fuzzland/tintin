@@ -128,6 +128,38 @@ export async function ensureGithubAppToken(opts: {
   return token;
 }
 
+export async function createGithubPullRequest(opts: {
+  db: Db;
+  config: CloudGithubAppSection;
+  connection: ConnectionsTable;
+  owner: string;
+  repo: string;
+  title: string;
+  head: string;
+  base: string;
+  body?: string | null;
+}): Promise<{ url: string | null; number: number | null }> {
+  const token = await ensureGithubAppToken({ db: opts.db, config: opts.config, connection: opts.connection });
+  const apiBase = opts.config.api_base_url.replace(/\/+$/, "");
+  const payload: Record<string, any> = {
+    title: opts.title,
+    head: opts.head,
+    base: opts.base,
+  };
+  if (opts.body) payload.body = opts.body;
+  const data = await fetchJson(`${apiBase}/repos/${opts.owner}/${opts.repo}/pulls`, {
+    method: "POST",
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${token.token}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  const url = typeof data.html_url === "string" ? data.html_url : typeof data.url === "string" ? data.url : null;
+  const number = typeof data.number === "number" ? data.number : Number.isFinite(Number(data.number)) ? Number(data.number) : null;
+  return { url, number };
+}
+
 export async function startGithubAppFlow(opts: {
   db: Db;
   cloud: CloudSection;

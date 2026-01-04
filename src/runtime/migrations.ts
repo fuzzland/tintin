@@ -12,6 +12,8 @@ import * as setupSpecSnapshot0008 from "./migrations/0008_setup_spec_snapshot.js
 import * as browserbaseSession0010 from "./migrations/0010_browserbase_session.js";
 import * as gitCommitterFix0011 from "./migrations/0011_git_committer_fix.js";
 import * as hyperbrowserSession0012 from "./migrations/0012_hyperbrowser_session.js";
+import * as identityVerbosity0013 from "./migrations/0013_identity_message_verbosity.js";
+import * as identityBranchRule0014 from "./migrations/0014_identity_branch_name_rule.js";
 
 const provider = {
   async getMigrations() {
@@ -27,6 +29,8 @@ const provider = {
       "0010_browserbase_session": browserbaseSession0010,
       "0011_git_committer_fix": gitCommitterFix0011,
       "0012_hyperbrowser_session": hyperbrowserSession0012,
+      "0013_identity_message_verbosity": identityVerbosity0013,
+      "0014_identity_branch_name_rule": identityBranchRule0014,
     };
   },
 };

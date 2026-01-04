@@ -159,7 +159,7 @@ export default function RunDetailPage({ token }: { token: string }) {
                   <div className="repo-path">{repo.mount_path}</div>
                 </div>
               ))}
-              {detail?.repos.length === 0 && <div className="muted">No repos attached.</div>}
+              {detail?.repos.length === 0 && <div className="muted">Playground (no repo).</div>}
             </div>
           </section>
 

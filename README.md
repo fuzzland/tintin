@@ -51,7 +51,7 @@ API access in cloud mode:
 
 Key commands (chat):
 - `connect github|gitlab|local`
-- `repos`, `repo select <id>`, `repo share <id>`
+- `repos`, `repo select <number>` (or `repo select playground`), `repo share <number>`
 - `run <prompt>` / `status <runId>` / `pull <runId>`
 - `secrets set|list|delete`
 

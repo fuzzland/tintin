@@ -50,7 +50,7 @@ export default function RunListPage({ token }: { token: string }) {
             <h3>{run.id}</h3>
             <div className="run-meta">
               <span>Provider: {run.provider}</span>
-              <span>Repo: {run.primary_repo_id ?? "-"}</span>
+              <span>Repo: {run.primary_repo_id ?? "Playground"}</span>
             </div>
             <div className="run-card-footer">Open →</div>
           </Link>

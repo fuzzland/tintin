@@ -32,12 +32,14 @@ import {
   getLatestSetupSpec,
   getOrCreateIdentity,
   getSharedRepo,
+  listCloudRunsForPlayground,
   listCloudRunsForRepo,
   listConnections,
   listReposForIdentity,
   listSecrets,
   listSharedRepos,
   setIdentityActiveRepo,
+  setIdentityBranchNameRule,
   setIdentityGitUserEmail,
   setIdentityGitUserName,
   setIdentityKeepaliveMinutes,
@@ -63,9 +65,57 @@ import { nowMs } from "./util.js";
 
 const REVIEW_PROMPT = "Run codex review";
 const COMMIT_PROMPT = "Stage all current changes and commit them with a clear, meaningful git commit message summarizing the diff.";
+const buildCommitProposalPrompt = (branchRule: string | null): string => {
+  const trimmedRule = (branchRule ?? "").trim();
+  const ruleLine = trimmedRule
+    ? `Branch name rule (user-provided): ${trimmedRule}`
+    : "Branch name rule: (not set). Choose a short, descriptive branch name.";
+  return [
+    "Prepare a git commit proposal for the current repo state.",
+    "Review the working tree and staged changes.",
+    ruleLine,
+    "Respond with a single-line JSON object only (no markdown, no backticks) with keys:",
+    'commit_message, branch_name, summary',
+    "The commit_message should be concise and imperative. The summary should be 1-2 sentences.",
+  ].join("\n");
+};
 const SESSION_LIST_PAGE_SIZE = 20;
+const PLAYGROUND_REPO_ID = "__playground__";
+const PLAYGROUND_LABEL = "Playground (no repo)";
 type TelegramReplyContext = { replyToMessageId: number; messageThreadId?: number; chat: TelegramChat };
 type IdentityRepo = Awaited<ReturnType<typeof listReposForIdentity>>[number];
+
+export type CommitProposalAction = "cancel" | "push" | "pr";
+
+export interface CommitProposal {
+  id: string;
+  sessionId: string;
+  platform: "telegram" | "slack";
+  chatId: string;
+  userId: string;
+  commitMessage: string;
+  branchName: string;
+  summary: string;
+  gitUserName: string | null;
+  gitUserEmail: string | null;
+  createdAt: number;
+}
+
+export interface CommitProposalStore {
+  startProposal: (opts: {
+    sessionId: string;
+    platform: "telegram" | "slack";
+    chatId: string;
+    userId: string;
+    spaceId: string;
+    isTelegramTopic: boolean;
+    gitUserName: string | null;
+    gitUserEmail: string | null;
+  }) => void;
+  getProposal: (id: string) => CommitProposal | null;
+  consumeProposal: (id: string) => CommitProposal | null;
+  clearPendingForSession: (sessionId: string) => void;
+}
 
 export class BotController {
   private readonly lastRepoListByIdentity = new Map<string, string[]>();
@@ -80,6 +130,7 @@ export class BotController {
     private readonly sendToSession: SendToSessionFn,
     private readonly reviewCommitDisabled: Set<string>,
     private readonly cloudManager: CloudManager | null,
+    private readonly commitProposalStore: CommitProposalStore | null,
     private readonly lookupTelegramSessionByReply: ((chatId: string, messageId: number) => string | null) | null,
   ) {}
 
@@ -591,6 +642,30 @@ export class BotController {
     return id;
   }
 
+  private isTelegramTopicSession(session: { platform: string; space_emoji: string | null }): boolean {
+    return session.platform === "telegram" && typeof session.space_emoji === "string" && session.space_emoji.trim().length > 0;
+  }
+
+  private async sendSessionMessageMarkdown(session: SessionRow, text: string) {
+    if (session.platform === "telegram") {
+      if (!this.telegram) return;
+      const chatId = Number(session.chat_id);
+      const space = Number(session.space_id);
+      if (Number.isNaN(chatId) || Number.isNaN(space)) return;
+      await this.telegram.sendMessage(
+        this.isTelegramTopicSession(session)
+          ? { chatId, messageThreadId: space, text, priority: "user" }
+          : { chatId, replyToMessageId: space, text, priority: "user" },
+      );
+      return;
+    }
+    if (session.platform === "slack") {
+      if (!this.slack) return;
+      const threadTs = this.config.slack?.session_mode === "thread" ? session.space_id : undefined;
+      await this.slack.postMessageDetailed({ channel: session.chat_id, thread_ts: threadTs, text, blocksOnLastChunk: false });
+    }
+  }
+
   private async sendCloudMessage(opts: {
     platform: "telegram" | "slack";
     chatId: string;
@@ -624,6 +699,76 @@ export class BotController {
       thread_ts: opts.slackThreadTs,
       text: opts.text,
     });
+  }
+
+  private async handleCommitProposalAction(opts: {
+    proposal: CommitProposal;
+    session: SessionRow;
+    action: CommitProposalAction;
+  }): Promise<void> {
+    if (!this.commitProposalStore) return;
+    const isCloudSession = typeof opts.session.project_id === "string" && opts.session.project_id.startsWith("cloud:");
+    if (!this.cloudManager || !isCloudSession) {
+      await this.sendSessionMessageMarkdown(opts.session, "*Cloud commit not available for this session.*");
+      return;
+    }
+
+    this.commitProposalStore.consumeProposal(opts.proposal.id);
+
+    if (opts.action === "cancel") {
+      await this.sendSessionMessageMarkdown(opts.session, "*Commit proposal canceled.*");
+      return;
+    }
+
+    await this.sendSessionMessageMarkdown(opts.session, "*Committing and pushing…*");
+    try {
+      await this.cloudManager.commitAndPushRun({
+        sessionId: opts.session.id,
+        commitMessage: opts.proposal.commitMessage,
+        branchName: opts.proposal.branchName,
+        gitUserName: opts.proposal.gitUserName,
+        gitUserEmail: opts.proposal.gitUserEmail,
+      });
+    } catch (e) {
+      await this.sendSessionMessageMarkdown(
+        opts.session,
+        `*Commit failed:* ${redactText(e instanceof Error ? e.message : String(e))}`,
+      );
+      return;
+    }
+
+    if (opts.action === "push") {
+      const lines = [
+        "*Commit pushed.*",
+        `- Branch: \`${opts.proposal.branchName}\``,
+        `- Commit: \`${opts.proposal.commitMessage}\``,
+      ];
+      await this.sendSessionMessageMarkdown(opts.session, lines.join("\n"));
+      return;
+    }
+
+    try {
+      const pr = await this.cloudManager.createPullRequestForRun({
+        sessionId: opts.session.id,
+        branchName: opts.proposal.branchName,
+        title: opts.proposal.commitMessage,
+        body: opts.proposal.summary ? `Summary:\n${opts.proposal.summary}` : undefined,
+      });
+      const lines = [
+        "*Pull request created.*",
+        `- Branch: \`${opts.proposal.branchName}\``,
+        `- Base: \`${pr.base}\``,
+        pr.url ? `- PR: [View PR](${pr.url})` : "- PR created.",
+      ];
+      await this.sendSessionMessageMarkdown(opts.session, lines.join("\n"));
+    } catch (e) {
+      const lines = [
+        "*Commit pushed, but PR creation failed.*",
+        `- Branch: \`${opts.proposal.branchName}\``,
+        `- Error: ${redactText(e instanceof Error ? e.message : String(e))}`,
+      ];
+      await this.sendSessionMessageMarkdown(opts.session, lines.join("\n"));
+    }
   }
 
   private async sendCloudHelp(opts: {
@@ -904,14 +1049,16 @@ export class BotController {
           const needle = cmd.search.toLowerCase();
           repos = repos.filter((r) => r.name.toLowerCase().includes(needle));
         }
-        if (repos.length === 0) {
-          await reply("No repos found.");
-          return true;
-        }
+        const playgroundLine = "0. `Playground` (no repo)";
         this.lastRepoListByIdentity.set(identity.id, repos.map((r) => r.id));
         const title = "*Repos*";
-        const selectHint = `Select with ${formatCmd("repo select <number>")}.`;
-        const lines = [title, ...repos.map((r, i) => `${i + 1}. \`${r.name}\``), "", selectHint];
+        const selectHint = `Select with ${formatCmd("repo select <number>")} or ${formatCmd("repo select playground")}.`;
+        if (repos.length === 0) {
+          const lines = [title, playgroundLine, "", selectHint];
+          await reply(lines.join("\n"));
+          return true;
+        }
+        const lines = [title, playgroundLine, ...repos.map((r, i) => `${i + 1}. \`${r.name}\``), "", selectHint];
         await reply(lines.join("\n"));
         return true;
       }
@@ -919,6 +1066,11 @@ export class BotController {
         const repos = await listReposForIdentity(this.db, identity.id);
         const cmd = opts.command as Extract<CloudCommand, { kind: "repo_select" }>;
         const target = cmd.target.trim();
+        if (isPlaygroundTarget(target)) {
+          await setIdentityActiveRepo(this.db, identity.id, PLAYGROUND_REPO_ID);
+          await reply(`Active repo set to ${PLAYGROUND_LABEL}.`);
+          return true;
+        }
         const repo = this.resolveRepoTarget(identity.id, repos, target);
         if (!repo) {
           await reply(`Repo not found. Use ${formatCmd("repos")} to list.`);
@@ -929,8 +1081,12 @@ export class BotController {
         return true;
       }
       case "repo_current": {
+        if (isPlaygroundRepoId(identity.active_repo_id)) {
+          await reply(`Active repo: ${PLAYGROUND_LABEL}.`);
+          return true;
+        }
         if (!identity.active_repo_id) {
-          await reply(`No active repo. Use ${formatCmd("repo select <number>")}.`);
+          await reply(`No active repo. Use ${formatCmd("repo select <number>")} or ${formatCmd("repo select playground")}.`);
           return true;
         }
         const repos = await listReposForIdentity(this.db, identity.id);
@@ -1004,8 +1160,18 @@ export class BotController {
         return true;
       }
       case "actions_list": {
+        if (isPlaygroundRepoId(identity.active_repo_id)) {
+          const runs = await listCloudRunsForPlayground(this.db, identity.id, 10);
+          if (runs.length === 0) {
+            await reply("No runs yet.");
+            return true;
+          }
+          const lines = runs.map((r) => `- ${r.id} (${r.status})`);
+          await reply(lines.join("\n"));
+          return true;
+        }
         if (!identity.active_repo_id) {
-          await reply(`No active repo. Use ${formatCmd("repo select <number>")}.`);
+          await reply(`No active repo. Use ${formatCmd("repo select <number>")} or ${formatCmd("repo select playground")}.`);
           return true;
         }
         const runs = await listCloudRunsForRepo(this.db, identity.active_repo_id, 10);
@@ -1044,28 +1210,37 @@ export class BotController {
       case "action_run": {
         const cmd = opts.command as Extract<CloudCommand, { kind: "action_run" }>;
         let repoIds = cmd.repoIds;
+        let playground = false;
         if (repoIds.length === 0) {
-          if (!identity.active_repo_id) {
-            await reply(`No active repo. Use ${formatCmd("repo select <number>")} or pass --repos.`);
-            return true;
-          }
-          repoIds = [identity.active_repo_id];
-        }
-        const repos = await listReposForIdentity(this.db, identity.id);
-        const repoIdSet = new Set(repos.map((r) => r.id));
-        for (const id of repoIds) {
-          if (!repoIdSet.has(id)) {
-            await reply(`Repo not found or not accessible: ${id}`);
-            return true;
-          }
-        }
-        if (!opts.isDirect) {
-          const shared = await listSharedRepos(this.db, { platform: opts.platform, workspaceId: opts.workspaceId, chatId: opts.chatId });
-          const sharedIds = new Set(shared.map((s) => s.repo_id));
-          for (const id of repoIds) {
-            if (!sharedIds.has(id)) {
-              await reply(`Repo not shared in this chat: ${id}`);
+          if (isPlaygroundRepoId(identity.active_repo_id)) {
+            playground = true;
+          } else {
+            if (!identity.active_repo_id) {
+              await reply(
+                `No active repo. Use ${formatCmd("repo select <number>")} or ${formatCmd("repo select playground")}, or pass --repos.`,
+              );
               return true;
+            }
+            repoIds = [identity.active_repo_id];
+          }
+        }
+        if (!playground) {
+          const repos = await listReposForIdentity(this.db, identity.id);
+          const repoIdSet = new Set(repos.map((r) => r.id));
+          for (const id of repoIds) {
+            if (!repoIdSet.has(id)) {
+              await reply(`Repo not found or not accessible: ${id}`);
+              return true;
+            }
+          }
+          if (!opts.isDirect) {
+            const shared = await listSharedRepos(this.db, { platform: opts.platform, workspaceId: opts.workspaceId, chatId: opts.chatId });
+            const sharedIds = new Set(shared.map((s) => s.repo_id));
+            for (const id of repoIds) {
+              if (!sharedIds.has(id)) {
+                await reply(`Repo not shared in this chat: ${id}`);
+                return true;
+              }
             }
           }
         }
@@ -1090,6 +1265,7 @@ export class BotController {
             prompt,
             repoIds,
             agent,
+            playground,
           });
           const link = this.buildCloudUiLink(result.runId, identity.id, opts.isDirect);
           await reply(link ? `Started run ${result.runId}.\nView: ${link}` : `Started run ${result.runId}.`, false);
@@ -1099,6 +1275,10 @@ export class BotController {
         return true;
       }
       case "setup_status": {
+        if (isPlaygroundRepoId(identity.active_repo_id)) {
+          await reply("Playground has no repo. Select a repo to manage setup specs.");
+          return true;
+        }
         if (!identity.active_repo_id) {
           await reply("No active repo.");
           return true;
@@ -1112,6 +1292,10 @@ export class BotController {
         return true;
       }
       case "setup_lift": {
+        if (isPlaygroundRepoId(identity.active_repo_id)) {
+          await reply("Playground has no repo. Select a repo to run setup lift.");
+          return true;
+        }
         if (!identity.active_repo_id) {
           await reply("No active repo.");
           return true;
@@ -1423,6 +1607,43 @@ export class BotController {
         await this.disableReviewCommitButtonsTelegram({ chatId, messageId, text: messageText });
       }
 
+      const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
+      if (isCloudSession && this.cloudManager && this.commitProposalStore) {
+        const identity = await getOrCreateIdentity(this.db, {
+          platform: session.platform,
+          workspaceId: session.workspace_id ?? null,
+          userId: session.created_by_user_id,
+        });
+        this.commitProposalStore.startProposal({
+          sessionId,
+          platform: "telegram",
+          chatId,
+          userId,
+          spaceId: session.space_id,
+          isTelegramTopic: this.isTelegramTopicSession(session),
+          gitUserName: identity.git_user_name,
+          gitUserEmail: identity.git_user_email,
+        });
+        await this.telegram.answerCallbackQuery(cb.id, "Preparing commit proposal…");
+        try {
+          await this.handleSessionMessage(session as SessionRow, userId, buildCommitProposalPrompt(identity.branch_name_rule));
+        } catch (e) {
+          this.logger.warn(
+            `[tg] commit proposal failed chat=${chatId} user=${userId} session=${sessionId}: ${String(e)}`,
+          );
+          try {
+            await this.telegram.sendMessage({
+              chatId,
+              messageThreadId: this.telegramForumThreadIdFromMessage(cb.message),
+              replyToMessageId: cb.message?.message_id,
+              text: `Error: ${redactText(e instanceof Error ? e.message : String(e))}`,
+              priority: "user",
+            });
+          } catch {}
+        }
+        return;
+      }
+
       await this.telegram.answerCallbackQuery(cb.id, "Committing changes…");
       try {
         await this.handleSessionMessage(session as SessionRow, userId, COMMIT_PROMPT);
@@ -1440,6 +1661,89 @@ export class BotController {
           });
         } catch {}
       }
+      return;
+    }
+
+    if (data.startsWith("stop_sandbox:")) {
+      const sessionId = data.slice("stop_sandbox:".length);
+      const chat = cb.message?.chat;
+      const chatId = chat ? String(chat.id) : null;
+      const userId = chat && chat.type === "channel" ? String(chat.id) : String(cb.from.id);
+      if (!chatId || !sessionId) {
+        await this.telegram.answerCallbackQuery(cb.id, "Session not found.");
+        return;
+      }
+      const access = await this.telegramAccessDecision(chatId, userId);
+      if (!access.allowed) {
+        this.logger.warn(
+          `[tg] rejected stop sandbox callback chat=${chatId} user=${userId} session=${sessionId} reason=${access.reason ?? "-"}`,
+        );
+        await this.telegram.answerCallbackQuery(cb.id, "Not authorized.");
+        return;
+      }
+      const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
+      if (!session || session.platform !== "telegram" || session.chat_id !== chatId) {
+        await this.telegram.answerCallbackQuery(cb.id, "Session not found.");
+        return;
+      }
+      const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
+      if (!this.cloudManager || !isCloudSession) {
+        await this.telegram.answerCallbackQuery(cb.id, "Sandbox stop not available.");
+        return;
+      }
+      await this.telegram.answerCallbackQuery(cb.id, "Stopping sandbox…");
+      try {
+        await this.cloudManager.stopSandboxForSession(sessionId);
+        await this.sendSessionMessageMarkdown(session as SessionRow, "*Sandbox stopped.*");
+      } catch (e) {
+        this.logger.warn(`[tg] stop sandbox failed chat=${chatId} user=${userId} session=${sessionId}: ${String(e)}`);
+        await this.sendSessionMessageMarkdown(
+          session as SessionRow,
+          `*Sandbox stop failed:* ${redactText(e instanceof Error ? e.message : String(e))}`,
+        );
+      }
+      return;
+    }
+
+    if (data.startsWith("cpr:")) {
+      const rest = data.slice("cpr:".length);
+      const [proposalId, actionRaw] = rest.split(":");
+      const action = (actionRaw ?? "").trim() as CommitProposalAction;
+      const chat = cb.message?.chat;
+      const chatId = chat ? String(chat.id) : null;
+      const userId = chat && chat.type === "channel" ? String(chat.id) : String(cb.from.id);
+      if (!chatId || !proposalId) {
+        await this.telegram.answerCallbackQuery(cb.id, "Commit proposal not found.");
+        return;
+      }
+      const access = await this.telegramAccessDecision(chatId, userId);
+      if (!access.allowed) {
+        this.logger.warn(
+          `[tg] rejected commit proposal callback chat=${chatId} user=${userId} proposal=${proposalId} reason=${access.reason ?? "-"}`,
+        );
+        await this.telegram.answerCallbackQuery(cb.id, "Not authorized.");
+        return;
+      }
+      if (action !== "cancel" && action !== "push" && action !== "pr") {
+        await this.telegram.answerCallbackQuery(cb.id, "Unsupported action.");
+        return;
+      }
+      const proposal = this.commitProposalStore?.getProposal(proposalId) ?? null;
+      if (!proposal) {
+        await this.telegram.answerCallbackQuery(cb.id, "Commit proposal expired.");
+        return;
+      }
+      if (proposal.platform !== "telegram" || proposal.chatId !== chatId || proposal.userId !== userId) {
+        await this.telegram.answerCallbackQuery(cb.id, "Not authorized.");
+        return;
+      }
+      const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", proposal.sessionId).executeTakeFirst();
+      if (!session || session.platform !== "telegram" || session.chat_id !== chatId) {
+        await this.telegram.answerCallbackQuery(cb.id, "Session not found.");
+        return;
+      }
+      await this.telegram.answerCallbackQuery(cb.id, "Processing…");
+      await this.handleCommitProposalAction({ proposal, session: session as SessionRow, action });
       return;
     }
 
@@ -2107,6 +2411,48 @@ export class BotController {
       return;
     }
 
+    if (action.action_id === "stop_sandbox") {
+      const sessionId = typeof action.value === "string" ? action.value : null;
+      const channelId = payload.channel?.id as string | undefined;
+      const userId = payload.user?.id as string | undefined;
+      const teamId = payload.team?.id as string | undefined;
+      if (!sessionId || !channelId || !userId) return;
+
+      const access = this.slackAccessDecision(teamId ?? null, channelId, userId);
+      if (!access.allowed) {
+        this.logger.warn(
+          `[slack] rejected stop sandbox action channel=${channelId} user=${userId} session=${sessionId} reason=${access.reason ?? "-"}`,
+        );
+        return;
+      }
+
+      const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
+      if (!session || session.platform !== "slack" || session.chat_id !== channelId) {
+        await this.slack.postEphemeral({ channel: channelId, user: userId, text: "Session not found." });
+        return;
+      }
+      const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
+      if (!this.cloudManager || !isCloudSession) {
+        await this.slack.postEphemeral({ channel: channelId, user: userId, text: "Sandbox stop not available." });
+        return;
+      }
+
+      await this.slack.postEphemeral({ channel: channelId, user: userId, text: "Stopping sandbox…" });
+      try {
+        await this.cloudManager.stopSandboxForSession(sessionId);
+        await this.sendSessionMessageMarkdown(session as SessionRow, "*Sandbox stopped.*");
+      } catch (e) {
+        this.logger.warn(
+          `[slack] stop sandbox action failed channel=${channelId} user=${userId} session=${sessionId}: ${String(e)}`,
+        );
+        await this.sendSessionMessageMarkdown(
+          session as SessionRow,
+          `*Sandbox stop failed:* ${redactText(e instanceof Error ? e.message : String(e))}`,
+        );
+      }
+      return;
+    }
+
     if (action.action_id === "review_session") {
       const sessionId = typeof action.value === "string" ? action.value : null;
       const channelId = payload.channel?.id as string | undefined;
@@ -2178,6 +2524,45 @@ export class BotController {
       if (ts) await this.disableReviewCommitButtonsSlack({ channelId, ts, text: messageText });
 
       const threadTs = this.config.slack?.session_mode === "thread" ? session.space_id : undefined;
+      const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
+      if (isCloudSession && this.cloudManager && this.commitProposalStore) {
+        const identity = await getOrCreateIdentity(this.db, {
+          platform: session.platform,
+          workspaceId: session.workspace_id ?? null,
+          userId: session.created_by_user_id,
+        });
+        this.commitProposalStore.startProposal({
+          sessionId,
+          platform: "slack",
+          chatId: channelId,
+          userId,
+          spaceId: session.space_id,
+          isTelegramTopic: false,
+          gitUserName: identity.git_user_name,
+          gitUserEmail: identity.git_user_email,
+        });
+        await this.slack.postEphemeral({
+          channel: channelId,
+          user: userId,
+          thread_ts: threadTs,
+          text: "Preparing commit proposal…",
+        });
+        try {
+          await this.handleSessionMessage(session as SessionRow, userId, buildCommitProposalPrompt(identity.branch_name_rule));
+        } catch (e) {
+          this.logger.warn(
+            `[slack] commit proposal failed channel=${channelId} user=${userId} session=${sessionId}: ${String(e)}`,
+          );
+          await this.slack.postEphemeral({
+            channel: channelId,
+            user: userId,
+            thread_ts: threadTs,
+            text: `Error: ${String(e)}`,
+          });
+        }
+        return;
+      }
+
       await this.slack.postEphemeral({
         channel: channelId,
         user: userId,
@@ -2197,6 +2582,41 @@ export class BotController {
           text: `Error: ${String(e)}`,
         });
       }
+      return;
+    }
+
+    if (action.action_id === "commit_cancel" || action.action_id === "commit_push" || action.action_id === "commit_pr") {
+      const proposalId = typeof action.value === "string" ? action.value : null;
+      const channelId = payload.channel?.id as string | undefined;
+      const userId = payload.user?.id as string | undefined;
+      const teamId = payload.team?.id as string | undefined;
+      if (!proposalId || !channelId || !userId) return;
+
+      const access = this.slackAccessDecision(teamId ?? null, channelId, userId);
+      if (!access.allowed) {
+        this.logger.warn(
+          `[slack] rejected commit proposal action channel=${channelId} user=${userId} proposal=${proposalId} reason=${access.reason ?? "-"}`,
+        );
+        return;
+      }
+
+      const proposal = this.commitProposalStore?.getProposal(proposalId) ?? null;
+      if (!proposal) {
+        await this.slack.postEphemeral({ channel: channelId, user: userId, text: "Commit proposal expired." });
+        return;
+      }
+      if (proposal.platform !== "slack" || proposal.chatId !== channelId || proposal.userId !== userId) {
+        await this.slack.postEphemeral({ channel: channelId, user: userId, text: "Not authorized." });
+        return;
+      }
+      const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", proposal.sessionId).executeTakeFirst();
+      if (!session || session.platform !== "slack" || session.chat_id !== channelId) {
+        await this.slack.postEphemeral({ channel: channelId, user: userId, text: "Session not found." });
+        return;
+      }
+      const actionKind: CommitProposalAction =
+        action.action_id === "commit_cancel" ? "cancel" : action.action_id === "commit_push" ? "push" : "pr";
+      await this.handleCommitProposalAction({ proposal, session: session as SessionRow, action: actionKind });
       return;
     }
 
@@ -2409,6 +2829,23 @@ function parseRepoIndex(target: string): number | null {
   const n = Number(cleaned);
   if (!Number.isFinite(n) || n <= 0) return null;
   return n;
+}
+
+function isPlaygroundRepoId(value: string | null | undefined): boolean {
+  return value === PLAYGROUND_REPO_ID;
+}
+
+function isPlaygroundTarget(value: string): boolean {
+  const cleaned = value.trim().toLowerCase().replace(/[.)]$/, "");
+  if (!cleaned) return false;
+  if (cleaned === "0") return true;
+  if (cleaned === "playground") return true;
+  if (cleaned === "none") return true;
+  if (cleaned === "norepo") return true;
+  if (cleaned === "no-repo") return true;
+  if (cleaned === "no_repo") return true;
+  if (cleaned === "no repo") return true;
+  return false;
 }
 
 const TELEGRAM_COMMAND_AGENT: Record<string, SessionAgent> = { codex: "codex", cc: "claude_code" };
@@ -2803,9 +3240,9 @@ function buildCloudHelpText(platform: "telegram" | "slack"): string {
     "Quick start",
     "1) Connect (do this in a 1:1 chat with the bot)",
     `- \`${cmd("connect github")}\` (or \`${cmd("connect gitlab")}\`, \`${cmd("connect local")}\`)`,
-    "2) Pick repos",
+    "2) Pick repos (or Playground)",
     `- \`${cmd("repos")}\` (optional: \`${cmd("repos --provider github --search <term>")}\`)`,
-    `- \`${cmd("repo select <number>")}\``,
+    `- \`${cmd("repo select <number>")}\` (or \`${cmd("repo select playground")}\`)`,
     "3) Share to a group (optional)",
     `- ${repoShareCmd}`,
     "4) Run an action",
@@ -2911,6 +3348,7 @@ function formatSupportedSettingKeys(): string {
   return [
     "`message_verbosity`",
     "`bot.message_verbosity`",
+    "`branch_name_rule`",
     "`codex.full_auto`",
     "`claude_code.full_auto`",
     "`codex.dangerously_bypass_approvals_and_sandbox`",
@@ -2945,6 +3383,7 @@ function formatSettingsSummary(
   identity: {
     keepalive_minutes: number | null;
     message_verbosity: number | null;
+    branch_name_rule: string | null;
     git_user_name: string | null;
     git_user_email: string | null;
   } | null,
@@ -2967,6 +3406,8 @@ function formatSettingsSummary(
       : config.bot.message_verbosity;
   const verbositySuffix =
     typeof identityVerbosity === "number" && Number.isFinite(identityVerbosity) ? " (per-user)" : " (default)";
+  const identityBranchRule = identity?.branch_name_rule?.trim() || "";
+  const branchRuleLabel = identityBranchRule ? `${identityBranchRule} (per-user)` : "default";
 
   const lines = [
     `Settings for ${adapter.displayName} (runtime only; not saved to config.toml):`,
@@ -2981,6 +3422,7 @@ function formatSettingsSummary(
     "",
     "User settings:",
     `- \`message_verbosity\`: ${String(effectiveVerbosity)}${verbositySuffix}`,
+    `- \`branch_name_rule\`: ${branchRuleLabel}`,
   ];
 
   const envEntries = Object.entries(section.env);
@@ -3027,6 +3469,7 @@ function formatSettingsSummary(
     "Examples:",
     `- ${cmdPrefix}settings set ${prefix}.timeout_seconds 1800`,
     `- ${cmdPrefix}settings set message_verbosity 2`,
+    `- ${cmdPrefix}settings set branch_name_rule \"feature/{date}-{slug}\"`,
     `- ${cmdPrefix}settings set mcp.SEARCH http://localhost:3000`,
     `- ${cmdPrefix}settings set cloud.keepalive_minutes 10`,
     `- ${cmdPrefix}settings set cloud.git_user_name \"Tintin Bot\"`,
@@ -3051,20 +3494,38 @@ async function applyIdentitySettingsCommand(opts: {
 }): Promise<string | null> {
   if (opts.cmd.kind === "list") return null;
   const target = opts.cmd.target.trim().toLowerCase();
-  if (target !== "message_verbosity" && target !== "bot.message_verbosity") return null;
+  if (
+    target !== "message_verbosity" &&
+    target !== "bot.message_verbosity" &&
+    target !== "branch_name_rule" &&
+    target !== "branchname_rule" &&
+    target !== "branch-rule"
+  )
+    return null;
 
   if (opts.cmd.kind === "unset") {
-    await setIdentityMessageVerbosity(opts.db, opts.identityId, null);
-    return "`message_verbosity` reset to default.";
+    if (target === "message_verbosity" || target === "bot.message_verbosity") {
+      await setIdentityMessageVerbosity(opts.db, opts.identityId, null);
+      return "`message_verbosity` reset to default.";
+    }
+    await setIdentityBranchNameRule(opts.db, opts.identityId, null);
+    return "`branch_name_rule` reset to default.";
   }
 
-  const raw = opts.cmd.value.trim();
-  const next = Number(raw);
-  if (!Number.isFinite(next)) return "Expected a number for `message_verbosity`.";
-  const value = Math.floor(next);
-  if (value < 1 || value > 3) return "`message_verbosity` must be 1 (response only), 2 (response + reasoning + events), or 3 (all).";
-  await setIdentityMessageVerbosity(opts.db, opts.identityId, value);
-  return `message_verbosity updated (per-user) -> ${value}.`;
+  if (target === "message_verbosity" || target === "bot.message_verbosity") {
+    const raw = opts.cmd.value.trim();
+    const next = Number(raw);
+    if (!Number.isFinite(next)) return "Expected a number for `message_verbosity`.";
+    const value = Math.floor(next);
+    if (value < 1 || value > 3) return "`message_verbosity` must be 1 (response only), 2 (response + reasoning + events), or 3 (all).";
+    await setIdentityMessageVerbosity(opts.db, opts.identityId, value);
+    return `message_verbosity updated (per-user) -> ${value}.`;
+  }
+
+  const rule = opts.cmd.value.trim();
+  if (!rule) return "`branch_name_rule` cannot be empty.";
+  await setIdentityBranchNameRule(opts.db, opts.identityId, rule);
+  return "branch_name_rule updated (per-user).";
 }
 
 async function applyCloudSettingsCommand(opts: {

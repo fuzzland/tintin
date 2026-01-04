@@ -1,7 +1,7 @@
 import path from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import type { AppConfig, PlaywrightMcpBrowserbaseSection, PlaywrightMcpHyperbrowserSection, PlaywrightMcpSection } from "../config.js";
-import type { Db, SessionAgent, SessionStatus } from "../db.js";
+import type { CloudRunsTable, Db, ReposTable, SessionAgent, SessionStatus } from "../db.js";
 import type { Logger } from "../log.js";
 import type { SessionManager } from "../sessionManager.js";
 import { nowMs } from "../util.js";
@@ -18,7 +18,7 @@ import { createHyperbrowserSession, stopHyperbrowserSession } from "./hyperbrows
 import { hashSetupSpec, parseSetupSpec } from "./setupSpec.js";
 import { decryptSecret, interpolateSecrets } from "./secrets.js";
 import { buildCloneUrl } from "./git.js";
-import { ensureGithubAppToken } from "./githubApp.js";
+import { createGithubPullRequest, ensureGithubAppToken } from "./githubApp.js";
 import { findRemoteJsonlFiles, getRemoteFileSize, RemoteLogSync } from "./modalLogs.js";
 import { createProxyToken } from "./proxy.js";
 import { getAgentAdapter } from "../agents.js";
@@ -92,6 +92,7 @@ export class CloudManager {
   private readonly agentLogPaths = new Map<string, string>();
   private readonly browserbaseSessions = new Map<string, BrowserbaseSessionState>();
   private readonly hyperbrowserSessions = new Map<string, HyperbrowserSessionState>();
+  private readonly forcedStopSessions = new Set<string>();
 
   constructor(
     private readonly config: AppConfig,
@@ -261,17 +262,19 @@ export class CloudManager {
     prompt: string;
     repoIds: string[];
     agent: SessionAgent;
+    playground?: boolean;
   }): Promise<{ runId: string; sessionId: string }> {
     this.ensureEnabled();
-    if (opts.repoIds.length === 0) throw new Error("No repo selected.");
-    const primaryRepoId = opts.repoIds[0]!;
+    const isPlayground = opts.playground === true;
+    if (opts.repoIds.length === 0 && !isPlayground) throw new Error("No repo selected.");
+    const primaryRepoId = opts.repoIds[0] ?? null;
     const runStartMs = Date.now();
     const runStartTs = new Date(runStartMs).toISOString();
     this.logger.info(
       `[cloud][timing] run start ts=${runStartTs} identity=${opts.identityId} repos=${opts.repoIds.length} agent=${opts.agent}`,
     );
 
-    let setupSpec = await getLatestSetupSpec(this.db, primaryRepoId);
+    let setupSpec = primaryRepoId ? await getLatestSetupSpec(this.db, primaryRepoId) : null;
     let setupSnapshotId: string | null = setupSpec?.snapshot_id ?? null;
     let usedSnapshot = false;
     let workspace: CloudWorkspace;
@@ -326,37 +329,39 @@ export class CloudManager {
         `[cloud] run start id=${run.id} agent=${opts.agent} repos=${opts.repoIds.length} workspace=${workspace.id}`,
       );
       const repoMounts: Array<{ repoId: string; mountPath: string; absPath: string }> = [];
-      for (let i = 0; i < opts.repoIds.length; i++) {
-        const repoId = opts.repoIds[i]!;
-        const mountPath = i === 0 ? path.posix.join("repo", "main") : path.posix.join("repo", `dep${i}`);
-        const absPath = this.joinWorkspacePath(workspace.rootPath, mountPath);
-        repoMounts.push({ repoId, mountPath, absPath });
-        await addRunRepo(this.db, { runId: run.id, repoId, mountPath });
-        const { repo, clone } = await this.time(
-          "repo.resolve",
-          () => this.resolveCloneInfo(repoId),
-          `repoId=${repoId}`,
-          "debug",
-        );
-        if (usedSnapshot) {
-          this.logger.info(`[cloud] refresh repo=${repo.name} url=${clone.redacted}`);
-          await this.time(
-            "repo.refresh",
-            () => this.refreshRepo({ workspace, absPath, cloneUrl: clone.url }),
-            `repo=${repo.name}`,
+      if (opts.repoIds.length > 0) {
+        for (let i = 0; i < opts.repoIds.length; i++) {
+          const repoId = opts.repoIds[i]!;
+          const mountPath = i === 0 ? path.posix.join("repo", "main") : path.posix.join("repo", `dep${i}`);
+          const absPath = this.joinWorkspacePath(workspace.rootPath, mountPath);
+          repoMounts.push({ repoId, mountPath, absPath });
+          await addRunRepo(this.db, { runId: run.id, repoId, mountPath });
+          const { repo, clone } = await this.time(
+            "repo.resolve",
+            () => this.resolveCloneInfo(repoId),
+            `repoId=${repoId}`,
+            "debug",
           );
-        } else {
-          this.logger.info(`[cloud] clone repo=${repo.name} url=${clone.redacted}`);
-          await this.time(
-            "repo.clone",
-            () => this.cloneRepo({ workspace, absPath, cloneUrl: clone.url }),
-            `repo=${repo.name}`,
-          );
+          if (usedSnapshot) {
+            this.logger.info(`[cloud] refresh repo=${repo.name} url=${clone.redacted}`);
+            await this.time(
+              "repo.refresh",
+              () => this.refreshRepo({ workspace, absPath, cloneUrl: clone.url }),
+              `repo=${repo.name}`,
+            );
+          } else {
+            this.logger.info(`[cloud] clone repo=${repo.name} url=${clone.redacted}`);
+            await this.time(
+              "repo.clone",
+              () => this.cloneRepo({ workspace, absPath, cloneUrl: clone.url }),
+              `repo=${repo.name}`,
+            );
+          }
         }
       }
 
       // Apply setup spec if present (DB or repo file).
-      if (!setupSpec) {
+      if (repoMounts.length > 0 && primaryRepoId && !setupSpec) {
         const specPath = path.join(repoMounts[0]!.absPath, "tintin-setup.yml");
         const specText = await readFile(specPath, "utf8").catch(() => null);
         if (specText) {
@@ -415,14 +420,14 @@ export class CloudManager {
         }
       }
 
-      const mainRepoPath = repoMounts[0]!.absPath;
-      const projectId = `cloud:${primaryRepoId}`;
+      const mainRepoPath = repoMounts.length > 0 ? repoMounts[0]!.absPath : workspace.rootPath;
+      const projectId = primaryRepoId ? `cloud:${primaryRepoId}` : `cloud:playground:${run.id}`;
       let sessionId: string;
       if (this.provider.id !== "local") {
         this.logger.info(`[cloud] starting remote session run=${run.id} workspace=${workspace.id}`);
         sessionId = await this.time(
           "session.startRemote",
-              () =>
+          () =>
             this.startRemoteSession({
               identityId: opts.identityId,
               platform: opts.platform,
@@ -1939,6 +1944,10 @@ export class CloudManager {
       status = "error";
       this.logger.warn(`[cloud] remote agent failed session=${opts.sessionId}: ${String(e)}`);
     } finally {
+      if (this.forcedStopSessions.has(opts.sessionId)) {
+        status = "killed";
+        this.forcedStopSessions.delete(opts.sessionId);
+      }
       if (opts.debug) {
         await this.logRemoteAgentError(opts.debug).catch((e) => {
           this.logger.warn(`[cloud] failed to read agent stderr: ${String(e)}`);
@@ -2084,11 +2093,9 @@ export class CloudManager {
       .selectAll()
       .where("run_id", "=", run.id)
       .execute();
-    if (runRepos.length === 0) {
-      throw new Error(`Cloud run ${run.id} has no repos`);
-    }
 
-    const primaryRepoId = run.primary_repo_id ?? runRepos[0]!.repo_id;
+    const hasRepos = runRepos.length > 0;
+    const primaryRepoId = hasRepos ? run.primary_repo_id ?? runRepos[0]!.repo_id : null;
     let setupSpec = primaryRepoId ? await getLatestSetupSpec(this.db, primaryRepoId) : null;
     let setupSnapshotId: string | null = setupSpec?.snapshot_id ?? run.snapshot_id ?? null;
     let usedSnapshot = false;
@@ -2136,43 +2143,47 @@ export class CloudManager {
     }
 
     try {
-      const repoMounts = runRepos
-        .map((r) => ({
-          repoId: r.repo_id,
-          mountPath: r.mount_path,
-          absPath: this.joinWorkspacePath(workspace.rootPath, r.mount_path),
-        }))
-        .sort((a, b) => {
-          if (a.repoId === primaryRepoId && b.repoId !== primaryRepoId) return -1;
-          if (b.repoId === primaryRepoId && a.repoId !== primaryRepoId) return 1;
-          return a.mountPath.localeCompare(b.mountPath);
-        });
+      const repoMounts = hasRepos
+        ? runRepos
+            .map((r) => ({
+              repoId: r.repo_id,
+              mountPath: r.mount_path,
+              absPath: this.joinWorkspacePath(workspace.rootPath, r.mount_path),
+            }))
+            .sort((a, b) => {
+              if (a.repoId === primaryRepoId && b.repoId !== primaryRepoId) return -1;
+              if (b.repoId === primaryRepoId && a.repoId !== primaryRepoId) return 1;
+              return a.mountPath.localeCompare(b.mountPath);
+            })
+        : [];
 
-      for (const mount of repoMounts) {
-        const { repo, clone } = await this.time(
-          "repo.resolve",
-          () => this.resolveCloneInfo(mount.repoId),
-          `repoId=${mount.repoId}`,
-          "debug",
-        );
-        if (usedSnapshot) {
-          this.logger.info(`[cloud] refresh repo=${repo.name} url=${clone.redacted}`);
-          await this.time(
-            "repo.refresh",
-            () => this.refreshRepo({ workspace, absPath: mount.absPath, cloneUrl: clone.url }),
-            `repo=${repo.name}`,
+      if (repoMounts.length > 0) {
+        for (const mount of repoMounts) {
+          const { repo, clone } = await this.time(
+            "repo.resolve",
+            () => this.resolveCloneInfo(mount.repoId),
+            `repoId=${mount.repoId}`,
+            "debug",
           );
-        } else {
-          this.logger.info(`[cloud] clone repo=${repo.name} url=${clone.redacted}`);
-          await this.time(
-            "repo.clone",
-            () => this.cloneRepo({ workspace, absPath: mount.absPath, cloneUrl: clone.url }),
-            `repo=${repo.name}`,
-          );
+          if (usedSnapshot) {
+            this.logger.info(`[cloud] refresh repo=${repo.name} url=${clone.redacted}`);
+            await this.time(
+              "repo.refresh",
+              () => this.refreshRepo({ workspace, absPath: mount.absPath, cloneUrl: clone.url }),
+              `repo=${repo.name}`,
+            );
+          } else {
+            this.logger.info(`[cloud] clone repo=${repo.name} url=${clone.redacted}`);
+            await this.time(
+              "repo.clone",
+              () => this.cloneRepo({ workspace, absPath: mount.absPath, cloneUrl: clone.url }),
+              `repo=${repo.name}`,
+            );
+          }
         }
       }
 
-      if (!setupSpec) {
+      if (repoMounts.length > 0 && !setupSpec) {
         const specPath = path.join(repoMounts[0]!.absPath, "tintin-setup.yml");
         const specText = await readFile(specPath, "utf8").catch(() => null);
         if (specText && primaryRepoId) {
@@ -2181,7 +2192,7 @@ export class CloudManager {
           setupSpec = await getLatestSetupSpec(this.db, primaryRepoId);
         }
       }
-      if (setupSpec && !usedSnapshot) {
+      if (setupSpec && !usedSnapshot && repoMounts.length > 0) {
         const spec = parseSetupSpec(setupSpec.yml_blob);
         const secrets = await this.time(
           "secrets.load",
@@ -2230,7 +2241,7 @@ export class CloudManager {
         }
       }
 
-      const mainRepoPath = repoMounts[0]!.absPath;
+      const mainRepoPath = repoMounts.length > 0 ? repoMounts[0]!.absPath : workspace.rootPath;
       await updateSession(this.db, session.id, {
         status: "starting",
         exit_code: null,
@@ -2337,6 +2348,117 @@ export class CloudManager {
     }
   }
 
+  private isValidBranchName(name: string): boolean {
+    const trimmed = name.trim();
+    if (!trimmed) return false;
+    if (trimmed.startsWith("-")) return false;
+    if (trimmed.endsWith("/") || trimmed.endsWith(".lock")) return false;
+    if (/[~^:\?\*\[\]\s]/.test(trimmed)) return false;
+    if (trimmed.includes("..") || trimmed.includes("@{") || trimmed.includes("//")) return false;
+    return true;
+  }
+
+  private parseGithubRepoSlug(url: string): { owner: string; repo: string } | null {
+    const normalized = url.trim().replace(/\.git$/, "").replace(/\/+$/, "");
+    const match = normalized.match(/github\.com[:/](.+?)\/([^/]+)$/i);
+    if (!match) return null;
+    return { owner: match[1]!, repo: match[2]! };
+  }
+
+  private async resolveRunRepo(sessionId: string): Promise<{
+    run: CloudRunsTable;
+    repo: ReposTable;
+    workspace: CloudWorkspace;
+    cwd: string;
+  }> {
+    const run = await getCloudRunBySession(this.db, sessionId);
+    if (!run) throw new Error(`Cloud run not found for session ${sessionId}`);
+    const runRepos = await this.db.selectFrom("cloud_run_repos").selectAll().where("run_id", "=", run.id).execute();
+    if (runRepos.length === 0) throw new Error(`Cloud run ${run.id} has no repos`);
+    const primaryRepoId = run.primary_repo_id ?? runRepos[0]!.repo_id;
+    const mount = runRepos.find((r) => r.repo_id === primaryRepoId) ?? runRepos[0]!;
+    const repo = await this.db.selectFrom("repos").selectAll().where("id", "=", mount.repo_id).executeTakeFirst();
+    if (!repo) throw new Error(`Repo not found for run ${run.id}`);
+    const workspace = this.workspaceFromId(run.workspace_id);
+    const cwd = path.join(workspace.rootPath, mount.mount_path);
+    return { run, repo, workspace, cwd };
+  }
+
+  async stopSandboxForSession(sessionId: string): Promise<void> {
+    this.ensureEnabled();
+    const run = await getCloudRunBySession(this.db, sessionId);
+    if (!run) throw new Error("Cloud run not found.");
+    this.clearWorkspaceTermination(run.workspace_id);
+    const session = await this.db.selectFrom("sessions").select(["status"]).where("id", "=", sessionId).executeTakeFirst();
+    if (session && (session.status === "running" || session.status === "starting")) {
+      this.forcedStopSessions.add(sessionId);
+    }
+    await this.releaseBrowserbaseForSession(sessionId, "stop_sandbox").catch(() => {});
+    await this.releaseHyperbrowserForSession(sessionId, "stop_sandbox").catch(() => {});
+    const workspace = this.workspaceFromId(run.workspace_id);
+    await this.provider.terminateWorkspace(workspace);
+  }
+
+  async commitAndPushRun(opts: {
+    sessionId: string;
+    commitMessage: string;
+    branchName: string;
+    gitUserName?: string | null;
+    gitUserEmail?: string | null;
+  }): Promise<{ runId: string; branchName: string; repo: ReposTable }> {
+    this.ensureEnabled();
+    const { run, repo, workspace, cwd } = await this.resolveRunRepo(opts.sessionId);
+    const message = (opts.commitMessage ?? "").trim();
+    if (!message) throw new Error("Commit message is empty.");
+    const branchName = (opts.branchName ?? "").trim();
+    if (!this.isValidBranchName(branchName)) throw new Error(`Invalid branch name: ${branchName}`);
+    const authorName = (opts.gitUserName ?? "").trim() || "tintin[bot]";
+    const authorEmail = (opts.gitUserEmail ?? "").trim() || "tintin@fuzz.land";
+    const singleLine = message.split(/\r?\n/)[0]?.trim() || message;
+    await this.provider.runCommands({
+      workspace,
+      cwd,
+      commands: [
+        `git config user.name ${shellQuote(authorName)}`,
+        `git config user.email ${shellQuote(authorEmail)}`,
+        `git checkout -B ${shellQuote(branchName)}`,
+        "git add -A",
+        `git commit -m ${shellQuote(singleLine)}`,
+        `git push -u origin ${shellQuote(branchName)}`,
+      ],
+    });
+    return { runId: run.id, branchName, repo };
+  }
+
+  async createPullRequestForRun(opts: {
+    sessionId: string;
+    branchName: string;
+    title: string;
+    body?: string | null;
+  }): Promise<{ url: string | null; number: number | null; base: string }> {
+    this.ensureEnabled();
+    if (!this.config.cloud?.github_app) throw new Error("GitHub App is not configured.");
+    const { repo } = await this.resolveRunRepo(opts.sessionId);
+    if (repo.provider !== "github") throw new Error("Pull request creation only supported for GitHub repos.");
+    const connection = await this.db.selectFrom("connections").selectAll().where("id", "=", repo.connection_id).executeTakeFirst();
+    if (!connection) throw new Error("Repo connection not found.");
+    const slug = this.parseGithubRepoSlug(repo.url);
+    if (!slug) throw new Error("Unable to parse GitHub repo URL.");
+    const base = repo.default_branch?.trim() || "main";
+    const pr = await createGithubPullRequest({
+      db: this.db,
+      config: this.config.cloud.github_app,
+      connection,
+      owner: slug.owner,
+      repo: slug.repo,
+      title: opts.title,
+      head: opts.branchName,
+      base,
+      body: opts.body ?? null,
+    });
+    return { url: pr.url ?? null, number: pr.number ?? null, base };
+  }
+
   async handleSessionFinished(sessionId: string, status: SessionStatus): Promise<void> {
     const run = await getCloudRunBySession(this.db, sessionId);
     if (!run) return;
@@ -2348,10 +2470,15 @@ export class CloudManager {
       .where("repo_id", "=", run.primary_repo_id ?? "")
       .executeTakeFirst();
     const cwd = mount ? path.join(workspace.rootPath, mount.mount_path) : workspace.rootPath;
-    const diff = await this.provider.pullDiff({ workspace, cwd });
+    let diff: { diff: string; summary: string } | null = null;
+    try {
+      diff = await this.provider.pullDiff({ workspace, cwd });
+    } catch (e) {
+      this.logger.warn(`[cloud] diff pull failed session=${sessionId}: ${String(e)}`);
+    }
     const maxPatch = 200_000;
-    const patch = diff.diff.length > maxPatch ? null : diff.diff;
-    const summary = diff.diff.length > maxPatch ? diff.summary : diff.summary;
+    const patch = diff ? (diff.diff.length > maxPatch ? null : diff.diff) : null;
+    const summary = diff ? diff.summary : null;
     const cloudStatus = status === "finished" ? "finished" : status === "killed" ? "killed" : "error";
     await updateCloudRun(this.db, run.id, {
       status: cloudStatus,

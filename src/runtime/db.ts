@@ -87,6 +87,7 @@ export interface IdentitiesTable {
   onboarded_at: number | null;
   keepalive_minutes: number | null;
   message_verbosity: number | null;
+  branch_name_rule: string | null;
   git_user_name: string | null;
   git_user_email: string | null;
   created_at: number;
