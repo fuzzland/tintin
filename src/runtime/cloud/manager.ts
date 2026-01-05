@@ -140,7 +140,8 @@ export class CloudManager {
       if (row && typeof row.keepalive_minutes === "number") minutes = row.keepalive_minutes;
     }
     const clamped = Math.max(0, Math.floor(minutes));
-    const keepalive = clamped * 60_000;
+    const maxIdleMinutes = 10;
+    const keepalive = Math.min(clamped, maxIdleMinutes) * 60_000;
     const modalTimeout = this.config.cloud?.modal?.timeout_ms;
     if (typeof modalTimeout === "number" && Number.isFinite(modalTimeout) && modalTimeout > 0) {
       return Math.min(keepalive, modalTimeout);
@@ -507,6 +508,7 @@ export class CloudManager {
       if (this.provider.id !== "local") {
         await this.provider.terminateWorkspace(workspace).catch(() => {});
         if (sessionId) {
+          await this.releaseBrowserbaseForSession(sessionId, "run_failed").catch(() => {});
           await this.releaseHyperbrowserForSession(sessionId, "run_failed").catch(() => {});
         }
       }
@@ -1074,6 +1076,29 @@ export class CloudManager {
       }
       throw e;
     }
+  }
+
+  private buildExistingBrowserbaseSetup(sessionId: string): RemotePlaywrightSetup | null {
+    const cfg = this.config.playwright_mcp;
+    if (!cfg || !cfg.enabled || cfg.provider !== "browserbase") return null;
+    const entry = this.browserbaseSessions.get(sessionId);
+    if (!entry || !entry.keepAlive) return null;
+    const port = entry.port;
+    const startupTimeoutSec = Math.ceil(cfg.timeout_ms / 1000);
+    const bootstrapLines = this.buildBrowserbaseBootstrapLines({
+      sessionId,
+      connectUrl: entry.connectUrl,
+      port,
+      startupTimeoutSec,
+      config: cfg,
+    });
+    const server: PlaywrightServerInfo = {
+      port,
+      url: `http://localhost:${port}/mcp`,
+      userDataDir: "",
+      outputDir: "",
+    };
+    return { server, bootstrapLines, port };
   }
 
   private async prepareHyperbrowserSession(opts: {
@@ -1801,14 +1826,9 @@ export class CloudManager {
       const homeDir = resolveCodexHomeFromSessionsRoot(sessionsRoot);
       codexHome = toPosix(homeDir);
       const baseArgs = this.buildCodexArgs(opts.cwd);
-      const baseCmd = `${modalCfg.codex_binary} ${baseArgs.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
-      if (mcpEnabled && playwrightArgs.length > 0) {
-        const argsWithMcp = [...baseArgs, ...playwrightArgs, "resume", opts.agentSessionId];
-        const mcpCmd = `${modalCfg.codex_binary} ${argsWithMcp.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
-        cmd = mcpCmd;
-      } else {
-        cmd = baseCmd;
-      }
+      const extraArgs = mcpEnabled && playwrightArgs.length > 0 ? playwrightArgs : [];
+      const args = [...baseArgs, ...extraArgs, "resume", opts.agentSessionId];
+      cmd = `${modalCfg.codex_binary} ${args.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
       env = {
         ...this.config.codex.env,
         ...opts.envOverrides,
@@ -2058,7 +2078,6 @@ export class CloudManager {
       status: "starting",
       exit_code: null,
       finished_at: null,
-      browserbase_session_id: null,
     });
     await updateCloudRun(this.db, run.id, { status: "running", finished_at: null, diff_patch: null, diff_summary: null });
 
@@ -2075,19 +2094,24 @@ export class CloudManager {
     );
     let playwrightSetup: RemotePlaywrightSetup | null = null;
     if (this.isBrowserbaseEnabled()) {
-      playwrightSetup = await this.time(
-        "browserbase.create",
-        () =>
-          this.prepareBrowserbaseSession({
-            sessionId: session.id,
-            runId: run.id,
-            agent: session.agent,
-            projectId: session.project_id,
-            projectPath: session.codex_cwd,
-          }),
-        `session=${session.id}`,
-        "debug",
-      );
+      const existing = this.buildExistingBrowserbaseSetup(session.id);
+      if (existing) {
+        playwrightSetup = existing;
+      } else {
+        playwrightSetup = await this.time(
+          "browserbase.create",
+          () =>
+            this.prepareBrowserbaseSession({
+              sessionId: session.id,
+              runId: run.id,
+              agent: session.agent,
+              projectId: session.project_id,
+              projectPath: session.codex_cwd,
+            }),
+          `session=${session.id}`,
+          "debug",
+        );
+      }
     } else if (this.isHyperbrowserEnabled()) {
       const existing = this.buildExistingHyperbrowserSetup(session.id);
       if (existing) {
@@ -2147,6 +2171,9 @@ export class CloudManager {
     if (this.provider.id !== "modal") return "not_cloud";
     const run = await getCloudRunBySession(this.db, session.id);
     if (!run || run.provider !== "modal") return "not_cloud";
+
+    await this.releaseBrowserbaseForSession(session.id, "sandbox_expired").catch(() => {});
+    await this.releaseHyperbrowserForSession(session.id, "sandbox_expired").catch(() => {});
 
     const runRepos = await this.db
       .selectFrom("cloud_run_repos")
@@ -2546,7 +2573,6 @@ export class CloudManager {
       diff_summary: summary,
       finished_at: nowMs(),
     });
-    await this.releaseBrowserbaseForSession(sessionId, "finished").catch(() => {});
     this.agentLogPaths.delete(sessionId);
     if (this.provider.id !== "local") {
       void this.scheduleWorkspaceTermination(run.workspace_id, run.identity_id, sessionId);

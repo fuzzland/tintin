@@ -1295,14 +1295,19 @@ export class BotController {
         if (repoIds.length === 0) {
           if (isPlaygroundRepoId(identity.active_repo_id)) {
             playground = true;
+          } else if (identity.active_repo_id) {
+            repoIds = [identity.active_repo_id];
           } else {
-            if (!identity.active_repo_id) {
+            const conns = await listConnections(this.db, identity.id);
+            const hasGithub = conns.some((conn) => conn.type === "github");
+            if (!hasGithub) {
+              playground = true;
+            } else {
               await reply(
                 `No active repo. Use ${formatCmd("repo select <number>")} or ${formatCmd("repo select playground")}, or pass --repos.`,
               );
               return true;
             }
-            repoIds = [identity.active_repo_id];
           }
         }
         if (!playground) {
