@@ -701,6 +701,87 @@ export class BotController {
     });
   }
 
+  private buildRunActionTelegramKeyboard(sessionId: string, runId: string) {
+    return {
+      inline_keyboard: [[{ text: "Stop", callback_data: `kill:${sessionId}` }, { text: "Status", callback_data: `run_status:${runId}` }]],
+    };
+  }
+
+  private buildRunActionSlackBlocks(sessionId: string, runId: string) {
+    return [
+      {
+        type: "actions",
+        elements: [
+          { type: "button", text: { type: "plain_text", text: "Stop" }, style: "danger", action_id: "kill_session", value: sessionId },
+          { type: "button", text: { type: "plain_text", text: "Status" }, action_id: "run_status", value: runId },
+        ],
+      },
+    ];
+  }
+
+  private async sendCloudRunStartedMessage(opts: {
+    platform: "telegram" | "slack";
+    chatId: string;
+    userId: string;
+    text: string;
+    sessionId: string;
+    runId: string;
+    replyToMessageId?: number;
+    messageThreadId?: number;
+    slackThreadTs?: string;
+  }) {
+    if (opts.platform === "telegram") {
+      if (!this.telegram) return;
+      await this.telegram.sendMessage({
+        chatId: Number(opts.chatId),
+        text: opts.text,
+        replyToMessageId: opts.replyToMessageId,
+        messageThreadId: opts.messageThreadId,
+        replyMarkup: this.buildRunActionTelegramKeyboard(opts.sessionId, opts.runId),
+        priority: "user",
+      });
+      return;
+    }
+    if (!this.slack) return;
+    await this.slack.postMessageDetailed({
+      channel: opts.chatId,
+      thread_ts: opts.slackThreadTs,
+      text: opts.text,
+      blocks: this.buildRunActionSlackBlocks(opts.sessionId, opts.runId),
+      blocksOnLastChunk: false,
+    });
+  }
+
+  private async sendCloudRunStatus(opts: {
+    platform: "telegram" | "slack";
+    chatId: string;
+    userId: string;
+    workspaceId: string | null;
+    runId: string;
+    isDirect: boolean;
+    replyToMessageId?: number;
+    messageThreadId?: number;
+    slackThreadTs?: string;
+  }) {
+    if (!this.cloudManager || !this.config.cloud?.enabled) {
+      await this.sendCloudMessage({ ...opts, text: "Cloud mode is disabled." });
+      return;
+    }
+    const identity = await getOrCreateIdentity(this.db, {
+      platform: opts.platform,
+      workspaceId: opts.workspaceId,
+      userId: opts.userId,
+    });
+    const run = await getCloudRun(this.db, opts.runId);
+    if (!run || run.identity_id !== identity.id) {
+      await this.sendCloudMessage({ ...opts, text: "Run not found." });
+      return;
+    }
+    const link = this.buildCloudUiLink(run.id, identity.id, opts.isDirect);
+    const text = link ? `Run ${run.id}: ${run.status}\nView: ${link}` : `Run ${run.id}: ${run.status}`;
+    await this.sendCloudMessage({ ...opts, text });
+  }
+
   private async handleCommitProposalAction(opts: {
     proposal: CommitProposal;
     session: SessionRow;
@@ -1268,7 +1349,18 @@ export class BotController {
             playground,
           });
           const link = this.buildCloudUiLink(result.runId, identity.id, opts.isDirect);
-          await reply(link ? `Started run ${result.runId}.\nView: ${link}` : `Started run ${result.runId}.`, false);
+          const text = link ? `Started run ${result.runId}.\nView: ${link}` : `Started run ${result.runId}.`;
+          await this.sendCloudRunStartedMessage({
+            platform: opts.platform,
+            chatId: opts.chatId,
+            userId: opts.userId,
+            text,
+            sessionId: result.sessionId,
+            runId: result.runId,
+            replyToMessageId: opts.replyToMessageId,
+            messageThreadId: opts.messageThreadId,
+            slackThreadTs: opts.slackThreadTs,
+          });
         } catch (e) {
           await reply(`Run failed: ${String(e)}`);
         }
@@ -1515,6 +1607,22 @@ export class BotController {
         return;
       }
 
+      const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
+      if (isCloudSession && this.cloudManager) {
+        await this.telegram.answerCallbackQuery(cb.id, "Stopping run…");
+        try {
+          await this.cloudManager.stopSandboxForSession(sessionId);
+          await this.sendSessionMessageMarkdown(session as SessionRow, "*Run stopped.*");
+        } catch (e) {
+          this.logger.warn(`[tg] stop run failed chat=${chatId} user=${userId} session=${sessionId}: ${String(e)}`);
+          await this.sendSessionMessageMarkdown(
+            session as SessionRow,
+            `*Stop failed:* ${redactText(e instanceof Error ? e.message : String(e))}`,
+          );
+        }
+        return;
+      }
+
       await this.telegram.answerCallbackQuery(cb.id, "Stopping session…");
       await this.sessionManager.killSession(sessionId, "Stopping session at user request.");
       return;
@@ -1661,6 +1769,37 @@ export class BotController {
           });
         } catch {}
       }
+      return;
+    }
+
+    if (data.startsWith("run_status:")) {
+      const runId = data.slice("run_status:".length).trim();
+      const chat = cb.message?.chat;
+      const chatId = chat ? String(chat.id) : null;
+      const userId = chat && chat.type === "channel" ? String(chat.id) : String(cb.from.id);
+      if (!chatId || !runId) {
+        await this.telegram.answerCallbackQuery(cb.id, "Run not found.");
+        return;
+      }
+      const access = await this.telegramAccessDecision(chatId, userId);
+      if (!access.allowed) {
+        this.logger.warn(
+          `[tg] rejected run status callback chat=${chatId} user=${userId} run=${runId} reason=${access.reason ?? "-"}`,
+        );
+        await this.telegram.answerCallbackQuery(cb.id, "Not authorized.");
+        return;
+      }
+      await this.telegram.answerCallbackQuery(cb.id, "Fetching status…");
+      await this.sendCloudRunStatus({
+        platform: "telegram",
+        chatId,
+        userId,
+        workspaceId: null,
+        runId,
+        isDirect: chat?.type === "private",
+        replyToMessageId: cb.message?.message_id,
+        messageThreadId: this.telegramForumThreadIdFromMessage(cb.message),
+      });
       return;
     }
 
@@ -2406,6 +2545,24 @@ export class BotController {
         return;
       }
 
+      const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
+      if (isCloudSession && this.cloudManager) {
+        await this.slack.postEphemeral({ channel: channelId, user: userId, text: "Stopping run…" });
+        try {
+          await this.cloudManager.stopSandboxForSession(sessionId);
+          await this.sendSessionMessageMarkdown(session as SessionRow, "*Run stopped.*");
+        } catch (e) {
+          this.logger.warn(
+            `[slack] stop run failed channel=${channelId} user=${userId} session=${sessionId}: ${String(e)}`,
+          );
+          await this.sendSessionMessageMarkdown(
+            session as SessionRow,
+            `*Stop failed:* ${redactText(e instanceof Error ? e.message : String(e))}`,
+          );
+        }
+        return;
+      }
+
       await this.slack.postEphemeral({ channel: channelId, user: userId, text: "Stopping session…" });
       await this.sessionManager.killSession(sessionId, "Stopping session at user request.");
       return;
@@ -2450,6 +2607,34 @@ export class BotController {
           `*Sandbox stop failed:* ${redactText(e instanceof Error ? e.message : String(e))}`,
         );
       }
+      return;
+    }
+
+    if (action.action_id === "run_status") {
+      const runId = typeof action.value === "string" ? action.value : null;
+      const channelId = payload.channel?.id as string | undefined;
+      const userId = payload.user?.id as string | undefined;
+      const teamId = payload.team?.id as string | undefined;
+      const threadTs = (payload.message?.ts ?? payload.container?.message_ts) as string | undefined;
+      if (!runId || !channelId || !userId) return;
+
+      const access = this.slackAccessDecision(teamId ?? null, channelId, userId);
+      if (!access.allowed) {
+        this.logger.warn(
+          `[slack] rejected run status action channel=${channelId} user=${userId} run=${runId} reason=${access.reason ?? "-"}`,
+        );
+        return;
+      }
+
+      await this.sendCloudRunStatus({
+        platform: "slack",
+        chatId: channelId,
+        userId,
+        workspaceId: teamId ?? null,
+        runId,
+        isDirect: channelId.startsWith("D"),
+        slackThreadTs: threadTs,
+      });
       return;
     }
 

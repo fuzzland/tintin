@@ -833,6 +833,7 @@ export async function createBotService(deps: BotServiceDeps) {
     const includeKillButton =
       isFirst &&
       !isFinal &&
+      !isCloudSession &&
       (session.status === "starting" || session.status === "running") &&
       !(session.platform === "telegram" && telegramTopicSession);
     const includeReviewButton = false;
