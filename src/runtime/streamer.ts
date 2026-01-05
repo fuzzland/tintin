@@ -22,7 +22,7 @@ interface BufferState {
 export type MessageVerbosity = 1 | 2 | 3;
 
 export type StreamFragment =
-  | { kind: "text"; text: string; continuous?: boolean }
+  | { kind: "text"; text: string; continuous?: boolean; separate?: boolean }
   | { kind: "tool_call"; text: string }
   | { kind: "tool_output"; text: string }
   | { kind: "plan_update"; plan: Array<{ step: string; status: string }>; explanation?: string }
@@ -219,6 +219,9 @@ export class JsonlStreamer {
           }
 
           if (frag.kind === "text") {
+            if (frag.separate) {
+              await this.flushIfNeeded(session.id, true);
+            }
             this.append(session.id, frag.text, { continuous: frag.continuous });
             continue;
           }
@@ -541,7 +544,7 @@ export class JsonlStreamer {
     const isFinal = opts?.final === true;
     if (!s || s.text.trim().length === 0) {
       if (isFinal) {
-        await this.sendToSession(sessionId, { text: "", final: true, priority: "user" });
+        await this.sendToSession(sessionId, { type: "finalize", priority: "user" });
       }
       return;
     }
@@ -1008,17 +1011,18 @@ function mapClaudeEventToFragments(
 
     const fragments: StreamFragment[] = [];
 
-    const pushText = (text: string, continuous = false) => {
+    const pushText = (text: string, continuous = false, separate = false) => {
       const t = text.trimEnd();
       if (!t) return;
-      fragments.push({ kind: "text", text: t, continuous });
+      fragments.push({ kind: "text", text: t, continuous, separate });
     };
+    let separateNext = type === "assistant";
 
     if (typeof content === "string") {
       if (type === "user") {
         if (includeUserMessages) pushText(`User: ${content}`);
       } else {
-        pushText(content);
+        pushText(content, false, true);
       }
       return fragments;
     }
@@ -1031,7 +1035,8 @@ function mapClaudeEventToFragments(
 
       if (blockType === "text" && typeof (block as { text?: unknown }).text === "string") {
         if (type === "user" && !includeUserMessages) continue;
-        pushText((block as { text: string }).text);
+        pushText((block as { text: string }).text, false, separateNext);
+        separateNext = false;
         continue;
       }
 
@@ -1166,9 +1171,9 @@ function mapEventMsgPayload(
   const includeEvents = opts?.includeEvents !== false;
   const includeTools = opts?.includeTools !== false;
 
-  const text = (value: unknown, continuous = false): StreamFragment[] => {
+  const text = (value: unknown, continuous = false, separate = false): StreamFragment[] => {
     if (typeof value !== "string" || value.length === 0) return [];
-    return [{ kind: "text", text: value, continuous }];
+    return [{ kind: "text", text: value, continuous, separate }];
   };
 
   switch (evType) {
@@ -1196,7 +1201,7 @@ function mapEventMsgPayload(
     case "token_count":
       return [];
     case "agent_message":
-      return text(stringOrEmpty(payload.message));
+      return text(stringOrEmpty(payload.message), false, true);
     case "user_message":
       return includeUserMessages ? text(`User: ${stringOrEmpty(payload.message)}`) : [];
     case "agent_message_delta":

@@ -11,6 +11,10 @@ export type SessionMessage =
       priority?: "user" | "background";
     }
   | {
+      type: "finalize";
+      priority?: "user" | "background";
+    }
+  | {
       type: "plan_update";
       plan: PlanUpdateItem[];
       explanation?: string;

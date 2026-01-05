@@ -348,6 +348,10 @@ export class SessionManager {
     await this.onProcessExitDrain(sessionId);
   }
 
+  async notifySessionFinished(sessionId: string) {
+    await this.sendToSession(sessionId, { type: "finalize", priority: "user" });
+  }
+
   private async handleExit(sessionId: string, code: number | null, signal: NodeJS.Signals | null) {
     const proc = this.processes.get(sessionId);
     const procKind = proc?.kind ?? "?";
@@ -439,8 +443,8 @@ export class SessionManager {
       });
     }
 
-    // Ensure a Review button is present on the last session message.
-    await this.sendToSession(sessionId, { text: "", final: true, priority: "user" });
+    // Ensure a Review/Commit button is present on the last session message.
+    await this.sendToSession(sessionId, { type: "finalize", priority: "user" });
   }
 
   private async playwrightCliArgs(agent: SessionAgent): Promise<string[] | null> {

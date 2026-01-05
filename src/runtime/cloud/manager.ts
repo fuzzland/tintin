@@ -76,11 +76,13 @@ type BrowserbaseSessionState = {
   browserbaseSessionId: string;
   projectId: string;
   keepAlive: boolean;
+  connectUrl: string;
   port: number;
 };
 
 type HyperbrowserSessionState = {
   hyperbrowserSessionId: string;
+  wsEndpoint: string;
   port: number;
 };
 
@@ -238,16 +240,32 @@ export class CloudManager {
     this.workspaceTerminateTimers.delete(workspaceId);
   }
 
-  private async scheduleWorkspaceTermination(workspaceId: string, identityId: string | null) {
+  private async scheduleWorkspaceTermination(workspaceId: string, identityId: string | null, sessionId?: string | null) {
     const delay = await this.keepaliveMs(identityId);
     if (delay <= 0) {
-      void this.provider.terminateWorkspace({ id: workspaceId, rootPath: this.workspaceFromId(workspaceId).rootPath }).catch(() => {});
+      void this.provider
+        .terminateWorkspace({ id: workspaceId, rootPath: this.workspaceFromId(workspaceId).rootPath })
+        .catch(() => {})
+        .finally(async () => {
+          if (sessionId) {
+            await this.releaseBrowserbaseForSession(sessionId, "workspace_terminated").catch(() => {});
+            await this.releaseHyperbrowserForSession(sessionId, "workspace_terminated").catch(() => {});
+          }
+        });
       return;
     }
     this.clearWorkspaceTermination(workspaceId);
     const timer = setTimeout(() => {
       this.workspaceTerminateTimers.delete(workspaceId);
-      void this.provider.terminateWorkspace({ id: workspaceId, rootPath: this.workspaceFromId(workspaceId).rootPath }).catch(() => {});
+      void this.provider
+        .terminateWorkspace({ id: workspaceId, rootPath: this.workspaceFromId(workspaceId).rootPath })
+        .catch(() => {})
+        .finally(async () => {
+          if (sessionId) {
+            await this.releaseBrowserbaseForSession(sessionId, "workspace_terminated").catch(() => {});
+            await this.releaseHyperbrowserForSession(sessionId, "workspace_terminated").catch(() => {});
+          }
+        });
     }, delay);
     this.workspaceTerminateTimers.set(workspaceId, timer);
   }
@@ -324,6 +342,7 @@ export class CloudManager {
     });
 
     let runStatus: "ok" | "error" = "ok";
+    let sessionId: string | null = null;
     try {
       this.logger.info(
         `[cloud] run start id=${run.id} agent=${opts.agent} repos=${opts.repoIds.length} workspace=${workspace.id}`,
@@ -422,7 +441,6 @@ export class CloudManager {
 
       const mainRepoPath = repoMounts.length > 0 ? repoMounts[0]!.absPath : workspace.rootPath;
       const projectId = primaryRepoId ? `cloud:${primaryRepoId}` : `cloud:playground:${run.id}`;
-      let sessionId: string;
       if (this.provider.id !== "local") {
         this.logger.info(`[cloud] starting remote session run=${run.id} workspace=${workspace.id}`);
         sessionId = await this.time(
@@ -470,6 +488,9 @@ export class CloudManager {
           `run=${run.id}`,
         );
       }
+      if (!sessionId) {
+        throw new Error("Session start failed.");
+      }
 
       await updateCloudRun(this.db, run.id, {
         status: "running",
@@ -478,13 +499,16 @@ export class CloudManager {
         snapshot_id: setupSnapshotId ?? null,
       });
 
-      return { runId: run.id, sessionId };
+      return { runId: run.id, sessionId: sessionId };
     } catch (e) {
       runStatus = "error";
       this.logger.warn(`[cloud] run failed id=${run.id}: ${String(e)}`);
       await updateCloudRun(this.db, run.id, { status: "error", finished_at: nowMs() });
       if (this.provider.id !== "local") {
         await this.provider.terminateWorkspace(workspace).catch(() => {});
+        if (sessionId) {
+          await this.releaseHyperbrowserForSession(sessionId, "run_failed").catch(() => {});
+        }
       }
       throw e;
     } finally {
@@ -1024,6 +1048,7 @@ export class CloudManager {
         browserbaseSessionId: created.id,
         projectId: browserbase.project_id,
         keepAlive: browserbase.keep_alive,
+        connectUrl: created.connectUrl,
         port,
       });
       await updateSession(this.db, opts.sessionId, { browserbase_session_id: created.id });
@@ -1077,6 +1102,7 @@ export class CloudManager {
       });
       this.hyperbrowserSessions.set(opts.sessionId, {
         hyperbrowserSessionId: created.id,
+        wsEndpoint: created.wsEndpoint,
         port,
       });
       await updateSession(this.db, opts.sessionId, { hyperbrowser_session_id: created.id });
@@ -1102,6 +1128,29 @@ export class CloudManager {
       }
       throw e;
     }
+  }
+
+  private buildExistingHyperbrowserSetup(sessionId: string): RemotePlaywrightSetup | null {
+    const cfg = this.config.playwright_mcp;
+    if (!cfg || !cfg.enabled || cfg.provider !== "hyperbrowser") return null;
+    const entry = this.hyperbrowserSessions.get(sessionId);
+    if (!entry) return null;
+    const port = entry.port;
+    const startupTimeoutSec = Math.ceil(cfg.timeout_ms / 1000);
+    const bootstrapLines = this.buildHyperbrowserBootstrapLines({
+      sessionId,
+      wsEndpoint: entry.wsEndpoint,
+      port,
+      startupTimeoutSec,
+      config: cfg,
+    });
+    const server: PlaywrightServerInfo = {
+      port,
+      url: `http://localhost:${port}/mcp`,
+      userDataDir: "",
+      outputDir: "",
+    };
+    return { server, bootstrapLines, port };
   }
 
   private async releaseBrowserbaseForSession(sessionId: string, reason: string): Promise<void> {
@@ -1969,6 +2018,13 @@ export class CloudManager {
         pid: null,
       });
       await this.handleSessionFinished(opts.sessionId, status);
+      if (this.sessionManager) {
+        try {
+          await this.sessionManager.notifySessionFinished(opts.sessionId);
+        } catch (e) {
+          this.logger.warn(`[cloud] final button attach failed session=${opts.sessionId}: ${String(e)}`);
+        }
+      }
     }
   }
 
@@ -2003,7 +2059,6 @@ export class CloudManager {
       exit_code: null,
       finished_at: null,
       browserbase_session_id: null,
-      hyperbrowser_session_id: null,
     });
     await updateCloudRun(this.db, run.id, { status: "running", finished_at: null, diff_patch: null, diff_summary: null });
 
@@ -2034,19 +2089,24 @@ export class CloudManager {
         "debug",
       );
     } else if (this.isHyperbrowserEnabled()) {
-      playwrightSetup = await this.time(
-        "hyperbrowser.create",
-        () =>
-          this.prepareHyperbrowserSession({
-            sessionId: session.id,
-            runId: run.id,
-            agent: session.agent,
-            projectId: session.project_id,
-            projectPath: session.codex_cwd,
-          }),
-        `session=${session.id}`,
-        "debug",
-      );
+      const existing = this.buildExistingHyperbrowserSetup(session.id);
+      if (existing) {
+        playwrightSetup = existing;
+      } else {
+        playwrightSetup = await this.time(
+          "hyperbrowser.create",
+          () =>
+            this.prepareHyperbrowserSession({
+              sessionId: session.id,
+              runId: run.id,
+              agent: session.agent,
+              projectId: session.project_id,
+              projectPath: session.codex_cwd,
+            }),
+          `session=${session.id}`,
+          "debug",
+        );
+      }
     }
     try {
       const { handle, logSyncers, debug } = await this.time(
@@ -2487,10 +2547,9 @@ export class CloudManager {
       finished_at: nowMs(),
     });
     await this.releaseBrowserbaseForSession(sessionId, "finished").catch(() => {});
-    await this.releaseHyperbrowserForSession(sessionId, "finished").catch(() => {});
     this.agentLogPaths.delete(sessionId);
     if (this.provider.id !== "local") {
-      void this.scheduleWorkspaceTermination(run.workspace_id, run.identity_id);
+      void this.scheduleWorkspaceTermination(run.workspace_id, run.identity_id, sessionId);
     }
   }
 }

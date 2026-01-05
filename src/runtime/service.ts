@@ -472,6 +472,7 @@ export async function createBotService(deps: BotServiceDeps) {
   const maybeHandleCommitProposalMessage = async (sessionId: string, message: { type?: string; text?: string; final?: boolean }) => {
     const pending = pendingCommitProposals.get(sessionId);
     if (!pending) return false;
+    if (message.type === "finalize") return false;
     if (message.type === "plan_update" || message.type === "image") return true;
     const text = typeof message.text === "string" ? message.text : "";
     if (text || message.final) {
@@ -757,6 +758,64 @@ export async function createBotService(deps: BotServiceDeps) {
     if (handledCommitProposal) return;
     const actionsDisabled = reviewCommitDisabled.has(sessionId);
     const telegramTopicSession = isTelegramTopicSession(session);
+    if (message.type === "finalize") {
+      const updated = actionsDisabled ? false : await attachReviewAndCommitButtonsToLastMessage(sessionId, session);
+      if (updated) return;
+      const fallbackText = "Session complete.";
+      if (session.platform === "telegram") {
+        if (!telegram) return;
+        const chatId = Number(session.chat_id);
+        const space = Number(session.space_id);
+        if (Number.isNaN(chatId) || Number.isNaN(space)) return;
+        const replyMarkup = actionsDisabled
+          ? undefined
+          : buildTelegramInlineKeyboard({
+              sessionId,
+              includeKill: false,
+              includeReview: true,
+              includeCommit: true,
+              includeStopSandbox: isCloudSession,
+            });
+        const priority = "user" as const;
+        try {
+          const sent = await telegram.sendMessageSingleStrict(
+            telegramTopicSession
+              ? { chatId, messageThreadId: space, text: fallbackText, replyMarkup, priority, forcePrimary: true }
+              : { chatId, replyToMessageId: space, text: fallbackText, replyMarkup, priority, forcePrimary: true },
+          );
+          trackTelegramMessage(sessionId, chatId, sent.message_id);
+        } catch {
+          // Ignore fallback failures.
+        }
+      } else if (session.platform === "slack") {
+        if (!slack) return;
+        const channel = session.chat_id;
+        const threadTs = config.slack?.session_mode === "thread" ? session.space_id : undefined;
+        try {
+          const posted = await slack.postMessageDetailed({
+            channel,
+            thread_ts: threadTs,
+            text: fallbackText,
+            blocks: actionsDisabled
+              ? undefined
+              : buildSlackButtons({
+                  sessionId,
+                  includeKill: false,
+                  includeReview: true,
+                  includeCommit: true,
+                  includeStopSandbox: isCloudSession,
+                }),
+            blocksOnLastChunk: false,
+          });
+          if (posted.lastTs && posted.lastText !== null) {
+            lastSlackMessage.set(sessionId, { ts: posted.lastTs, text: posted.lastText });
+          }
+        } catch {
+          // Ignore fallback failures.
+        }
+      }
+      return;
+    }
     if (message.type === "plan_update") {
       await upsertPlanMessage(sessionId, session, message.plan, message.explanation);
       return;
