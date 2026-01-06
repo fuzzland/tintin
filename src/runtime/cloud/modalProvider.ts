@@ -145,27 +145,55 @@ export class ModalCloudProvider implements CloudProvider {
   }
 
   async terminateWorkspace(workspace: CloudWorkspace): Promise<void> {
-    let sandbox = this.sandboxes.get(workspace.id);
-    if (!sandbox) {
-      const fromId = (this.client as any).sandboxes?.fromId;
-      if (typeof fromId === "function") {
-        try {
-          sandbox = await fromId.call(this.client.sandboxes, workspace.id);
-        } catch (e) {
-          this.logger.warn(`[cloud][modal] sandbox handle missing id=${workspace.id}, fromId failed: ${String(e)}`);
-          return;
-        }
-      } else {
-        this.logger.warn(`[cloud][modal] sandbox handle missing id=${workspace.id}, no fromId available`);
-        return;
-      }
-    }
+    const sandbox = await this.getOrFetchSandbox(workspace.id);
     if (!sandbox) return;
-    await sandbox.terminate().catch((e: unknown) => {
+    try {
+      await sandbox.terminate();
+    } catch (e) {
       this.logger.warn(`[cloud][modal] sandbox terminate error id=${workspace.id}: ${String(e)}`);
       throw e;
-    });
+    }
+
+    const fromId = (this.client as any).sandboxes?.fromId;
+    if (typeof fromId === "function") {
+      try {
+        const refetched = await fromId.call(this.client.sandboxes, workspace.id);
+        if (refetched) {
+          this.logger.warn(`[cloud][modal] sandbox still present after terminate id=${workspace.id}`);
+          throw new Error("sandbox still present after terminate");
+        }
+      } catch (e) {
+        const message = String(e);
+        const notFound =
+          message.includes("not found") ||
+          message.includes("NotFound") ||
+          message.includes("404");
+        if (!notFound) {
+          this.logger.warn(`[cloud][modal] sandbox terminate verify error id=${workspace.id}: ${message}`);
+          throw e;
+        }
+      }
+    }
+
     this.sandboxes.delete(workspace.id);
+  }
+
+  private async getOrFetchSandbox(id: string): Promise<Sandbox | null> {
+    const cached = this.sandboxes.get(id);
+    if (cached) return cached;
+    const fromId = (this.client as any).sandboxes?.fromId;
+    if (typeof fromId !== "function") {
+      this.logger.warn(`[cloud][modal] sandbox handle missing id=${id}, no fromId available`);
+      return null;
+    }
+    try {
+      const sandbox = await fromId.call(this.client.sandboxes, id);
+      this.sandboxes.set(id, sandbox);
+      return sandbox;
+    } catch (e) {
+      this.logger.warn(`[cloud][modal] sandbox handle missing id=${id}, fromId failed: ${String(e)}`);
+      return null;
+    }
   }
 
   private async getApp(): Promise<App> {
