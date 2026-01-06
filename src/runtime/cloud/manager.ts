@@ -222,11 +222,11 @@ export class CloudManager {
       this.logger.warn(`[cloud][workspace] terminating expired workspace id=${ws.id} provider=${ws.provider}`);
       try {
         await this.provider.terminateWorkspace(this.workspaceFromId(ws.id));
-      } catch (e) {
-        this.logger.warn(`[cloud][workspace] terminate failed id=${ws.id}: ${String(e)}`);
-      } finally {
+        this.logger.info(`[cloud][workspace] terminated id=${ws.id} provider=${ws.provider}`);
         this.clearWorkspaceTermination(ws.id);
         await this.deleteWorkspaceLease(ws.id).catch(() => {});
+      } catch (e) {
+        this.logger.warn(`[cloud][workspace] terminate failed id=${ws.id}: ${String(e)}`);
       }
     }
   }
@@ -337,10 +337,11 @@ export class CloudManager {
   private async terminateWorkspaceAndCleanup(workspaceId: string, sessionId?: string | null) {
     try {
       await this.provider.terminateWorkspace({ id: workspaceId, rootPath: this.workspaceFromId(workspaceId).rootPath });
+      this.logger.info(`[cloud][workspace] terminated id=${workspaceId} provider=${this.provider.id}`);
+      await this.deleteWorkspaceLease(workspaceId).catch(() => {});
     } catch (e) {
       this.logger.warn(`[cloud][workspace] terminate failed id=${workspaceId}: ${String(e)}`);
     } finally {
-      await this.deleteWorkspaceLease(workspaceId).catch(() => {});
       if (sessionId) {
         await this.releaseBrowserbaseForSession(sessionId, "workspace_terminated").catch(() => {});
         await this.releaseHyperbrowserForSession(sessionId, "workspace_terminated").catch(() => {});
