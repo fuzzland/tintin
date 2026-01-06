@@ -148,45 +148,16 @@ export class ModalCloudProvider implements CloudProvider {
     const sandbox = await this.getOrFetchSandbox(workspace.id);
     if (!sandbox) return;
     try {
-      await sandbox.terminate();
+      const result = await sandbox.terminate();
+      this.logger.info(
+        `[cloud][modal] sandbox terminate invoked id=${workspace.id} result=${JSON.stringify(
+          result,
+          (_k, v) => (typeof v === "bigint" ? Number(v) : v),
+        )}`,
+      );
     } catch (e) {
       this.logger.warn(`[cloud][modal] sandbox terminate error id=${workspace.id}: ${String(e)}`);
       throw e;
-    }
-
-    const fromId = (this.client as any).sandboxes?.fromId;
-    if (typeof fromId === "function") {
-      try {
-        const refetched = await fromId.call(this.client.sandboxes, workspace.id);
-        this.logger.info(
-          `[cloud][modal] terminate verify id=${workspace.id} refetch=${JSON.stringify(
-            refetched,
-            (_k, v) => (typeof v === "bigint" ? Number(v) : v),
-          )}`,
-        );
-        if (refetched) {
-          const status = (refetched as any).status ?? (refetched as any).state ?? "";
-          const statusText = typeof status === "string" ? status.toLowerCase() : "";
-          if (statusText.includes("terminated")) {
-            this.logger.info(`[cloud][modal] sandbox terminated (status=${String(status)}) id=${workspace.id}`);
-          } else {
-            this.logger.warn(
-              `[cloud][modal] sandbox still present after terminate id=${workspace.id} status=${String(status)}`,
-            );
-            throw new Error("sandbox still present after terminate");
-          }
-        }
-      } catch (e) {
-        const message = String(e);
-        const notFound =
-          message.includes("not found") ||
-          message.includes("NotFound") ||
-          message.includes("404");
-        if (!notFound) {
-          this.logger.warn(`[cloud][modal] sandbox terminate verify error id=${workspace.id}: ${message}`);
-          throw e;
-        }
-      }
     }
 
     this.sandboxes.delete(workspace.id);
