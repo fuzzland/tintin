@@ -1066,6 +1066,7 @@ export async function createBotService(deps: BotServiceDeps) {
     cloudManager ? async (sessionId, status) => cloudManager.handleSessionFinished(sessionId, status) : undefined,
   );
   if (cloudManager) cloudManager.attachSessionManager(sessionManager);
+  if (cloudManager) await cloudManager.start();
   await sessionManager.reconcileStaleSessions();
   const controller = new BotController(
     config,

@@ -95,6 +95,7 @@ export class CloudManager {
   private readonly browserbaseSessions = new Map<string, BrowserbaseSessionState>();
   private readonly hyperbrowserSessions = new Map<string, HyperbrowserSessionState>();
   private readonly forcedStopSessions = new Set<string>();
+  private workspaceSweepTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly config: AppConfig,
@@ -151,6 +152,94 @@ export class CloudManager {
       return Math.min(keepalive, modalTimeout);
     }
     return keepalive;
+  }
+
+  private workspaceInitialTtlMs(): number {
+    if (this.provider.id === "modal") {
+      const modal = this.config.cloud?.modal;
+      const timeout = modal?.timeout_ms;
+      if (typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0) return timeout;
+      return 86_400_000; // 24h fallback to avoid leaving sandboxes indefinitely
+    }
+    const minutes = this.config.cloud?.keepalive_minutes ?? 10;
+    return Math.max(0, Math.floor(minutes)) * 60_000;
+  }
+
+  private async recordWorkspaceLease(opts: {
+    workspaceId: string;
+    runId: string | null;
+    identityId: string | null;
+    ttlMs: number;
+    reason: string;
+  }): Promise<void> {
+    if (this.provider.id === "local") return;
+    const now = nowMs();
+    const ttl = Math.max(0, opts.ttlMs);
+    const expiresAt = now + ttl;
+    await this.db
+      .insertInto("cloud_workspaces")
+      .values({
+        id: opts.workspaceId,
+        provider: this.provider.id,
+        run_id: opts.runId,
+        identity_id: opts.identityId,
+        expires_at: expiresAt,
+        last_seen_at: now,
+        created_at: now,
+        updated_at: now,
+      })
+      .onConflict((oc) =>
+        oc.column("id").doUpdateSet((eb) => ({
+          provider: eb.ref("excluded.provider"),
+          run_id: eb.ref("excluded.run_id"),
+          identity_id: eb.ref("excluded.identity_id"),
+          expires_at: eb.ref("excluded.expires_at"),
+          last_seen_at: eb.ref("excluded.last_seen_at"),
+          updated_at: eb.ref("excluded.updated_at"),
+        })),
+      )
+      .execute();
+    this.logger.debug(
+      `[cloud][workspace] lease recorded id=${opts.workspaceId} run=${opts.runId ?? "-"} expires_in_ms=${ttl} reason=${opts.reason}`,
+    );
+  }
+
+  private async deleteWorkspaceLease(workspaceId: string): Promise<void> {
+    if (this.provider.id === "local") return;
+    await this.db.deleteFrom("cloud_workspaces").where("id", "=", workspaceId).execute();
+  }
+
+  private async sweepExpiredWorkspaces(): Promise<void> {
+    if (this.provider.id === "local") return;
+    const now = nowMs();
+    const expired = await this.db
+      .selectFrom("cloud_workspaces")
+      .selectAll()
+      .where("expires_at", "<=", now)
+      .execute();
+    if (expired.length === 0) return;
+    for (const ws of expired) {
+      this.logger.warn(`[cloud][workspace] terminating expired workspace id=${ws.id} provider=${ws.provider}`);
+      try {
+        await this.provider.terminateWorkspace(this.workspaceFromId(ws.id));
+      } catch (e) {
+        this.logger.warn(`[cloud][workspace] terminate failed id=${ws.id}: ${String(e)}`);
+      } finally {
+        this.clearWorkspaceTermination(ws.id);
+        await this.deleteWorkspaceLease(ws.id).catch(() => {});
+      }
+    }
+  }
+
+  async start(): Promise<void> {
+    if (this.provider.id === "local") return;
+    await this.sweepExpiredWorkspaces();
+    const intervalMs = 60_000;
+    this.workspaceSweepTimer = setInterval(() => {
+      void this.sweepExpiredWorkspaces().catch((e) => {
+        this.logger.warn(`[cloud][workspace] sweep error: ${String(e)}`);
+      });
+    }, intervalMs);
   }
 
   private async time<T>(label: string, fn: () => Promise<T>, meta?: string, level: "info" | "debug" = "info"): Promise<T> {
@@ -245,32 +334,42 @@ export class CloudManager {
     this.workspaceTerminateTimers.delete(workspaceId);
   }
 
-  private async scheduleWorkspaceTermination(workspaceId: string, identityId: string | null, sessionId?: string | null) {
+  private async terminateWorkspaceAndCleanup(workspaceId: string, sessionId?: string | null) {
+    try {
+      await this.provider.terminateWorkspace({ id: workspaceId, rootPath: this.workspaceFromId(workspaceId).rootPath });
+    } catch (e) {
+      this.logger.warn(`[cloud][workspace] terminate failed id=${workspaceId}: ${String(e)}`);
+    } finally {
+      await this.deleteWorkspaceLease(workspaceId).catch(() => {});
+      if (sessionId) {
+        await this.releaseBrowserbaseForSession(sessionId, "workspace_terminated").catch(() => {});
+        await this.releaseHyperbrowserForSession(sessionId, "workspace_terminated").catch(() => {});
+      }
+    }
+  }
+
+  private async scheduleWorkspaceTermination(
+    workspaceId: string,
+    identityId: string | null,
+    runId?: string | null,
+    sessionId?: string | null,
+  ) {
     const delay = await this.keepaliveMs(identityId);
+    await this.recordWorkspaceLease({
+      workspaceId,
+      runId: runId ?? null,
+      identityId,
+      ttlMs: delay,
+      reason: "schedule_termination",
+    });
     if (delay <= 0) {
-      void this.provider
-        .terminateWorkspace({ id: workspaceId, rootPath: this.workspaceFromId(workspaceId).rootPath })
-        .catch(() => {})
-        .finally(async () => {
-          if (sessionId) {
-            await this.releaseBrowserbaseForSession(sessionId, "workspace_terminated").catch(() => {});
-            await this.releaseHyperbrowserForSession(sessionId, "workspace_terminated").catch(() => {});
-          }
-        });
+      void this.terminateWorkspaceAndCleanup(workspaceId, sessionId);
       return;
     }
     this.clearWorkspaceTermination(workspaceId);
     const timer = setTimeout(() => {
       this.workspaceTerminateTimers.delete(workspaceId);
-      void this.provider
-        .terminateWorkspace({ id: workspaceId, rootPath: this.workspaceFromId(workspaceId).rootPath })
-        .catch(() => {})
-        .finally(async () => {
-          if (sessionId) {
-            await this.releaseBrowserbaseForSession(sessionId, "workspace_terminated").catch(() => {});
-            await this.releaseHyperbrowserForSession(sessionId, "workspace_terminated").catch(() => {});
-          }
-        });
+      void this.terminateWorkspaceAndCleanup(workspaceId, sessionId);
     }, delay);
     this.workspaceTerminateTimers.set(workspaceId, timer);
   }
@@ -345,6 +444,15 @@ export class CloudManager {
       workspaceId: workspace.id,
       status: "queued",
     });
+    if (this.provider.id !== "local") {
+      await this.recordWorkspaceLease({
+        workspaceId: workspace.id,
+        runId: run.id,
+        identityId: opts.identityId,
+        ttlMs: this.workspaceInitialTtlMs(),
+        reason: "run_start",
+      });
+    }
 
     let runStatus: "ok" | "error" = "ok";
     let sessionId: string | null = null;
@@ -2584,7 +2692,7 @@ export class CloudManager {
     });
     this.agentLogPaths.delete(sessionId);
     if (this.provider.id !== "local") {
-      void this.scheduleWorkspaceTermination(run.workspace_id, run.identity_id, sessionId);
+      void this.scheduleWorkspaceTermination(run.workspace_id, run.identity_id, run.id, sessionId);
     }
   }
 }
