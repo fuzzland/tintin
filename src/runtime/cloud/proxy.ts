@@ -121,6 +121,7 @@ export async function handleProxyRequest(opts: {
   const body = await readRequestBuffer(opts.req);
   const targetBase = opts.kind === "openai" ? proxy.openai_base_url : proxy.anthropic_base_url;
   const targetPath = opts.url.pathname.slice(opts.pathPrefix.length) || "/";
+
   const target = buildTargetUrl({ baseUrl: targetBase, path: targetPath, search: opts.url.search });
 
   const headers: Record<string, string> = {};

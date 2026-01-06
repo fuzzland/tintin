@@ -903,8 +903,8 @@ function mapCodexEventToFragments(
     if (!item || typeof item !== "object") return [];
     const detailsType = typeof (item as { type?: unknown }).type === "string" ? (item as { type: string }).type : "";
     if (detailsType === "agent_message") {
-      const text = (item as { text?: unknown }).text;
-      return typeof text === "string" ? [{ kind: "text", text }] : [];
+      const text = normalizeAgentMessage(item);
+      return text ? [{ kind: "text", text, separate: true }] : [];
     }
     if (detailsType === "reasoning") {
       if (!includeReasoning) return [];
@@ -1200,8 +1200,10 @@ function mapEventMsgPayload(
     }
     case "token_count":
       return [];
-    case "agent_message":
-      return text(stringOrEmpty(payload.message), false, true);
+    case "agent_message": {
+      const msg = normalizeAgentMessage(payload);
+      return text(msg, false, true);
+    }
     case "user_message":
       return includeUserMessages ? text(`User: ${stringOrEmpty(payload.message)}`) : [];
     case "agent_message_delta":
@@ -1415,6 +1417,24 @@ function mapEventMsgPayload(
 
 function stringOrEmpty(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function firstNonEmptyString(values: unknown[]): string {
+  for (const v of values) {
+    if (typeof v === "string" && v.trim().length > 0) return v;
+  }
+  return "";
+}
+
+// Normalize agent messages from different providers (local event_msg vs. cloud item.* JSONL).
+function normalizeAgentMessage(obj: unknown): string | null {
+  if (!obj || typeof obj !== "object") return null;
+  const msg = firstNonEmptyString([
+    (obj as { message?: unknown }).message,
+    (obj as { text?: unknown }).text,
+    (obj as { content?: unknown }).content,
+  ]);
+  return msg || null;
 }
 
 function numberOrNull(value: unknown): number | null {

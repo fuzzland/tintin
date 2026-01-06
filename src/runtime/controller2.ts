@@ -27,6 +27,7 @@ import { hashSetupSpec, stringifySetupSpec } from "./cloud/setupSpec.js";
 import { buildCloneUrl, runGitClone } from "./cloud/git.js";
 import { LocalCloudProvider } from "./cloud/localProvider.js";
 import { createUiToken } from "./cloud/uiTokens.js";
+import { getCloudRunBySession } from "./cloud/store.js";
 import {
   getCloudRun,
   getLatestSetupSpec,
@@ -136,6 +137,13 @@ export class BotController {
 
   private markReviewCommitDisabled(sessionId: string) {
     this.reviewCommitDisabled.add(sessionId);
+  }
+
+  private async isCloudSession(session: SessionRow): Promise<boolean> {
+    if (typeof session.project_id === "string" && session.project_id.startsWith("cloud:")) return true;
+    // Fallback: look up cloud run by session_id to handle older records or missing prefix.
+    const run = await getCloudRunBySession(this.db, session.id);
+    return Boolean(run);
   }
 
   private buildCloudUiLink(runId: string, identityId: string, isDirect: boolean): string | null {
@@ -788,7 +796,7 @@ export class BotController {
     action: CommitProposalAction;
   }): Promise<void> {
     if (!this.commitProposalStore) return;
-    const isCloudSession = typeof opts.session.project_id === "string" && opts.session.project_id.startsWith("cloud:");
+    const isCloudSession = await this.isCloudSession(opts.session);
     if (!this.cloudManager || !isCloudSession) {
       await this.sendSessionMessageMarkdown(opts.session, "*Cloud commit not available for this session.*");
       return;
@@ -1612,7 +1620,7 @@ export class BotController {
         return;
       }
 
-      const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
+      const isCloudSession = await this.isCloudSession(session as SessionRow);
       if (isCloudSession && this.cloudManager) {
         await this.telegram.answerCallbackQuery(cb.id, "Stopping run…");
         try {
@@ -1720,7 +1728,7 @@ export class BotController {
         await this.disableReviewCommitButtonsTelegram({ chatId, messageId, text: messageText });
       }
 
-      const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
+      const isCloudSession = await this.isCloudSession(session as SessionRow);
       if (isCloudSession && this.cloudManager && this.commitProposalStore) {
         const identity = await getOrCreateIdentity(this.db, {
           platform: session.platform,
