@@ -160,6 +160,7 @@ export class ModalCloudProvider implements CloudProvider {
         return;
       }
     }
+    if (!sandbox) return;
     await sandbox.terminate().catch((e: unknown) => {
       this.logger.warn(`[cloud][modal] sandbox terminate error id=${workspace.id}: ${String(e)}`);
       throw e;
