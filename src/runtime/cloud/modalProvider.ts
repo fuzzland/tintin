@@ -158,9 +158,23 @@ export class ModalCloudProvider implements CloudProvider {
     if (typeof fromId === "function") {
       try {
         const refetched = await fromId.call(this.client.sandboxes, workspace.id);
+        this.logger.info(
+          `[cloud][modal] terminate verify id=${workspace.id} refetch=${JSON.stringify(
+            refetched,
+            (_k, v) => (typeof v === "bigint" ? Number(v) : v),
+          )}`,
+        );
         if (refetched) {
-          this.logger.warn(`[cloud][modal] sandbox still present after terminate id=${workspace.id}`);
-          throw new Error("sandbox still present after terminate");
+          const status = (refetched as any).status ?? (refetched as any).state ?? "";
+          const statusText = typeof status === "string" ? status.toLowerCase() : "";
+          if (statusText.includes("terminated")) {
+            this.logger.info(`[cloud][modal] sandbox terminated (status=${String(status)}) id=${workspace.id}`);
+          } else {
+            this.logger.warn(
+              `[cloud][modal] sandbox still present after terminate id=${workspace.id} status=${String(status)}`,
+            );
+            throw new Error("sandbox still present after terminate");
+          }
         }
       } catch (e) {
         const message = String(e);
