@@ -145,9 +145,25 @@ export class ModalCloudProvider implements CloudProvider {
   }
 
   async terminateWorkspace(workspace: CloudWorkspace): Promise<void> {
-    const sandbox = this.sandboxes.get(workspace.id);
-    if (!sandbox) return;
-    await sandbox.terminate().catch(() => {});
+    let sandbox = this.sandboxes.get(workspace.id);
+    if (!sandbox) {
+      const fromId = (this.client as any).sandboxes?.fromId;
+      if (typeof fromId === "function") {
+        try {
+          sandbox = await fromId.call(this.client.sandboxes, workspace.id);
+        } catch (e) {
+          this.logger.warn(`[cloud][modal] sandbox handle missing id=${workspace.id}, fromId failed: ${String(e)}`);
+          return;
+        }
+      } else {
+        this.logger.warn(`[cloud][modal] sandbox handle missing id=${workspace.id}, no fromId available`);
+        return;
+      }
+    }
+    await sandbox.terminate().catch((e: unknown) => {
+      this.logger.warn(`[cloud][modal] sandbox terminate error id=${workspace.id}: ${String(e)}`);
+      throw e;
+    });
     this.sandboxes.delete(workspace.id);
   }
 
