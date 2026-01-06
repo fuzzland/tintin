@@ -1,53 +1,62 @@
-# Repository Guidelines
+# Tintin Developer Guide
 
-## Project Structure & Module Organization
+## What it does
 
-- `src/`: TypeScript source for the daemon/runtime.
-  - `src/main.ts`: daemon entrypoint.
-  - `src/runtime/`: core modules (config, DB, session manager, service orchestration).
-  - `src/runtime/platform/`: Slack and Telegram integrations.
-  - `src/runtime/migrations/`: database schema migrations.
-- `tintin.ts`: CLI entrypoint (published as the `tintin` binary).
-- `config.example.toml`: config template; local `config.toml` is gitignored.
-- `setup_docs/`: Slack/Telegram setup docs.
-- `dist/`: build output (generated; do not edit by hand).
+- Chat entrypoint for Codex / Claude Code via Telegram or Slack; can drive Playwright MCP / Browserbase / Hyperbrowser.
+- Runs locally or in cloud mode (Local provider or Modal sandboxes); ships a lightweight Cloud UI and `tinc` CLI for runs/diffs/screenshots.
 
-## Build, Test, and Development Commands
+## Architecture
 
-Requires Node.js `>=20` (see `package.json` `engines`).
-
-```bash
-npm ci            # install deps (CI-style)
-npm run typecheck # TypeScript checks (no emit)
-npm run build     # compile to dist/
-npm start         # run daemon: node dist/src/main.js
-npm run migrate   # run DB migrations: node dist/src/migrate.js
+```
+Telegram/Slack/CLI/UI
+   │
+   ▼
+controller2 + sessionManager
+   ├─ agents: codex / claudeCode
+   ├─ browser: playwrightMcp / browserbase / hyperbrowser
+   └─ cloud: cloud/manager -> localProvider | modalProvider
+   ▼
+DB (Kysely) + JSONL/diff/screenshots/S3
 ```
 
-Example local run:
+## Layout
+
+- `tintin.ts`: CLI entrypoint (`tintin`).
+- `src/main.ts`: daemon entrypoint (load config, init DB, migrate, start service).
+- `src/runtime/`: core (config, db, log, service, controller2, sessionManager, agents, messaging, streamer, security/redact, playwrightMcp).
+- `src/runtime/cloud/`: cloud manager, providers (local/modal), GitHub App/OAuth/repos, proxy, secrets, s3, UI tokens/artifacts, browser adapters.
+- `setup_docs/`: Slack/Telegram setup.
+
+## Key commands
 
 ```bash
+npm ci
+npm run typecheck
 npm run build
+npm start                        # node dist/src/main.js
+npm run migrate
 CONFIG_PATH=./config.toml node dist/tintin.js start
 ```
 
-## Coding Style & Naming Conventions
+## Config essentials
 
-- TypeScript + ESM (`"type": "module"`). Keep code strict; avoid `any` unless unavoidable.
-- Match existing formatting: 2-space indentation, double quotes, semicolons.
-- Naming: `camelCase` for values, `PascalCase` for types/classes, and migrations as `src/runtime/migrations/0004_short_description.ts` (increment prefix; use `snake_case`).
+- Use `config.example.toml` as template; keep local `config.toml` out of git.
+- Important sections: `[bot]`, `[cloud]`, `[cloud.modal]`, `[playwright_mcp]`, `[security]`, `[cloud.ui]`, `[cloud.proxy]`.
+- Store secrets as `env:VAR`; never commit real tokens or data dirs (`data/`, `.codex/`).
 
-## Testing Guidelines
+## Coding practices
 
-- No automated test suite is configured yet. Use `npm run typecheck` and do a quick smoke run (start the daemon and exercise a basic CLI command like `status`).
-- DB/schema changes must include a new migration in `src/runtime/migrations/` and be verified via `npm run migrate`.
+- TypeScript + ESM, 2-space indent, double quotes, semicolons; avoid `any`, use `import type`.
+- Log with injected `logger` (`debug/info/warn/error`); include context and timing for cloud paths.
+- Prefer POSIX paths; handle timeouts/concurrency carefully in cloud flows.
+- For migrations: add `src/runtime/migrations/000x_description.ts`, update README/config example if config changes.
 
-## Commit & Pull Request Guidelines
+## Testing & verification
 
-- Commits use short, imperative summaries (e.g., “Fix CI”, “Bump version”, “Add Playwright MCP sidecar”).
-- PRs should include: what/why, steps to verify, and notes on config/migrations. For Slack/Telegram UX changes, include screenshots or message transcripts.
+- Minimal by default: run `npm run typecheck`; smoke test daemon plus a sample run/status (local or cloud).
+- Cloud Modal issues: use trace logs (`log_level=info`) to see `[cloud][modal][trace]` stages; first sandbox pull may be slow due to image fetch.
 
-## Security & Configuration Tips
+## Commit/PR
 
-- Never commit secrets or runtime data: `config.toml`, `data/`, and `.codex/` are intentionally gitignored. Prefer `env:VAR` for tokens/secrets in `config.toml`.
-- When adding new config fields or changing behavior, update `config.example.toml` and `README.md`.
+- Commits: short imperative (e.g., “Add Modal tracing”).
+- PRs: state what/why, how verified, note config/migrations; include chat UX screenshots when relevant.
