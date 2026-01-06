@@ -116,6 +116,10 @@ export class CloudManager {
     this.sessionManager = sessionManager;
   }
 
+  private normalizeCloudProjectId(run: CloudRunsTable): string {
+    return run.primary_repo_id ? `cloud:${run.primary_repo_id}` : `cloud:playground:${run.id}`;
+  }
+
   private ensureEnabled() {
     if (!this.config.cloud?.enabled) throw new Error("Cloud mode is not enabled.");
   }
@@ -2079,6 +2083,11 @@ export class CloudManager {
       exit_code: null,
       finished_at: null,
     });
+    const normalizedProjectId = this.normalizeCloudProjectId(run);
+    if (session.project_id !== normalizedProjectId) {
+      await updateSession(this.db, session.id, { project_id: normalizedProjectId });
+      session = { ...session, project_id: normalizedProjectId };
+    }
     await updateCloudRun(this.db, run.id, { status: "running", finished_at: null, diff_patch: null, diff_summary: null });
 
     const workspace = this.workspaceFromId(run.workspace_id);
