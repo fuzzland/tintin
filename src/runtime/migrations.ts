@@ -14,6 +14,7 @@ import * as gitCommitterFix0011 from "./migrations/0011_git_committer_fix.js";
 import * as hyperbrowserSession0012 from "./migrations/0012_hyperbrowser_session.js";
 import * as identityVerbosity0013 from "./migrations/0013_identity_message_verbosity.js";
 import * as identityBranchRule0014 from "./migrations/0014_identity_branch_name_rule.js";
+import * as cloudWorkspaces0015 from "./migrations/0015_cloud_workspaces.js";
 
 const provider = {
   async getMigrations() {
@@ -31,6 +32,7 @@ const provider = {
       "0012_hyperbrowser_session": hyperbrowserSession0012,
       "0013_identity_message_verbosity": identityVerbosity0013,
       "0014_identity_branch_name_rule": identityBranchRule0014,
+      "0015_cloud_workspaces": cloudWorkspaces0015,
     };
   },
 };
