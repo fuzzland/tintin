@@ -121,6 +121,28 @@ export async function handleProxyRequest(opts: {
   const body = await readRequestBuffer(opts.req);
   const targetBase = opts.kind === "openai" ? proxy.openai_base_url : proxy.anthropic_base_url;
   const targetPath = opts.url.pathname.slice(opts.pathPrefix.length) || "/";
+
+  // Guard against misconfigured OpenAI base URLs
+  if (opts.kind === "openai") {
+    try {
+      const baseUrl = new URL(targetBase);
+      const basePath = baseUrl.pathname;
+      const hasBasePath = basePath && basePath !== "/";
+      const hasVersionPrefix =
+        targetPath.startsWith("/v1/") || targetPath === "/v1" || targetPath.startsWith("v1/");
+      if (!hasBasePath && !hasVersionPrefix) {
+        opts.logger.warn(
+          `[cloud] proxy openai_base_url missing version path (base=${targetBase}, path=${targetPath}). Set [cloud.proxy].openai_base_url to include /v1 or call /cloud/proxy/openai/v1/...`,
+        );
+        opts.res.statusCode = 502;
+        opts.res.end("proxy misconfigured: openai_base_url must include /v1 or request path must include /v1");
+        return;
+      }
+    } catch (e) {
+      opts.logger.warn(`[cloud] proxy openai_base_url invalid (${targetBase}): ${String(e)}`);
+    }
+  }
+
   const target = buildTargetUrl({ baseUrl: targetBase, path: targetPath, search: opts.url.search });
 
   const headers: Record<string, string> = {};

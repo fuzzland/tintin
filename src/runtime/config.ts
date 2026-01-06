@@ -595,7 +595,7 @@ function normalizeCloudProxySection(value: unknown): CloudProxySection {
   const openai_base_url =
     typeof (raw as any).openai_base_url === "string" && (raw as any).openai_base_url.length > 0
       ? (raw as any).openai_base_url
-      : "https://api.openai.com";
+      : "https://api.openai.com/v1";
   const anthropic_api_key = typeof (raw as any).anthropic_api_key === "string" ? (raw as any).anthropic_api_key : "";
   const anthropic_base_url =
     typeof (raw as any).anthropic_base_url === "string" && (raw as any).anthropic_base_url.length > 0
