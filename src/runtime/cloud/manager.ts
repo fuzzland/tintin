@@ -320,34 +320,9 @@ export class CloudManager {
   }
 
   async searchSnapshots(identityId: string, query: string, limit = 5): Promise<CloudSnapshotsTable[]> {
+    const matches = await this.pinecone.searchSnapshots(identityId, query, limit);
     const seen = new Set<string>();
     const rows: CloudSnapshotsTable[] = [];
-
-    // Lexical priority: include direct keyword matches first.
-    const q = query.trim().toLowerCase();
-    if (q.length > 0) {
-      const lexMatches = await this.db
-        .selectFrom("cloud_snapshots")
-        .selectAll()
-        .where("identity_id", "=", identityId)
-        .where((eb) =>
-          eb.or([
-            eb("title", "like", `%${q}%`),
-            eb("note", "like", `%${q}%`),
-          ]),
-        )
-        .orderBy("created_at", "desc")
-        .limit(limit * 2)
-        .execute();
-      for (const snap of lexMatches) {
-        if (seen.has(snap.id)) continue;
-        rows.push(snap);
-        seen.add(snap.id);
-      }
-    }
-
-    // Semantic matches fill remaining slots.
-    const matches = await this.pinecone.searchSnapshots(identityId, query, limit * 2);
     for (const m of matches) {
       const id = m.id;
       if (!id || seen.has(id)) continue;
@@ -357,8 +332,7 @@ export class CloudManager {
         seen.add(id);
       }
     }
-
-    return rows.slice(0, limit);
+    return rows;
   }
 
   async saveSnapshot(opts: {
