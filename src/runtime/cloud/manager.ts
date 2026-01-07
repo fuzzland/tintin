@@ -413,16 +413,13 @@ export class CloudManager {
   private async sweepExpiredWorkspaces(): Promise<void> {
     if (this.provider.id === "local") return;
     const now = nowMs();
-    const expired = await this.db
+    const all = await this.db
       .selectFrom("cloud_workspaces")
       .selectAll()
-      .where("expires_at", "<=", now)
       .execute();
-    if (expired.length === 0) {
-      this.logger.debug("[cloud][workspace] sweep expired none");
-      return;
-    }
-    this.logger.info(`[cloud][workspace] sweep expired count=${expired.length}`);
+    const expired = all.filter((ws) => (ws.expires_at ?? 0) <= now);
+    const active = all.length - expired.length;
+    this.logger.info(`[cloud][workspace] sweep expired count=${expired.length} active=${active}`);
     for (const ws of expired) {
       this.logger.warn(`[cloud][workspace] terminating expired workspace id=${ws.id} provider=${ws.provider}`);
       await this.terminateWorkspaceAndCleanup(ws.id, null, ws.run_id ?? null);
