@@ -1346,10 +1346,10 @@ export class BotController {
           const status = humanStatus(s.source_status);
           return [
             `${idx + 1}.`,
-            `**id:** ${s.id}`,
-            `**title:** ${title}`,
-            `**status:** ${status}`,
-            `**note:** ${noteShort}`,
+            `*id:* ${s.id}`,
+            `*title:* ${title}`,
+            `*status:* ${status}`,
+            `*note:* ${noteShort}`,
             "---",
           ].join("\n");
         };
@@ -1381,10 +1381,10 @@ export class BotController {
           const status = humanStatus(s.source_status);
           return [
             `${idx + 1}.`,
-            `**id:** ${s.id}`,
-            `**title:** ${title}`,
-            `**status:** ${status}`,
-            `**note:** ${noteShort}`,
+            `*id:* ${s.id}`,
+            `*title:* ${title}`,
+            `*status:* ${status}`,
+            `*note:* ${noteShort}`,
             "---",
           ].join("\n");
         };
