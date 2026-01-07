@@ -3,8 +3,8 @@ import type { Logger } from "./log.js";
 import { fetch } from "undici";
 
 type PineconeIndex = {
-  upsert: (payload: any) => Promise<void>;
-  deleteMany: (payload: any) => Promise<void>;
+  upsert: (records: any[]) => Promise<void>;
+  deleteMany: (ids: string[]) => Promise<void>;
   query: (payload: any) => Promise<any>;
 };
 
@@ -58,24 +58,26 @@ export class PineconeClient {
       const vector = Array.isArray(opts.vector) && opts.vector.length > 0 ? opts.vector : await this.embed(vectorText);
       const sanitized = sanitizeVector(vector);
       if (!sanitized) {
-        this.logger.warn(`[pinecone] upsert skipped snapshot=${opts.snapshotId} (missing/invalid embedding)`);
-        return;
+        throw new Error("missing or invalid embedding");
       }
-      await idx.upsert({
-        vectors: [
-          {
-            id: opts.snapshotId,
-            values: sanitized,
-            metadata: {
-              title: opts.title,
-              note: opts.note,
-              run_id: opts.runId,
-              identity_id: opts.identityId,
-              created_at: opts.createdAt,
-            },
+      const values = Array.from(sanitized);
+      if (!Array.isArray(values) || values.length === 0) {
+        throw new Error("empty embedding vector");
+      }
+      await idx.upsert([
+        {
+          id: opts.snapshotId,
+          values,
+          metadata: {
+            title: opts.title,
+            note: opts.note,
+            run_id: opts.runId,
+            identity_id: opts.identityId,
+            created_at: opts.createdAt,
           },
-        ],
-      });
+        },
+      ]);
+      this.logger.info(`[pinecone] upsert ok snapshot=${opts.snapshotId} len=${values.length}`);
     } catch (e) {
       const shape =
         Array.isArray(opts.vector) || ArrayBuffer.isView(opts.vector)
@@ -89,7 +91,7 @@ export class PineconeClient {
     const idx = await this.getIndex();
     if (!idx) return;
     try {
-      await idx.deleteMany({ ids: [snapshotId] });
+      await idx.deleteMany([snapshotId]);
     } catch (e) {
       this.logger.warn(`[pinecone] delete failed snapshot=${snapshotId}: ${String(e)}`);
     }
@@ -102,8 +104,7 @@ export class PineconeClient {
       const vector = await this.embed(query);
       const sanitized = sanitizeVector(vector);
       if (!sanitized) {
-        this.logger.warn("[pinecone] search skipped (missing/invalid embedding config)");
-        return [];
+        throw new Error("missing or invalid embedding");
       }
       const result = await idx.query({
         topK,
