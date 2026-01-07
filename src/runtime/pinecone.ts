@@ -55,19 +55,17 @@ export class PineconeClient {
     if (!idx) return;
     try {
       const vectorText = (opts.embedText ?? `${opts.title}\n${opts.note}`).trim();
-      const vector =
-        Array.isArray(opts.vector) && opts.vector.length > 0
-          ? opts.vector
-          : await this.embed(vectorText);
-      if (!vector) {
-        this.logger.warn(`[pinecone] upsert skipped snapshot=${opts.snapshotId} (missing embedding)`);
+      const vector = Array.isArray(opts.vector) && opts.vector.length > 0 ? opts.vector : await this.embed(vectorText);
+      const sanitized = sanitizeVector(vector);
+      if (!sanitized) {
+        this.logger.warn(`[pinecone] upsert skipped snapshot=${opts.snapshotId} (missing/invalid embedding)`);
         return;
       }
       await idx.upsert({
         vectors: [
           {
             id: opts.snapshotId,
-            values: vector,
+            values: sanitized,
             metadata: {
               title: opts.title,
               note: opts.note,
@@ -98,14 +96,14 @@ export class PineconeClient {
     if (!idx) return [];
     try {
       const vector = await this.embed(query);
-      if (!vector) {
-        this.logger.warn("[pinecone] search skipped (missing embedding config)");
+      const sanitized = sanitizeVector(vector);
+      if (!sanitized) {
+        this.logger.warn("[pinecone] search skipped (missing/invalid embedding config)");
         return [];
       }
       const result = await idx.query({
         topK,
-        id: undefined,
-        vector,
+        vector: sanitized,
         filter: { identity_id: identityId },
         includeMetadata: true,
       });
@@ -144,7 +142,7 @@ export class PineconeClient {
         this.logger.warn("[pinecone] embed response missing embedding");
         return null;
       }
-      return embedding.map((n: unknown) => (typeof n === "number" ? n : 0));
+      return embedding;
     } catch (e) {
       this.logger.warn(`[pinecone] embed error: ${String(e)}`);
       return null;
@@ -164,4 +162,19 @@ function hashToVector(text: string): number[] {
     h3 = (h3 * 17 + c) % 100000;
   }
   return [h1 / 100000, h2 / 100000, h3 / 100000];
+}
+
+function sanitizeVector(input: unknown): number[] | null {
+  if (!Array.isArray(input)) return null;
+  const out: number[] = [];
+  for (const v of input) {
+    if (typeof v === "number" && Number.isFinite(v)) {
+      out.push(v);
+    } else if (typeof v === "string" && v.trim().length > 0 && Number.isFinite(Number(v))) {
+      out.push(Number(v));
+    } else {
+      return null;
+    }
+  }
+  return out.length > 0 ? out : null;
 }
