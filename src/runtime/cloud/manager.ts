@@ -242,14 +242,9 @@ export class CloudManager {
     const reason = (opts.note ?? "").trim();
     const summary = (run.diff_summary ?? "").trim();
     const title = `Prompt: ${truncate(prompt, 80)}`;
-    const noteParts = [
-      `status: ${statusText}`,
-      `prompt: ${prompt}`,
-      reason ? `note: ${reason}` : null,
-      summary ? `summary: ${summary}` : null,
-    ].filter(Boolean) as string[];
-    const note = noteParts.join("\n");
-    const embedText = [title, note].filter(Boolean).join("\n");
+    const noteParts = [reason, summary].filter((v) => v && v.trim().length > 0) as string[];
+    const note = noteParts.length > 0 ? truncate(noteParts.join(" | "), 500) : "";
+    const embedText = [title, `status: ${statusText}`, note].filter(Boolean).join("\n");
     this.logger.info(
       `[cloud][snapshot] created id=${snapshotId} run=${run.id} workspace=${opts.workspaceId} source=${opts.sourceStatus}`,
     );
@@ -325,9 +320,34 @@ export class CloudManager {
   }
 
   async searchSnapshots(identityId: string, query: string, limit = 5): Promise<CloudSnapshotsTable[]> {
-    const matches = await this.pinecone.searchSnapshots(identityId, query, limit);
     const seen = new Set<string>();
     const rows: CloudSnapshotsTable[] = [];
+
+    // Lexical priority: include direct keyword matches first.
+    const q = query.trim().toLowerCase();
+    if (q.length > 0) {
+      const lexMatches = await this.db
+        .selectFrom("cloud_snapshots")
+        .selectAll()
+        .where("identity_id", "=", identityId)
+        .where((eb) =>
+          eb.or([
+            eb("title", "like", `%${q}%`),
+            eb("note", "like", `%${q}%`),
+          ]),
+        )
+        .orderBy("created_at", "desc")
+        .limit(limit * 2)
+        .execute();
+      for (const snap of lexMatches) {
+        if (seen.has(snap.id)) continue;
+        rows.push(snap);
+        seen.add(snap.id);
+      }
+    }
+
+    // Semantic matches fill remaining slots.
+    const matches = await this.pinecone.searchSnapshots(identityId, query, limit * 2);
     for (const m of matches) {
       const id = m.id;
       if (!id || seen.has(id)) continue;
@@ -337,7 +357,8 @@ export class CloudManager {
         seen.add(id);
       }
     }
-    return rows;
+
+    return rows.slice(0, limit);
   }
 
   async saveSnapshot(opts: {

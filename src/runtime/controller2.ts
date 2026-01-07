@@ -1339,15 +1339,18 @@ export class BotController {
           snapshots.map((s) => s.id),
         );
         const formatSnapshot = (s: (typeof snapshots)[number], idx: number) => {
-          const ts = new Date(s.created_at).toISOString();
-          const parts = [
-            `run: ${s.run_id}`,
-            `at: ${ts}`,
-            s.source_status ? `status: ${s.source_status}` : null,
-            s.title ? `title: ${s.title}` : null,
-            s.note ? `note: ${s.note}` : null,
-          ].filter(Boolean);
-          return `${idx + 1}. ${s.id}\n   ${parts.join("\n   ")}`;
+          const noteText = (s.note ?? "").split("\n")[0] ?? "";
+          const noteShort = noteText.trim().length > 0 ? truncateText(noteText.trim(), 200) : "(none)";
+          const title = s.title?.trim().length ? truncateText(s.title.trim(), 120) : "(none)";
+          const status = s.source_status?.trim().length ? s.source_status : "(unknown)";
+          return [
+            `${idx + 1}.`,
+            `**id:** ${s.id}`,
+            `**title:** ${title}`,
+            `**status:** ${status}`,
+            `**note:** ${noteShort}`,
+            "---",
+          ].join("\n");
         };
         const lines = snapshots.map(formatSnapshot);
         lines.push(`Restore with ${formatCmd("snapshot restore <index|snapshotId>")}.`);
@@ -1370,15 +1373,18 @@ export class BotController {
           snapshots.map((s) => s.id),
         );
         const formatSnapshot = (s: (typeof snapshots)[number], idx: number) => {
-          const ts = new Date(s.created_at).toISOString();
-          const parts = [
-            `run: ${s.run_id}`,
-            `at: ${ts}`,
-            s.source_status ? `status: ${s.source_status}` : null,
-            s.title ? `title: ${s.title}` : null,
-            s.note ? `note: ${s.note}` : null,
-          ].filter(Boolean);
-          return `${idx + 1}. ${s.id}\n   ${parts.join("\n   ")}`;
+          const noteText = (s.note ?? "").split("\n")[0] ?? "";
+          const noteShort = noteText.trim().length > 0 ? truncateText(noteText.trim(), 200) : "(none)";
+          const title = s.title?.trim().length ? truncateText(s.title.trim(), 120) : "(none)";
+          const status = s.source_status?.trim().length ? s.source_status : "(unknown)";
+          return [
+            `${idx + 1}.`,
+            `**id:** ${s.id}`,
+            `**title:** ${title}`,
+            `**status:** ${status}`,
+            `**note:** ${noteShort}`,
+            "---",
+          ].join("\n");
         };
         const lines = snapshots.map(formatSnapshot);
         lines.push(`Restore with ${formatCmd("snapshot restore <index|snapshotId>")}.`);
@@ -3297,6 +3303,11 @@ function normalizeCloudText(text: string): string {
     out = [cleanHead, ...parts].join(" ").trim();
   }
   return out;
+}
+
+function truncateText(value: string, max: number): string {
+  if (value.length <= max) return value;
+  return `${value.slice(0, Math.max(0, max - 1))}…`;
 }
 
 function parseCloudCommand(text: string): CloudCommand | null {

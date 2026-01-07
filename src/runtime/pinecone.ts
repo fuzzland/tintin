@@ -152,7 +152,7 @@ export class PineconeClient {
       const result = await idx.query({
         topK,
         vector: sanitized,
-        filter: { identity_id: { $eq: identityId } },
+        filter: { identity_id: identityId },
         includeMetadata: true,
       });
       const matches = Array.isArray(result.matches) ? result.matches : [];
