@@ -2550,7 +2550,12 @@ export class CloudManager {
       }
       if (opts.debug) {
         await this.logRemoteAgentError(opts.debug).catch((e) => {
-          this.logger.warn(`[cloud] failed to read agent stderr: ${String(e)}`);
+          const msg = String(e);
+          if (msg.includes("Sandbox has already completed")) {
+            this.logger.debug(`[cloud] skip agent stderr (sandbox completed): ${msg}`);
+          } else {
+            this.logger.warn(`[cloud] failed to read agent stderr: ${msg}`);
+          }
         });
       }
       for (const syncer of opts.logSyncers) syncer.stop();

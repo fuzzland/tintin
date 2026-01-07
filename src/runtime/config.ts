@@ -143,6 +143,7 @@ export interface CloudSection {
 export interface PineconeSection {
   api_key: string;
   index: string;
+  dimension?: number;
 }
 
 export interface SnapshotCleanupSection {

@@ -6,6 +6,7 @@ type PineconeIndex = {
   upsert: (records: any[]) => Promise<void>;
   deleteMany: (ids: string[]) => Promise<void>;
   query: (payload: any) => Promise<any>;
+  describeIndexStats?: () => Promise<{ dimension?: number }>;
 };
 
 export interface SnapshotSearchResult {
@@ -21,6 +22,7 @@ export type EmbeddingConfig = {
 
 export class PineconeClient {
   private index: PineconeIndex | null = null;
+  private indexDimension: number | null = null;
   constructor(
     private readonly config: PineconeSection | null,
     private readonly logger: Logger,
@@ -41,6 +43,35 @@ export class PineconeClient {
     }
   }
 
+  private async getTargetDimension(): Promise<number | null> {
+    if (this.indexDimension !== null) return this.indexDimension;
+    const configuredDim =
+      this.config && typeof this.config.dimension === "number" && Number.isFinite(this.config.dimension)
+        ? Math.floor(this.config.dimension)
+        : null;
+    if (configuredDim && configuredDim > 0) {
+      this.indexDimension = configuredDim;
+    }
+    const idx = await this.getIndex();
+    if (!idx) return this.indexDimension;
+    if (typeof idx.describeIndexStats === "function") {
+      try {
+        const stats = await idx.describeIndexStats();
+        const dim = Number((stats as any)?.dimension);
+        if (Number.isFinite(dim) && dim > 0) {
+          if (this.indexDimension && this.indexDimension !== dim) {
+            this.logger.warn(`[pinecone] index dimension mismatch config=${this.indexDimension} actual=${dim}`);
+          }
+          this.indexDimension = Math.floor(dim);
+          this.logger.info(`[pinecone] index dimension=${this.indexDimension}`);
+        }
+      } catch (e) {
+        this.logger.warn(`[pinecone] describeIndexStats failed: ${String(e)}`);
+      }
+    }
+    return this.indexDimension;
+  }
+
   async upsertSnapshotDoc(opts: {
     snapshotId: string;
     identityId: string;
@@ -54,15 +85,20 @@ export class PineconeClient {
     const idx = await this.getIndex();
     if (!idx) return;
     try {
+      const targetDimension = await this.getTargetDimension();
+      if (!targetDimension) {
+        throw new Error("index dimension unknown");
+      }
       const vectorText = (opts.embedText ?? `${opts.title}\n${opts.note}`).trim();
-      const vector = Array.isArray(opts.vector) && opts.vector.length > 0 ? opts.vector : await this.embed(vectorText);
+      const vector =
+        Array.isArray(opts.vector) && opts.vector.length > 0 ? opts.vector : await this.embed(vectorText, targetDimension);
       const sanitized = sanitizeVector(vector);
       if (!sanitized) {
         throw new Error("missing or invalid embedding");
       }
       const values = Array.from(sanitized);
-      if (!Array.isArray(values) || values.length === 0) {
-        throw new Error("empty embedding vector");
+      if (!Array.isArray(values) || values.length === 0 || values.length !== targetDimension) {
+        throw new Error(`invalid embedding vector length=${values.length} expected=${targetDimension}`);
       }
       await idx.upsert([
         {
@@ -83,7 +119,7 @@ export class PineconeClient {
         Array.isArray(opts.vector) || ArrayBuffer.isView(opts.vector)
           ? `vector_len=${(opts.vector as any)?.length ?? "?"} type=${opts.vector?.constructor?.name ?? typeof opts.vector}`
           : `vector_type=${typeof opts.vector}`;
-      this.logger.warn(`[pinecone] upsert failed snapshot=${opts.snapshotId} ${shape}: ${String(e)}`);
+      this.logger.error(`[pinecone] upsert failed snapshot=${opts.snapshotId} ${shape}: ${String(e)}`);
     }
   }
 
@@ -101,10 +137,17 @@ export class PineconeClient {
     const idx = await this.getIndex();
     if (!idx) return [];
     try {
-      const vector = await this.embed(query);
+      const targetDimension = await this.getTargetDimension();
+      if (!targetDimension) {
+        throw new Error("index dimension unknown");
+      }
+      const vector = await this.embed(query, targetDimension);
       const sanitized = sanitizeVector(vector);
       if (!sanitized) {
         throw new Error("missing or invalid embedding");
+      }
+      if (sanitized.length !== targetDimension) {
+        throw new Error(`invalid embedding vector length=${sanitized.length} expected=${targetDimension}`);
       }
       const result = await idx.query({
         topK,
@@ -118,24 +161,31 @@ export class PineconeClient {
         attributes: m.metadata ?? {},
       }));
     } catch (e) {
-      this.logger.warn(`[pinecone] search failed: ${String(e)}`);
+      this.logger.error(`[pinecone] search failed: ${String(e)}`);
       return [];
     }
   }
 
-  private async embed(text: string): Promise<number[] | null> {
+  private async embed(text: string, dimension?: number): Promise<number[] | null> {
     const config = this.embeddingConfig;
-    if (!config) return null;
+    if (!config) {
+      this.logger.error("[pinecone] embed config missing");
+      return null;
+    }
     const base = config.baseUrl.replace(/\/+$/, "");
     const url = `${base}/embeddings`;
     try {
+      const body: Record<string, unknown> = { model: config.model, input: text };
+      if (typeof dimension === "number" && Number.isFinite(dimension) && dimension > 0) {
+        body.dimensions = Math.floor(dimension);
+      }
       const res = await fetch(url, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           authorization: `Bearer ${config.apiKey}`,
         },
-        body: JSON.stringify({ model: config.model, input: text }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
         this.logger.warn(`[pinecone] embed failed status=${res.status}`);
@@ -145,6 +195,10 @@ export class PineconeClient {
       const embedding = Array.isArray(data?.data) && data.data[0] && Array.isArray(data.data[0].embedding) ? data.data[0].embedding : null;
       if (!embedding) {
         this.logger.warn("[pinecone] embed response missing embedding");
+        return null;
+      }
+      if (dimension && embedding.length !== dimension) {
+        this.logger.error(`[pinecone] embed dimension mismatch expected=${dimension} actual=${embedding.length}`);
         return null;
       }
       return embedding;

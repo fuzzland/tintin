@@ -189,6 +189,7 @@ api_base_url = "https://api.hyperbrowser.ai"
 [pinecone]
 api_key = "<PINECONE_API_KEY>"
 index = "tintin-snapshots"
+dimension = 512
 
 [cloud.snapshot_cleanup]
 enabled = true
