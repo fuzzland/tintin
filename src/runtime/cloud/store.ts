@@ -242,6 +242,7 @@ export async function createCloudRun(db: Db, opts: {
   status: CloudRunStatus;
   sessionId?: string | null;
   snapshotId?: string | null;
+  prompt: string;
 }) {
   const now = nowMs();
   const id = crypto.randomUUID();
@@ -256,6 +257,7 @@ export async function createCloudRun(db: Db, opts: {
       status: opts.status,
       session_id: opts.sessionId ?? null,
       snapshot_id: opts.snapshotId ?? null,
+      prompt: opts.prompt,
       diff_summary: null,
       diff_patch: null,
       started_at: null,

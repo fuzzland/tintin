@@ -1338,12 +1338,18 @@ export class BotController {
           identity.id,
           snapshots.map((s) => s.id),
         );
-        const lines = snapshots.map((s, i) => {
+        const formatSnapshot = (s: (typeof snapshots)[number], idx: number) => {
           const ts = new Date(s.created_at).toISOString();
-          const title = s.title ? ` ${s.title}` : "";
-          const note = s.note ? ` — ${s.note}` : "";
-          return `${i + 1}. ${s.id} (run ${s.run_id}, ${ts})${title}${note}`;
-        });
+          const parts = [
+            `run: ${s.run_id}`,
+            `at: ${ts}`,
+            s.source_status ? `status: ${s.source_status}` : null,
+            s.title ? `title: ${s.title}` : null,
+            s.note ? `note: ${s.note}` : null,
+          ].filter(Boolean);
+          return `${idx + 1}. ${s.id}\n   ${parts.join("\n   ")}`;
+        };
+        const lines = snapshots.map(formatSnapshot);
         lines.push(`Restore with ${formatCmd("snapshot restore <index|snapshotId>")}.`);
         await reply(lines.join("\n"));
         return true;
@@ -1363,12 +1369,18 @@ export class BotController {
           identity.id,
           snapshots.map((s) => s.id),
         );
-        const lines = snapshots.map((s, i) => {
+        const formatSnapshot = (s: (typeof snapshots)[number], idx: number) => {
           const ts = new Date(s.created_at).toISOString();
-          const title = s.title ? ` ${s.title}` : "";
-          const note = s.note ? ` — ${s.note}` : "";
-          return `${i + 1}. ${s.id} (run ${s.run_id}, ${ts})${title}${note}`;
-        });
+          const parts = [
+            `run: ${s.run_id}`,
+            `at: ${ts}`,
+            s.source_status ? `status: ${s.source_status}` : null,
+            s.title ? `title: ${s.title}` : null,
+            s.note ? `note: ${s.note}` : null,
+          ].filter(Boolean);
+          return `${idx + 1}. ${s.id}\n   ${parts.join("\n   ")}`;
+        };
+        const lines = snapshots.map(formatSnapshot);
         lines.push(`Restore with ${formatCmd("snapshot restore <index|snapshotId>")}.`);
         await reply(lines.join("\n"));
         return true;
@@ -1419,6 +1431,15 @@ export class BotController {
           });
         } catch (e) {
           await reply(`Snapshot restore failed: ${String(e)}`);
+        }
+        return true;
+      }
+      case "snapshot_clear": {
+        try {
+          const count = await this.cloudManager.clearSnapshots(identity.id);
+          await reply(`Cleared ${count} snapshots for this identity.`);
+        } catch (e) {
+          await reply(`Snapshot clear failed: ${String(e)}`);
         }
         return true;
       }
@@ -3263,7 +3284,8 @@ type CloudCommand =
   | { kind: "snapshot_save"; note?: string }
   | { kind: "snapshot_list"; limit?: number }
   | { kind: "snapshot_search"; query: string }
-  | { kind: "snapshot_restore"; target: string };
+  | { kind: "snapshot_restore"; target: string }
+  | { kind: "snapshot_clear" };
 
 function normalizeCloudText(text: string): string {
   let out = text.trim();
@@ -3339,6 +3361,9 @@ function parseCloudCommand(text: string): CloudCommand | null {
     }
     if (sub === "restore" && tokens.length > 0) {
       return { kind: "snapshot_restore", target: tokens.join(" ").trim() };
+    }
+    if (sub === "clear") {
+      return { kind: "snapshot_clear" };
     }
   }
   if (head === "actions") return { kind: "actions_list" };

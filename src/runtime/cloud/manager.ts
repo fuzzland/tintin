@@ -54,6 +54,11 @@ function toPosix(p: string): string {
   return p.replace(/\\/g, "/");
 }
 
+function truncate(value: string, max: number): string {
+  if (value.length <= max) return value;
+  return `${value.slice(0, Math.max(0, max - 1))}…`;
+}
+
 type SnapshotCleanupConfig = {
   enabled: boolean;
   ttlMs: number;
@@ -232,9 +237,19 @@ export class CloudManager {
       return null;
     }
     if (!snapshotId) return null;
-    const title = `Run ${run.id} ${opts.sourceStatus}`.trim();
-    const note = opts.note ?? "";
-    const embedText = [title, note, run.diff_summary ?? ""].filter(Boolean).join("\n");
+    const prompt = (run.prompt ?? "").trim() || "(no prompt)";
+    const statusText = opts.sourceStatus.trim() || "unknown";
+    const reason = (opts.note ?? "").trim();
+    const summary = (run.diff_summary ?? "").trim();
+    const title = `Prompt: ${truncate(prompt, 80)}`;
+    const noteParts = [
+      `status: ${statusText}`,
+      `prompt: ${prompt}`,
+      reason ? `note: ${reason}` : null,
+      summary ? `summary: ${summary}` : null,
+    ].filter(Boolean) as string[];
+    const note = noteParts.join("\n");
+    const embedText = [title, note].filter(Boolean).join("\n");
     this.logger.info(
       `[cloud][snapshot] created id=${snapshotId} run=${run.id} workspace=${opts.workspaceId} source=${opts.sourceStatus}`,
     );
@@ -289,6 +304,24 @@ export class CloudManager {
 
   async listSnapshots(identityId: string, limit?: number): Promise<CloudSnapshotsTable[]> {
     return await listSnapshotsByIdentity(this.db, { identityId, limit });
+  }
+
+  async clearSnapshots(identityId: string): Promise<number> {
+    const snaps = await listSnapshotsByIdentity(this.db, { identityId });
+    let deleted = 0;
+    for (const snap of snaps) {
+      try {
+        if (snap.run_id) {
+          await updateCloudRun(this.db, snap.run_id, { snapshot_id: null });
+        }
+        await this.deleteSnapshotArtifacts(snap.id);
+        deleted++;
+      } catch (e) {
+        this.logger.warn(`[cloud][snapshot] clear failed id=${snap.id}: ${String(e)}`);
+      }
+    }
+    this.logger.info(`[cloud][snapshot] cleared identity=${identityId} count=${deleted}`);
+    return deleted;
   }
 
   async searchSnapshots(identityId: string, query: string, limit = 5): Promise<CloudSnapshotsTable[]> {
@@ -805,6 +838,7 @@ export class CloudManager {
       provider: this.provider.id,
       workspaceId: workspace.id,
       status: "queued",
+      prompt: opts.prompt,
     });
     if (this.provider.id !== "local") {
       await this.recordWorkspaceLease({

@@ -131,6 +131,7 @@ export interface CloudRunsTable {
   status: CloudRunStatus;
   session_id: string | null;
   snapshot_id: string | null;
+  prompt: string;
   diff_summary: string | null;
   diff_patch: string | null;
   started_at: number | null;
