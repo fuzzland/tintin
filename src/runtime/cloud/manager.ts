@@ -3009,11 +3009,13 @@ export class CloudManager {
     const session = await this.db.selectFrom("sessions").select(["status"]).where("id", "=", sessionId).executeTakeFirst();
     if (session && (session.status === "running" || session.status === "starting")) {
       this.forcedStopSessions.add(sessionId);
+      if (this.sessionManager) {
+        await this.sessionManager.killSession(sessionId, "Stopping sandbox at user request.");
+      }
     }
     await this.releaseBrowserbaseForSession(sessionId, "stop_sandbox").catch(() => {});
     await this.releaseHyperbrowserForSession(sessionId, "stop_sandbox").catch(() => {});
-    const workspace = this.workspaceFromId(run.workspace_id);
-    await this.provider.terminateWorkspace(workspace);
+    // Do not terminate workspace immediately; allow handleSessionFinished to pull diff/snapshot, then terminate via scheduler.
   }
 
   async commitAndPushRun(opts: {
