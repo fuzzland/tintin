@@ -418,7 +418,11 @@ export class CloudManager {
       .selectAll()
       .where("expires_at", "<=", now)
       .execute();
-    if (expired.length === 0) return;
+    if (expired.length === 0) {
+      this.logger.debug("[cloud][workspace] sweep expired none");
+      return;
+    }
+    this.logger.info(`[cloud][workspace] sweep expired count=${expired.length}`);
     for (const ws of expired) {
       this.logger.warn(`[cloud][workspace] terminating expired workspace id=${ws.id} provider=${ws.provider}`);
       await this.terminateWorkspaceAndCleanup(ws.id, null, ws.run_id ?? null);
