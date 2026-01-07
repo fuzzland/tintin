@@ -235,6 +235,9 @@ export class CloudManager {
     const title = `Run ${run.id} ${opts.sourceStatus}`.trim();
     const note = opts.note ?? "";
     const embedText = [title, note, run.diff_summary ?? ""].filter(Boolean).join("\n");
+    this.logger.info(
+      `[cloud][snapshot] created id=${snapshotId} run=${run.id} workspace=${opts.workspaceId} source=${opts.sourceStatus}`,
+    );
     await upsertCloudSnapshot(this.db, {
       id: snapshotId,
       identityId: run.identity_id,
@@ -3041,9 +3044,6 @@ export class CloudManager {
     const session = await this.db.selectFrom("sessions").select(["status"]).where("id", "=", sessionId).executeTakeFirst();
     if (session && (session.status === "running" || session.status === "starting")) {
       this.forcedStopSessions.add(sessionId);
-      if (this.sessionManager) {
-        await this.sessionManager.killSession(sessionId, "Stopping sandbox at user request.");
-      }
     }
     await this.releaseBrowserbaseForSession(sessionId, "stop_sandbox").catch(() => {});
     await this.releaseHyperbrowserForSession(sessionId, "stop_sandbox").catch(() => {});
@@ -3069,6 +3069,7 @@ export class CloudManager {
     } catch (e) {
       this.logger.warn(`[cloud][workspace] stop terminate failed id=${workspace.id}: ${String(e)}`);
     }
+    this.clearWorkspaceTermination(workspace.id);
   }
 
   async commitAndPushRun(opts: {
@@ -3134,6 +3135,10 @@ export class CloudManager {
   async handleSessionFinished(sessionId: string, status: SessionStatus): Promise<void> {
     const run = await getCloudRunBySession(this.db, sessionId);
     if (!run) return;
+    if (run.status === "killed") {
+      this.logger.info(`[cloud] session finished but run already killed run=${run.id} session=${sessionId}`);
+      return;
+    }
     const workspace = this.workspaceFromId(run.workspace_id);
     const mount = await this.db
       .selectFrom("cloud_run_repos")

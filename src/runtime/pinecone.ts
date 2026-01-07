@@ -77,7 +77,11 @@ export class PineconeClient {
         ],
       });
     } catch (e) {
-      this.logger.warn(`[pinecone] upsert failed snapshot=${opts.snapshotId}: ${String(e)}`);
+      const shape =
+        Array.isArray(opts.vector) || ArrayBuffer.isView(opts.vector)
+          ? `vector_len=${(opts.vector as any)?.length ?? "?"} type=${opts.vector?.constructor?.name ?? typeof opts.vector}`
+          : `vector_type=${typeof opts.vector}`;
+      this.logger.warn(`[pinecone] upsert failed snapshot=${opts.snapshotId} ${shape}: ${String(e)}`);
     }
   }
 
@@ -165,9 +169,12 @@ function hashToVector(text: string): number[] {
 }
 
 function sanitizeVector(input: unknown): number[] | null {
-  if (!Array.isArray(input)) return null;
+  const arr: ArrayLike<any> | null =
+    Array.isArray(input) || ArrayBuffer.isView(input) ? (input as ArrayLike<any>) : null;
+  if (!arr) return null;
   const out: number[] = [];
-  for (const v of input) {
+  for (let i = 0; i < arr.length; i++) {
+    const v = arr[i];
     if (typeof v === "number" && Number.isFinite(v)) {
       out.push(v);
     } else if (typeof v === "string" && v.trim().length > 0 && Number.isFinite(Number(v))) {
