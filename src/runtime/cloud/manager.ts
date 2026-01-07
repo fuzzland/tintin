@@ -239,10 +239,13 @@ export class CloudManager {
     if (!snapshotId) return null;
     const prompt = (run.prompt ?? "").trim() || "(no prompt)";
     const statusText = opts.sourceStatus.trim() || "unknown";
-    const reason = (opts.note ?? "").trim();
+    const reasonRaw = (opts.note ?? "").trim();
     const summary = (run.diff_summary ?? "").trim();
     const title = `Prompt: ${truncate(prompt, 80)}`;
-    const noteParts = [reason, summary].filter((v) => v && v.trim().length > 0) as string[];
+    const noteParts = [reasonRaw, summary]
+      .map((v) => v.trim())
+      .filter((v) => v.length > 0)
+      .filter((v) => !v.toLowerCase().startsWith("status:"));
     const note = noteParts.length > 0 ? truncate(noteParts.join(" | "), 500) : "";
     const embedText = [title, `status: ${statusText}`, note].filter(Boolean).join("\n");
     this.logger.info(
@@ -332,7 +335,7 @@ export class CloudManager {
         seen.add(id);
       }
     }
-    return rows;
+    return rows.slice(0, limit);
   }
 
   async saveSnapshot(opts: {

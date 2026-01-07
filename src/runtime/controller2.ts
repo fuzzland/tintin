@@ -1340,9 +1340,10 @@ export class BotController {
         );
         const formatSnapshot = (s: (typeof snapshots)[number], idx: number) => {
           const noteText = (s.note ?? "").split("\n")[0] ?? "";
-          const noteShort = noteText.trim().length > 0 ? truncateText(noteText.trim(), 200) : "(none)";
+          const noteClean = noteText.toLowerCase().startsWith("status:") ? "" : noteText.trim();
+          const noteShort = noteClean.length > 0 ? truncateText(noteClean, 200) : humanStatus(s.source_status);
           const title = s.title?.trim().length ? truncateText(s.title.trim(), 120) : "(none)";
-          const status = s.source_status?.trim().length ? s.source_status : "(unknown)";
+          const status = humanStatus(s.source_status);
           return [
             `${idx + 1}.`,
             `**id:** ${s.id}`,
@@ -1374,9 +1375,10 @@ export class BotController {
         );
         const formatSnapshot = (s: (typeof snapshots)[number], idx: number) => {
           const noteText = (s.note ?? "").split("\n")[0] ?? "";
-          const noteShort = noteText.trim().length > 0 ? truncateText(noteText.trim(), 200) : "(none)";
+          const noteClean = noteText.toLowerCase().startsWith("status:") ? "" : noteText.trim();
+          const noteShort = noteClean.length > 0 ? truncateText(noteClean, 200) : humanStatus(s.source_status);
           const title = s.title?.trim().length ? truncateText(s.title.trim(), 120) : "(none)";
-          const status = s.source_status?.trim().length ? s.source_status : "(unknown)";
+          const status = humanStatus(s.source_status);
           return [
             `${idx + 1}.`,
             `**id:** ${s.id}`,
@@ -3308,6 +3310,16 @@ function normalizeCloudText(text: string): string {
 function truncateText(value: string, max: number): string {
   if (value.length <= max) return value;
   return `${value.slice(0, Math.max(0, max - 1))}…`;
+}
+
+function humanStatus(status?: string | null): string {
+  const s = (status ?? "").toLowerCase();
+  if (s === "finished") return "run completed";
+  if (s === "killed") return "stopped by user";
+  if (s === "error") return "run failed";
+  if (s === "termination") return "terminated (lease expired/cleanup)";
+  if (s === "manual") return "manual snapshot";
+  return s || "(unknown)";
 }
 
 function parseCloudCommand(text: string): CloudCommand | null {
