@@ -3015,7 +3015,28 @@ export class CloudManager {
     }
     await this.releaseBrowserbaseForSession(sessionId, "stop_sandbox").catch(() => {});
     await this.releaseHyperbrowserForSession(sessionId, "stop_sandbox").catch(() => {});
-    // Do not terminate workspace immediately; allow handleSessionFinished to pull diff/snapshot, then terminate via scheduler.
+    const workspace = this.workspaceFromId(run.workspace_id);
+    try {
+      this.logger.info(`[cloud][stop] snapshot before terminate run=${run.id} workspace=${workspace.id}`);
+      await this.snapshotWithRetries({
+        runId: run.id,
+        workspaceId: workspace.id,
+        sourceStatus: "killed",
+        note: "user stop",
+        retries: 1,
+      });
+    } catch (e) {
+      this.logger.warn(`[cloud][snapshot] stop snapshot failed run=${run.id} workspace=${workspace.id}: ${String(e)}`);
+    }
+    try {
+      this.logger.info(`[cloud][stop] terminating workspace id=${workspace.id} run=${run.id}`);
+      await this.provider.terminateWorkspace(workspace);
+      await this.deleteWorkspaceLease(workspace.id).catch(() => {});
+      await updateCloudRun(this.db, run.id, { status: "killed", finished_at: nowMs() });
+      this.logger.info(`[cloud][stop] terminated workspace id=${workspace.id} run=${run.id}`);
+    } catch (e) {
+      this.logger.warn(`[cloud][workspace] stop terminate failed id=${workspace.id}: ${String(e)}`);
+    }
   }
 
   async commitAndPushRun(opts: {

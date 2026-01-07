@@ -338,9 +338,13 @@ export class SessionManager {
     const proc = this.processes.get(sessionId);
     if (!proc) return;
     await this.sendToSession(sessionId, { text: reason, priority: "user" });
+    this.logger.info(`[session] killing session=${sessionId} reason=${reason}`);
     proc.child.kill("SIGTERM");
-    await sleep(5_000);
-    if (!proc.child.killed) proc.child.kill("SIGKILL");
+    await sleep(200);
+    if (!proc.child.killed) {
+      this.logger.info(`[session] force kill session=${sessionId}`);
+      proc.child.kill("SIGKILL");
+    }
     await updateSession(this.db, sessionId, { status: "killed", finished_at: nowMs() });
   }
 
