@@ -120,6 +120,7 @@ export class CloudManager {
   private readonly forcedStopSessions = new Set<string>();
   private workspaceSweepTimer: NodeJS.Timeout | null = null;
   private snapshotSweepTimer: NodeJS.Timeout | null = null;
+  private readonly workspaceHeartbeatTimers = new Map<string, NodeJS.Timeout>();
   private readonly pinecone: PineconeClient;
   private readonly snapshotCleanup: SnapshotCleanupConfig;
 
@@ -356,14 +357,15 @@ export class CloudManager {
   }
 
   private workspaceInitialTtlMs(): number {
-    if (this.provider.id === "modal") {
-      const modal = this.config.cloud?.modal;
-      const timeout = modal?.timeout_ms;
-      if (typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0) return timeout;
-      return 86_400_000; // 24h fallback to avoid leaving sandboxes indefinitely
-    }
     const minutes = this.config.cloud?.keepalive_minutes ?? 10;
-    return Math.max(0, Math.floor(minutes)) * 60_000;
+    const keepaliveMs = Math.max(0, Math.floor(minutes)) * 60_000;
+    if (this.provider.id === "modal") {
+      const modalTimeout = this.config.cloud?.modal?.timeout_ms;
+      if (typeof modalTimeout === "number" && Number.isFinite(modalTimeout) && modalTimeout > 0) {
+        return Math.min(keepaliveMs, modalTimeout);
+      }
+    }
+    return keepaliveMs;
   }
 
   private async recordWorkspaceLease(opts: {
@@ -403,6 +405,31 @@ export class CloudManager {
     this.logger.debug(
       `[cloud][workspace] lease recorded id=${opts.workspaceId} run=${opts.runId ?? "-"} expires_in_ms=${ttl} reason=${opts.reason}`,
     );
+  }
+
+  private async startWorkspaceHeartbeat(workspaceId: string, identityId: string | null, runId: string | null): Promise<void> {
+    const existing = this.workspaceHeartbeatTimers.get(workspaceId);
+    if (existing) clearInterval(existing);
+    const keepalive = await this.keepaliveMs(identityId);
+    const interval = Math.max(30_000, Math.floor(keepalive / 2));
+    const tick = async () => {
+      try {
+        await this.recordWorkspaceLease({
+          workspaceId,
+          runId,
+          identityId,
+          ttlMs: keepalive,
+          reason: "heartbeat",
+        });
+      } catch (e) {
+        this.logger.debug(`[cloud][workspace] heartbeat failed id=${workspaceId}: ${String(e)}`);
+      }
+    };
+    void tick();
+    const timer = setInterval(() => {
+      void tick();
+    }, interval);
+    this.workspaceHeartbeatTimers.set(workspaceId, timer);
   }
 
   private async deleteWorkspaceLease(workspaceId: string): Promise<void> {
@@ -613,6 +640,9 @@ export class CloudManager {
     const existing = this.workspaceTerminateTimers.get(workspaceId);
     if (existing) clearTimeout(existing);
     this.workspaceTerminateTimers.delete(workspaceId);
+    const hb = this.workspaceHeartbeatTimers.get(workspaceId);
+    if (hb) clearInterval(hb);
+    this.workspaceHeartbeatTimers.delete(workspaceId);
   }
 
   private async terminateWorkspaceAndCleanup(workspaceId: string, sessionId?: string | null, runId?: string | null) {
@@ -743,6 +773,7 @@ export class CloudManager {
         ttlMs: this.workspaceInitialTtlMs(),
         reason: "run_start",
       });
+      await this.startWorkspaceHeartbeat(workspace.id, opts.identityId, run.id);
     }
 
     let runStatus: "ok" | "error" = "ok";
