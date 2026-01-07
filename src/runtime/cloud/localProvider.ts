@@ -95,4 +95,10 @@ export class LocalCloudProvider implements CloudProvider {
   async terminateWorkspace(workspace: CloudWorkspace): Promise<void> {
     await rm(workspace.rootPath, { recursive: true, force: true }).catch(() => {});
   }
+
+  async deleteSnapshotImage(snapshotId: string): Promise<void> {
+    const snapshotsDir = path.join(this.rootDir, "snapshots");
+    const target = path.join(snapshotsDir, snapshotId);
+    await rm(target, { recursive: true, force: true }).catch(() => {});
+  }
 }

@@ -120,6 +120,7 @@ export interface CommitProposalStore {
 
 export class BotController {
   private readonly lastRepoListByIdentity = new Map<string, string[]>();
+  private readonly lastSnapshotListByIdentity = new Map<string, string[]>();
 
   constructor(
     private readonly config: AppConfig,
@@ -1310,6 +1311,115 @@ export class BotController {
         const link = this.buildCloudUiLink(run.id, identity.id, opts.isDirect);
         const tail = link ? `\nView: ${link}` : "";
         await reply(`Diff summary for ${run.id}:\n${summary}\n\nUse \`tinc pull --run ${run.id}\` for full diff.${tail}`);
+        return true;
+      }
+      case "snapshot_save": {
+        const cmd = opts.command as Extract<CloudCommand, { kind: "snapshot_save" }>;
+        try {
+          const { snapshotId, runId } = await this.cloudManager.saveSnapshot({
+            identityId: identity.id,
+            note: cmd.note,
+            sourceStatus: "manual",
+          });
+          await reply(`Saved snapshot ${snapshotId} (run ${runId}).`);
+        } catch (e) {
+          await reply(`Snapshot save failed: ${String(e)}`);
+        }
+        return true;
+      }
+      case "snapshot_list": {
+        const cmd = opts.command as Extract<CloudCommand, { kind: "snapshot_list" }>;
+        const snapshots = await this.cloudManager.listSnapshots(identity.id, cmd.limit);
+        if (snapshots.length === 0) {
+          await reply("No snapshots found.");
+          return true;
+        }
+        this.lastSnapshotListByIdentity.set(
+          identity.id,
+          snapshots.map((s) => s.id),
+        );
+        const lines = snapshots.map((s, i) => {
+          const ts = new Date(s.created_at).toISOString();
+          const title = s.title ? ` ${s.title}` : "";
+          const note = s.note ? ` — ${s.note}` : "";
+          return `${i + 1}. ${s.id} (run ${s.run_id}, ${ts})${title}${note}`;
+        });
+        lines.push(`Restore with ${formatCmd("snapshot restore <index|snapshotId>")}.`);
+        await reply(lines.join("\n"));
+        return true;
+      }
+      case "snapshot_search": {
+        const cmd = opts.command as Extract<CloudCommand, { kind: "snapshot_search" }>;
+        if (!cmd.query.trim()) {
+          await reply("Provide a search query.");
+          return true;
+        }
+        const snapshots = await this.cloudManager.searchSnapshots(identity.id, cmd.query, 10);
+        if (snapshots.length === 0) {
+          await reply("No matching snapshots.");
+          return true;
+        }
+        this.lastSnapshotListByIdentity.set(
+          identity.id,
+          snapshots.map((s) => s.id),
+        );
+        const lines = snapshots.map((s, i) => {
+          const ts = new Date(s.created_at).toISOString();
+          const title = s.title ? ` ${s.title}` : "";
+          const note = s.note ? ` — ${s.note}` : "";
+          return `${i + 1}. ${s.id} (run ${s.run_id}, ${ts})${title}${note}`;
+        });
+        lines.push(`Restore with ${formatCmd("snapshot restore <index|snapshotId>")}.`);
+        await reply(lines.join("\n"));
+        return true;
+      }
+      case "snapshot_restore": {
+        const cmd = opts.command as Extract<CloudCommand, { kind: "snapshot_restore" }>;
+        let snapshotId = cmd.target.trim();
+        const idx = Number(snapshotId);
+        if (Number.isInteger(idx)) {
+          const last = this.lastSnapshotListByIdentity.get(identity.id);
+          if (!last || idx < 1 || idx > last.length) {
+            await reply("Invalid snapshot index. List or search snapshots first.");
+            return true;
+          }
+          snapshotId = last[idx - 1]!;
+        }
+        const agent = cloud.default_agent === "claude_code" ? "claude_code" : "codex";
+        if (agent === "claude_code" && !this.config.claude_code) {
+          await reply("Claude Code not configured. Use codex or configure [claude_code].");
+          return true;
+        }
+        try {
+          const result = await this.cloudManager.restoreSnapshot({
+            identityId: identity.id,
+            snapshotId,
+            platform: opts.platform,
+            workspaceId: opts.workspaceId,
+            chatId: opts.chatId,
+            spaceId: opts.spaceId,
+            userId: opts.userId,
+            agent,
+          });
+          const link = this.buildCloudUiLink(result.runId, identity.id, opts.isDirect);
+          const vscodeUrl = await this.cloudManager.getVscodeUrl(result.sessionId);
+          const text = `Restored snapshot ${snapshotId} -> run ${result.runId}.`;
+          await this.sendCloudRunStartedMessage({
+            platform: opts.platform,
+            chatId: opts.chatId,
+            userId: opts.userId,
+            text,
+            sessionId: result.sessionId,
+            runId: result.runId,
+            viewUrl: link,
+            vscodeUrl,
+            replyToMessageId: opts.replyToMessageId,
+            messageThreadId: opts.messageThreadId,
+            slackThreadTs: opts.slackThreadTs,
+          });
+        } catch (e) {
+          await reply(`Snapshot restore failed: ${String(e)}`);
+        }
         return true;
       }
       case "action_run": {
@@ -3149,7 +3259,11 @@ type CloudCommand =
   | { kind: "secrets_create"; name: string; value: string | null }
   | { kind: "secrets_update"; name: string; value: string | null }
   | { kind: "secrets_list" }
-  | { kind: "secrets_delete"; name: string };
+  | { kind: "secrets_delete"; name: string }
+  | { kind: "snapshot_save"; note?: string }
+  | { kind: "snapshot_list"; limit?: number }
+  | { kind: "snapshot_search"; query: string }
+  | { kind: "snapshot_restore"; target: string };
 
 function normalizeCloudText(text: string): string {
   let out = text.trim();
@@ -3207,6 +3321,25 @@ function parseCloudCommand(text: string): CloudCommand | null {
     if (sub === "current") return { kind: "repo_current" };
     if (sub === "share" && tokens.length >= 1) return { kind: "repo_share", target: tokens.join(" ") };
     if (sub === "unshare" && tokens.length >= 1) return { kind: "repo_unshare", target: tokens.join(" ") };
+  }
+  if (head === "snapshot") {
+    const sub = tokens.shift()?.toLowerCase() ?? "";
+    if (sub === "save") {
+      const note = tokens.join(" ").trim();
+      return { kind: "snapshot_save", note: note || undefined };
+    }
+    if (sub === "list") {
+      const raw = tokens[0];
+      const n = raw ? Number(raw) : NaN;
+      const limit = Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+      return { kind: "snapshot_list", limit };
+    }
+    if (sub === "search" && tokens.length > 0) {
+      return { kind: "snapshot_search", query: tokens.join(" ").trim() };
+    }
+    if (sub === "restore" && tokens.length > 0) {
+      return { kind: "snapshot_restore", target: tokens.join(" ").trim() };
+    }
   }
   if (head === "actions") return { kind: "actions_list" };
   if (head === "run") {

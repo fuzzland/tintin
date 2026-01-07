@@ -137,6 +137,19 @@ export interface CloudSection {
   modal?: CloudModalSection | null;
   proxy?: CloudProxySection | null;
   ui?: CloudUiSection | null;
+  snapshot_cleanup?: SnapshotCleanupSection | null;
+}
+
+export interface PineconeSection {
+  api_key: string;
+  index: string;
+}
+
+export interface SnapshotCleanupSection {
+  enabled?: boolean;
+  ttl_days?: number;
+  keep_per_identity?: number;
+  sweep_minutes?: number;
 }
 
 export interface TelegramSection {
@@ -221,6 +234,7 @@ export interface AppConfig {
   slack?: SlackSection;
   playwright_mcp?: PlaywrightMcpSection | null;
   cloud?: CloudSection | null;
+  pinecone?: PineconeSection | null;
   config_dir: string;
 }
 
@@ -770,6 +784,8 @@ function normalizeCloudSection(value: unknown, opts: { configDir: string; dataDi
   const modal = (value as any).modal !== undefined || provider === "modal" ? normalizeCloudModalSection((value as any).modal) : null;
   const proxy = (value as any).proxy !== undefined ? normalizeCloudProxySection((value as any).proxy) : null;
   const ui = (value as any).ui !== undefined ? normalizeCloudUiSection((value as any).ui) : null;
+  const snapshot_cleanup =
+    (value as any).snapshot_cleanup !== undefined ? normalizeSnapshotCleanupSection((value as any).snapshot_cleanup) : null;
 
   return {
     enabled,
@@ -785,7 +801,42 @@ function normalizeCloudSection(value: unknown, opts: { configDir: string; dataDi
     modal,
     proxy,
     ui,
+    snapshot_cleanup,
   };
+}
+
+function normalizePineconeSection(value: unknown): PineconeSection | null {
+  if (value === undefined) return null;
+  if (value === null) return null;
+  assert(isRecord(value), "[pinecone] must be a table");
+  const api_key = typeof value.api_key === "string" ? value.api_key.trim() : "";
+  const index = typeof value.index === "string" ? value.index.trim() : "";
+  assert(api_key.length > 0, "[pinecone].api_key is required");
+  assert(index.length > 0, "[pinecone].index is required");
+  return { api_key, index };
+}
+
+function normalizeSnapshotCleanupSection(value: unknown): SnapshotCleanupSection | null {
+  if (value === undefined || value === null) return null;
+  assert(isRecord(value), "[cloud.snapshot_cleanup] must be a table");
+  const enabled = value.enabled !== undefined ? Boolean(value.enabled) : true;
+  const ttl_days =
+    typeof (value as any).ttl_days === "number" && Number.isFinite((value as any).ttl_days) && (value as any).ttl_days > 0
+      ? Math.floor((value as any).ttl_days)
+      : 30;
+  const keep_per_identity =
+    typeof (value as any).keep_per_identity === "number" &&
+    Number.isFinite((value as any).keep_per_identity) &&
+    (value as any).keep_per_identity > 0
+      ? Math.floor((value as any).keep_per_identity)
+      : 50;
+  const sweep_minutes =
+    typeof (value as any).sweep_minutes === "number" &&
+    Number.isFinite((value as any).sweep_minutes) &&
+    (value as any).sweep_minutes > 0
+      ? Math.floor((value as any).sweep_minutes)
+      : 360;
+  return { enabled, ttl_days, keep_per_identity, sweep_minutes };
 }
 
 export async function loadConfig(configPath: string): Promise<AppConfig> {
@@ -983,6 +1034,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
   });
 
   const cloud = normalizeCloudSection((resolved as any).cloud, { configDir, dataDir: botSection.data_dir });
+  const pinecone = normalizePineconeSection((resolved as any).pinecone);
   if (cloud?.enabled && cloud.public_base_url.length > 0) {
     cloud.public_base_url = normalizeUrl(cloud.public_base_url, "[cloud].public_base_url");
   }
@@ -1007,6 +1059,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     slack: slackSection,
     playwright_mcp: playwrightMcp,
     cloud,
+    pinecone,
     config_dir: configDir,
   };
 }

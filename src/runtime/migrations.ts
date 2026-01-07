@@ -15,6 +15,7 @@ import * as hyperbrowserSession0012 from "./migrations/0012_hyperbrowser_session
 import * as identityVerbosity0013 from "./migrations/0013_identity_message_verbosity.js";
 import * as identityBranchRule0014 from "./migrations/0014_identity_branch_name_rule.js";
 import * as cloudWorkspaces0015 from "./migrations/0015_cloud_workspaces.js";
+import * as cloudSnapshots0016 from "./migrations/0016_cloud_snapshots.js";
 
 const provider = {
   async getMigrations() {
@@ -33,6 +34,7 @@ const provider = {
       "0013_identity_message_verbosity": identityVerbosity0013,
       "0014_identity_branch_name_rule": identityBranchRule0014,
       "0015_cloud_workspaces": cloudWorkspaces0015,
+      "0016_cloud_snapshots": cloudSnapshots0016,
     };
   },
 };

@@ -17,4 +17,5 @@ export interface CloudProvider {
   snapshotWorkspace(workspace: CloudWorkspace, label: string): Promise<string>;
   pullDiff(opts: { workspace: CloudWorkspace; cwd: string }): Promise<{ diff: string; summary: string }>;
   terminateWorkspace(workspace: CloudWorkspace): Promise<void>;
+  deleteSnapshotImage?(snapshotId: string): Promise<void>;
 }

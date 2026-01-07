@@ -185,3 +185,13 @@ context_id = ""
 api_key = "env:HYPERBROWSER_API_KEY"
 api_base_url = "https://api.hyperbrowser.ai"
 # session_params = { solveCaptchas = true, useStealth = true } # raw Hyperbrowser session payload
+
+[pinecone]
+api_key = "<PINECONE_API_KEY>"
+index = "tintin-snapshots"
+
+[cloud.snapshot_cleanup]
+enabled = true
+ttl_days = 30
+keep_per_identity = 50
+sweep_minutes = 360

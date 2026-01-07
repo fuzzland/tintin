@@ -156,6 +156,18 @@ export interface CloudRunScreenshotsTable {
   created_at: number;
 }
 
+export interface CloudSnapshotsTable {
+  id: string;
+  identity_id: string;
+  run_id: string;
+  sandbox_id: string;
+  created_at: number;
+  title: string;
+  note: string;
+  source_status: string;
+  vector_id: string;
+}
+
 export interface CloudWorkspacesTable {
   id: string;
   provider: string;
@@ -220,6 +232,7 @@ export interface DatabaseSchema {
   cloud_runs: CloudRunsTable;
   cloud_run_repos: CloudRunReposTable;
   cloud_run_screenshots: CloudRunScreenshotsTable;
+  cloud_snapshots: CloudSnapshotsTable;
   cloud_workspaces: CloudWorkspacesTable;
   secrets: SecretsTable;
   setup_specs: SetupSpecsTable;

@@ -329,6 +329,91 @@ export async function listCloudRunScreenshots(db: Db, runId: string) {
     .execute();
 }
 
+export async function upsertCloudSnapshot(db: Db, opts: {
+  id: string;
+  identityId: string;
+  runId: string;
+  sandboxId: string;
+  title: string;
+  note?: string;
+  sourceStatus?: string;
+  vectorId: string;
+}) {
+  const now = nowMs();
+  const existingBySandbox = await db.selectFrom("cloud_snapshots").selectAll().where("sandbox_id", "=", opts.sandboxId).executeTakeFirst();
+  if (existingBySandbox && existingBySandbox.id !== opts.id) {
+    await db.deleteFrom("cloud_snapshots").where("sandbox_id", "=", opts.sandboxId).execute();
+  }
+  const createdAt = existingBySandbox && existingBySandbox.id === opts.id ? existingBySandbox.created_at : now;
+  await db
+    .insertInto("cloud_snapshots")
+    .values({
+      id: opts.id,
+      identity_id: opts.identityId,
+      run_id: opts.runId,
+      sandbox_id: opts.sandboxId,
+      created_at: createdAt,
+      title: opts.title,
+      note: opts.note ?? "",
+      source_status: opts.sourceStatus ?? "",
+      vector_id: opts.vectorId,
+    })
+    .onConflict((oc) =>
+      oc.column("id").doUpdateSet({
+        identity_id: opts.identityId,
+        run_id: opts.runId,
+        sandbox_id: opts.sandboxId,
+        title: opts.title,
+        note: opts.note ?? "",
+        source_status: opts.sourceStatus ?? "",
+        vector_id: opts.vectorId,
+        created_at: createdAt,
+      }),
+    )
+    .execute();
+  return await db.selectFrom("cloud_snapshots").selectAll().where("id", "=", opts.id).executeTakeFirstOrThrow();
+}
+
+export async function getCloudSnapshot(db: Db, snapshotId: string) {
+  return await db.selectFrom("cloud_snapshots").selectAll().where("id", "=", snapshotId).executeTakeFirst();
+}
+
+export async function listSnapshotsByRun(db: Db, runId: string) {
+  return await db
+    .selectFrom("cloud_snapshots")
+    .selectAll()
+    .where("run_id", "=", runId)
+    .orderBy("created_at", "desc")
+    .execute();
+}
+
+export async function listSnapshotsByIdentity(db: Db, opts: { identityId: string; limit?: number; before?: number | null }) {
+  const limit = typeof opts.limit === "number" && Number.isFinite(opts.limit) && opts.limit > 0 ? Math.floor(opts.limit) : 20;
+  let query = db
+    .selectFrom("cloud_snapshots")
+    .selectAll()
+    .where("identity_id", "=", opts.identityId)
+    .orderBy("created_at", "desc");
+  if (typeof opts.before === "number" && Number.isFinite(opts.before)) {
+    query = query.where("created_at", "<", Math.floor(opts.before));
+  }
+  return await query.limit(limit).execute();
+}
+
+export async function deleteCloudSnapshot(db: Db, snapshotId: string) {
+  await db.deleteFrom("cloud_snapshots").where("id", "=", snapshotId).execute();
+}
+
+export async function listRunRepoIds(db: Db, runId: string): Promise<string[]> {
+  const rows = await db
+    .selectFrom("cloud_run_repos")
+    .select(["repo_id"])
+    .where("run_id", "=", runId)
+    .orderBy("id", "asc")
+    .execute();
+  return rows.map((r) => r.repo_id);
+}
+
 export async function listCloudRunsForRepo(db: Db, repoId: string, limit = 20) {
   return await db
     .selectFrom("cloud_runs")
@@ -357,6 +442,10 @@ export async function listCloudRunsForIdentity(db: Db, opts: { identityId: strin
     query = query.where("created_at", "<", Math.floor(opts.before));
   }
   return await query.orderBy("created_at", "desc").limit(limit).execute();
+}
+
+export async function getLatestRunForIdentity(db: Db, identityId: string) {
+  return await db.selectFrom("cloud_runs").selectAll().where("identity_id", "=", identityId).orderBy("created_at", "desc").limit(1).executeTakeFirst();
 }
 
 export async function setSecret(db: Db, opts: { identityId: string; name: string; encryptedValue: string }) {

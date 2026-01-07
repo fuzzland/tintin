@@ -125,6 +125,10 @@ export class ModalCloudProvider implements CloudProvider {
     return image.imageId;
   }
 
+  async deleteSnapshotImage(snapshotId: string): Promise<void> {
+    await this.client.images.delete(snapshotId);
+  }
+
   async pullDiff(opts: { workspace: CloudWorkspace; cwd: string }): Promise<{ diff: string; summary: string }> {
     const sandbox = this.getSandbox(opts.workspace.id);
     const tracked = await this.runCommand(sandbox, "git diff", { cwd: opts.cwd });
