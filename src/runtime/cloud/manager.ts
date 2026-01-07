@@ -242,7 +242,7 @@ export class CloudManager {
     const reasonRaw = (opts.note ?? "").trim();
     const summary = (run.diff_summary ?? "").trim();
     const title = `Prompt: ${truncate(prompt, 80)}`;
-    const noteParts = [reasonRaw, summary]
+    const noteParts = [summary, reasonRaw]
       .map((v) => v.trim())
       .filter((v) => v.length > 0)
       .filter((v) => !v.toLowerCase().startsWith("status:"));
@@ -323,7 +323,7 @@ export class CloudManager {
   }
 
   async searchSnapshots(identityId: string, query: string, limit = 5): Promise<CloudSnapshotsTable[]> {
-    const matches = await this.pinecone.searchSnapshots(identityId, query, limit);
+    const matches = await this.pinecone.searchSnapshots(identityId, query, limit * 2);
     const seen = new Set<string>();
     const rows: CloudSnapshotsTable[] = [];
     for (const m of matches) {
@@ -335,6 +335,15 @@ export class CloudManager {
         seen.add(id);
       }
     }
+    const q = query.trim().toLowerCase();
+    const filtered =
+      q.length === 0
+        ? rows
+        : rows.filter((snap) => {
+            const haystack = [snap.id, snap.title ?? "", snap.note ?? ""].join(" ").toLowerCase();
+            return haystack.includes(q);
+          });
+    if (filtered.length > 0) return filtered.slice(0, limit);
     return rows.slice(0, limit);
   }
 

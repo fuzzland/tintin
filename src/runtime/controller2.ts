@@ -1341,7 +1341,7 @@ export class BotController {
         const formatSnapshot = (s: (typeof snapshots)[number], idx: number) => {
           const noteText = (s.note ?? "").split("\n")[0] ?? "";
           const noteClean = noteText.toLowerCase().startsWith("status:") ? "" : noteText.trim();
-          const noteShort = noteClean.length > 0 ? truncateText(noteClean, 200) : humanStatus(s.source_status);
+          const noteShort = noteClean.length > 0 ? truncateText(noteClean, 200) : "(none)";
           const title = s.title?.trim().length ? truncateText(s.title.trim(), 120) : "(none)";
           const status = humanStatus(s.source_status);
           return [
@@ -1376,7 +1376,7 @@ export class BotController {
         const formatSnapshot = (s: (typeof snapshots)[number], idx: number) => {
           const noteText = (s.note ?? "").split("\n")[0] ?? "";
           const noteClean = noteText.toLowerCase().startsWith("status:") ? "" : noteText.trim();
-          const noteShort = noteClean.length > 0 ? truncateText(noteClean, 200) : humanStatus(s.source_status);
+          const noteShort = noteClean.length > 0 ? truncateText(noteClean, 200) : "(none)";
           const title = s.title?.trim().length ? truncateText(s.title.trim(), 120) : "(none)";
           const status = humanStatus(s.source_status);
           return [
