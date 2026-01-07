@@ -440,6 +440,28 @@ export class CloudManager {
     await this.db.deleteFrom("cloud_workspaces").where("id", "=", workspaceId).execute();
   }
 
+  private async deleteWorkspaceLeaseWithRetry(workspaceId: string, reason: string): Promise<void> {
+    if (this.provider.id === "local") return;
+    const attempts = 3;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        await this.deleteWorkspaceLease(workspaceId);
+        return;
+      } catch (e) {
+        const idx = i + 1;
+        const msg = String(e);
+        if (idx >= attempts) {
+          this.logger.warn(`[cloud][workspace] delete lease failed id=${workspaceId} reason=${reason}: ${msg}`);
+          return;
+        }
+        this.logger.warn(
+          `[cloud][workspace] delete lease retry id=${workspaceId} attempt=${idx}/${attempts} reason=${reason}: ${msg}`,
+        );
+        await sleep(200);
+      }
+    }
+  }
+
   private async sweepExpiredWorkspaces(): Promise<void> {
     if (this.provider.id === "local") return;
     const now = nowMs();
@@ -648,19 +670,35 @@ export class CloudManager {
     this.workspaceHeartbeatTimers.delete(workspaceId);
   }
 
+  private async hasSnapshotForRun(runId: string, workspaceId: string): Promise<boolean> {
+    const run = await getCloudRun(this.db, runId);
+    if (run?.snapshot_id) return true;
+    const existing = await this.db
+      .selectFrom("cloud_snapshots")
+      .select("id")
+      .where((eb) => eb.or([eb("run_id", "=", runId), eb("sandbox_id", "=", workspaceId)]))
+      .executeTakeFirst();
+    return Boolean(existing);
+  }
+
   private async terminateWorkspaceAndCleanup(workspaceId: string, sessionId?: string | null, runId?: string | null) {
     try {
       if (runId) {
-        const snap = await this.snapshotWithRetries({ runId, workspaceId, sourceStatus: "termination", retries: 2 });
-        if (!snap) {
-          this.logger.warn(
-            `[cloud][snapshot] continuing terminate after snapshot failures workspace=${workspaceId} run=${runId}`,
-          );
+        const alreadySnapshotted = await this.hasSnapshotForRun(runId, workspaceId);
+        if (alreadySnapshotted) {
+          this.logger.info(`[cloud][snapshot] skip snapshot (already exists) run=${runId} workspace=${workspaceId}`);
+        } else {
+          const snap = await this.snapshotWithRetries({ runId, workspaceId, sourceStatus: "termination", retries: 2 });
+          if (!snap) {
+            this.logger.warn(
+              `[cloud][snapshot] continuing terminate after snapshot failures workspace=${workspaceId} run=${runId}`,
+            );
+          }
         }
       }
       await this.provider.terminateWorkspace({ id: workspaceId, rootPath: this.workspaceFromId(workspaceId).rootPath });
       this.logger.info(`[cloud][workspace] terminated id=${workspaceId} provider=${this.provider.id}`);
-      await this.deleteWorkspaceLease(workspaceId).catch(() => {});
+      await this.deleteWorkspaceLeaseWithRetry(workspaceId, "terminate");
     } catch (e) {
       this.logger.warn(`[cloud][workspace] terminate failed id=${workspaceId}: ${String(e)}`);
     } finally {
@@ -3054,21 +3092,26 @@ export class CloudManager {
     await this.releaseHyperbrowserForSession(sessionId, "stop_sandbox").catch(() => {});
     const workspace = this.workspaceFromId(run.workspace_id);
     try {
-      this.logger.info(`[cloud][stop] snapshot before terminate run=${run.id} workspace=${workspace.id}`);
-      await this.snapshotWithRetries({
-        runId: run.id,
-        workspaceId: workspace.id,
-        sourceStatus: "killed",
-        note: "user stop",
-        retries: 1,
-      });
+      const alreadySnapshotted = await this.hasSnapshotForRun(run.id, workspace.id);
+      if (alreadySnapshotted) {
+        this.logger.info(`[cloud][stop] skip snapshot (already exists) run=${run.id} workspace=${workspace.id}`);
+      } else {
+        this.logger.info(`[cloud][stop] snapshot before terminate run=${run.id} workspace=${workspace.id}`);
+        await this.snapshotWithRetries({
+          runId: run.id,
+          workspaceId: workspace.id,
+          sourceStatus: "killed",
+          note: "user stop",
+          retries: 1,
+        });
+      }
     } catch (e) {
       this.logger.warn(`[cloud][snapshot] stop snapshot failed run=${run.id} workspace=${workspace.id}: ${String(e)}`);
     }
     try {
       this.logger.info(`[cloud][stop] terminating workspace id=${workspace.id} run=${run.id}`);
       await this.provider.terminateWorkspace(workspace);
-      await this.deleteWorkspaceLease(workspace.id).catch(() => {});
+      await this.deleteWorkspaceLeaseWithRetry(workspace.id, "stop");
       await updateCloudRun(this.db, run.id, { status: "killed", finished_at: nowMs() });
       this.logger.info(`[cloud][stop] terminated workspace id=${workspace.id} run=${run.id}`);
     } catch (e) {
@@ -3173,13 +3216,20 @@ export class CloudManager {
       finished_at: nowMs(),
     });
     if (this.provider.id === "modal") {
-      void this.snapshotWithRetries({
-        runId: run.id,
-        workspaceId: run.workspace_id,
-        sourceStatus: cloudStatus,
-        note: summary ?? "",
-        retries: 2,
-      });
+      void (async () => {
+        const alreadySnapshotted = await this.hasSnapshotForRun(run.id, run.workspace_id);
+        if (alreadySnapshotted) {
+          this.logger.info(`[cloud][snapshot] skip snapshot (already exists) run=${run.id} workspace=${run.workspace_id}`);
+          return;
+        }
+        await this.snapshotWithRetries({
+          runId: run.id,
+          workspaceId: run.workspace_id,
+          sourceStatus: cloudStatus,
+          note: summary ?? "",
+          retries: 2,
+        });
+      })();
     }
     this.agentLogPaths.delete(sessionId);
     if (this.provider.id !== "local") {
