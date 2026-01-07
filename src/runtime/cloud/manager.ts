@@ -872,10 +872,10 @@ export class CloudManager {
             "debug",
           );
           if (usedSnapshot) {
-            this.logger.info(`[cloud] refresh repo=${repo.name} url=${clone.redacted}`);
+            this.logger.info(`[cloud] keep snapshot repo state; set remote repo=${repo.name} url=${clone.redacted}`);
             await this.time(
-              "repo.refresh",
-              () => this.refreshRepo({ workspace, absPath, cloneUrl: clone.url }),
+              "repo.remoteUrl",
+              () => this.ensureRepoRemote({ workspace, absPath, cloneUrl: clone.url }),
               `repo=${repo.name}`,
             );
           } else {
@@ -1234,6 +1234,26 @@ export class CloudManager {
       `mkdir -p ${shellQuote(parentDir)}`,
       `git clone --depth 1 ${shellQuote(opts.cloneUrl)} ${shellQuote(opts.absPath)}`,
     ].join("\n");
+    await this.provider.runCommands({
+      workspace: opts.workspace,
+      cwd,
+      commands: [script],
+      env: { GIT_TERMINAL_PROMPT: "0" },
+    });
+  }
+
+  private async ensureRepoRemote(opts: { workspace: CloudWorkspace; absPath: string; cloneUrl: string }) {
+    const parentDir = path.dirname(opts.absPath);
+    const gitDir = path.join(opts.absPath, ".git");
+    const script = [
+      `mkdir -p ${shellQuote(parentDir)}`,
+      `if [ -d ${shellQuote(gitDir)} ]; then`,
+      `  git -C ${shellQuote(opts.absPath)} remote set-url origin ${shellQuote(opts.cloneUrl)}`,
+      "else",
+      `  git clone --depth 1 ${shellQuote(opts.cloneUrl)} ${shellQuote(opts.absPath)}`,
+      "fi",
+    ].join("\n");
+    const cwd = this.provider.id === "modal" ? "/" : opts.workspace.rootPath;
     await this.provider.runCommands({
       workspace: opts.workspace,
       cwd,
