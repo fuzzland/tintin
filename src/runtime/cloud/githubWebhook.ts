@@ -505,7 +505,7 @@ export async function processPendingGithubWebhookEvents(opts: {
   await reclaimStaleProcessing(opts.db, opts.logger, now);
   const rows = await opts.db
     .selectFrom("github_webhook_events")
-    .select(["delivery_id", "event", "action", "installation_id", "payload_json", "status", "error"])
+    .select(["delivery_id", "event", "action", "installation_id", "repo_id", "payload_json", "status", "error"])
     .where("processed_at", "is", null)
     .where((eb) =>
       eb.or([eb("status", "is", null), eb("status", "=", "received"), eb("status", "=", "retry"), eb("status", "=", "processing")]),
@@ -544,6 +544,9 @@ export async function processPendingGithubWebhookEvents(opts: {
         },
       });
       await markGithubWebhookProcessed(opts.db, row.delivery_id, status, nowMs());
+      opts.logger.info(
+        `[github_webhook] processed event=${row.event} action=${row.action ?? "-"} delivery_id=${row.delivery_id} installation_id=${row.installation_id ?? "-"} repo_id=${row.repo_id ?? "-"} status=${status}`,
+      );
       processed++;
     } catch (err) {
       await markGithubWebhookFailed(opts.db, row.delivery_id, state, err, nowMs());

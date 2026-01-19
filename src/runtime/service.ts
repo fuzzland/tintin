@@ -1675,7 +1675,7 @@ export async function createBotService(deps: BotServiceDeps) {
               payloadJson: bodyText,
             });
             if (result === "duplicate") {
-              logger.debug(`[github_webhook] duplicate delivery_id=${deliveryId}`);
+              logger.info(`[github_webhook] duplicate delivery_id=${deliveryId}`);
               return;
             }
             scheduleGithubWebhookProcessing("webhook");
