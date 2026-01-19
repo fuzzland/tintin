@@ -1225,8 +1225,13 @@ export class CloudManager {
       .executeTakeFirstOrThrow();
     let cloneToken = conn.access_token;
     let cloneUser: string | undefined;
-    if (conn.type === "github" && this.config.cloud?.github_app) {
-      const token = await ensureGithubAppToken({ db: this.db, config: this.config.cloud.github_app, connection: conn });
+    if (conn.type === "github_app" && this.config.cloud?.github_app) {
+      const token = await ensureGithubAppToken({
+        db: this.db,
+        config: this.config.cloud.github_app,
+        secretKey: this.config.cloud.secrets_key,
+        connection: conn,
+      });
       cloneToken = token.token;
       cloneUser = "x-access-token";
     }
@@ -3224,12 +3229,14 @@ export class CloudManager {
     if (repo.provider !== "github") throw new Error("Pull request creation only supported for GitHub repos.");
     const connection = await this.db.selectFrom("connections").selectAll().where("id", "=", repo.connection_id).executeTakeFirst();
     if (!connection) throw new Error("Repo connection not found.");
+    if (connection.type !== "github_app") throw new Error("GitHub App connection not found.");
     const slug = this.parseGithubRepoSlug(repo.url);
     if (!slug) throw new Error("Unable to parse GitHub repo URL.");
     const base = repo.default_branch?.trim() || "main";
     const pr = await createGithubPullRequest({
       db: this.db,
       config: this.config.cloud.github_app,
+      secretKey: this.config.cloud.secrets_key,
       connection,
       owner: slug.owner,
       repo: slug.repo,

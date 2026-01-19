@@ -19,7 +19,8 @@ import { redactText } from "./redact.js";
 import type { SendToSessionFn } from "./messaging.js";
 import { validateAndResolveProjectPath } from "./security.js";
 import { startOAuthFlow } from "./cloud/oauth.js";
-import { ensureGithubAppToken, parseGithubAppMetadata, startGithubAppFlow } from "./cloud/githubApp.js";
+import { ensureGithubAppToken, startGithubAppFlow } from "./cloud/githubApp.js";
+import { computeGithubDisconnectImpact, executeGithubDisconnect } from "./cloud/githubDisconnect.js";
 import { fetchGithubInstallationRepos, fetchGithubRepos, fetchGitlabRepos } from "./cloud/repos.js";
 import { encryptSecret } from "./cloud/secrets.js";
 import { generateSetupSpecFromPath } from "./cloud/lift.js";
@@ -31,6 +32,10 @@ import { getCloudRunBySession } from "./cloud/store.js";
 import {
   getCloudRun,
   getLatestSetupSpec,
+  listGithubInstallationsForIdentity,
+  createPendingAction,
+  consumePendingAction,
+  getGithubInstallation,
   getOrCreateIdentity,
   getSharedRepo,
   listCloudRunsForPlayground,
@@ -39,6 +44,7 @@ import {
   listReposForIdentity,
   listSecrets,
   listSharedRepos,
+  replaceGithubInstallationRepos,
   setIdentityActiveRepo,
   setIdentityBranchNameRule,
   setIdentityGitUserEmail,
@@ -996,19 +1002,20 @@ export class BotController {
         try {
           if (provider === "github") {
             const existing = (await listConnections(this.db, identity.id))
-              .filter((c) => c.type === "github")
+              .filter((c) => c.type === "github_app")
               .sort((a, b) => b.updated_at - a.updated_at)[0];
             if (existing) {
-              const meta = parseGithubAppMetadata(existing.metadata_json);
+              const installationId = existing.installation_id ?? null;
+              const installation = installationId ? await getGithubInstallation(this.db, installationId) : null;
               const connectedAt = existing.updated_at ? new Date(existing.updated_at).toISOString() : null;
               const lines = ["*GitHub already connected*"];
-              if (meta?.account_login) {
-                const accountType = meta.account_type ?? "unknown";
-                lines.push(`- *Account:* \`${meta.account_login}\` (${accountType})`);
+              if (installation?.account_login) {
+                const accountType = installation.account_type ?? "unknown";
+                lines.push(`- *Account:* \`${installation.account_login}\` (${accountType})`);
               } else {
                 lines.push("- *Account:* _(unknown; reconnect to refresh)_");
               }
-              if (meta?.installation_id) lines.push(`- *Installation ID:* \`${meta.installation_id}\``);
+              if (installationId) lines.push(`- *Installation ID:* \`${installationId}\``);
               if (connectedAt) lines.push(`- *Connected at:* \`${connectedAt}\``);
               await reply(lines.join("\n"), true);
               return true;
@@ -1041,6 +1048,126 @@ export class BotController {
         }
         return true;
       }
+      case "disconnect": {
+        if (!opts.isDirect) {
+          await reply(`Run ${formatCmd("disconnect github")} in a 1:1 chat with the bot.`);
+          return true;
+        }
+        const cmd = opts.command as Extract<CloudCommand, { kind: "disconnect" }>;
+        const provider = cmd.provider;
+        if (provider !== "github") {
+          await reply(`Disconnect not supported for ${provider}.`);
+          return true;
+        }
+        if (!cloud.github_app) {
+          await reply("Missing [cloud].github_app configuration.");
+          return true;
+        }
+        const confirmToken = (cmd.confirmToken ?? "").trim();
+        if (confirmToken) {
+          const tokenHash = crypto.createHash("sha256").update(confirmToken, "utf8").digest("hex");
+          const pending = await consumePendingAction(this.db, {
+            action: "github_disconnect",
+            identityId: identity.id,
+            tokenHash,
+          });
+          if (!pending) {
+            await reply("Invalid or expired disconnect token. Run `disconnect github` again.");
+            return true;
+          }
+          let payload: { installationIds?: string[] } = {};
+          try {
+            payload = JSON.parse(pending.payload_json ?? "{}") as { installationIds?: string[] };
+          } catch {
+            await reply("Disconnect token payload is invalid. Run `disconnect github` again.");
+            return true;
+          }
+          const installationIds = Array.isArray(payload.installationIds)
+            ? payload.installationIds.filter((id) => typeof id === "string" && id.trim().length > 0)
+            : [];
+          if (installationIds.length === 0) {
+            await reply("Disconnect token missing installation targets. Run `disconnect github` again.");
+            return true;
+          }
+          const results: string[] = [];
+          for (const installationId of installationIds) {
+            try {
+              const impact = await executeGithubDisconnect({
+                db: this.db,
+                cloud,
+                logger: this.logger,
+                installationId,
+                identityId: identity.id,
+                cloudManager: this.cloudManager,
+              });
+              results.push(
+                `- \`${installationId}\`: removed repos=${impact.repos}, runs=${impact.runs}, sessions=${impact.sessions}, screenshots=${impact.screenshots}`,
+              );
+            } catch (e) {
+              await reply(`Disconnect failed for ${installationId}: ${String(e)}`);
+              return true;
+            }
+          }
+          const lines = ["*GitHub App disconnected.*", ...results];
+          await reply(lines.join("\n"), true);
+          return true;
+        }
+
+        const installations = await listGithubInstallationsForIdentity(this.db, identity.id);
+        if (installations.length === 0) {
+          await reply("No GitHub App installations connected.");
+          return true;
+        }
+        let targetIds: string[] = [];
+        if (cmd.all) {
+          targetIds = installations.map((row) => row.installation_id);
+        } else if (cmd.installationId) {
+          const match = installations.find((row) => row.installation_id === cmd.installationId);
+          if (!match) {
+            await reply(`Installation not found: ${cmd.installationId}`);
+            return true;
+          }
+          targetIds = [match.installation_id];
+        } else if (installations.length === 1) {
+          targetIds = [installations[0]!.installation_id];
+        } else {
+          const lines = ["Multiple GitHub App installations found. Use one of:", ""];
+          for (const row of installations) {
+            const login = row.account_login ?? "unknown";
+            lines.push(`- ${formatCmd(`disconnect github --installation ${row.installation_id}`)} (${login})`);
+          }
+          lines.push(`- ${formatCmd("disconnect github --all")}`);
+          await reply(lines.join("\n"), true);
+          return true;
+        }
+
+        const impacts = [];
+        for (const installationId of targetIds) {
+          impacts.push(await computeGithubDisconnectImpact(this.db, installationId));
+        }
+        const token = crypto.randomBytes(6).toString("hex");
+        const tokenHash = crypto.createHash("sha256").update(token, "utf8").digest("hex");
+        await createPendingAction(this.db, {
+          action: "github_disconnect",
+          identityId: identity.id,
+          tokenHash,
+          payloadJson: JSON.stringify({ installationIds: targetIds }),
+          ttlMs: 10 * 60 * 1000,
+        });
+        const lines = [
+          "*Disconnect GitHub App*",
+          "Uninstall the GitHub App in GitHub settings before confirming.",
+          "",
+          "Targets:",
+          ...impacts.map((impact) => {
+            return `- \`${impact.installationId}\`: repos=${impact.repos}, runs=${impact.runs}, sessions=${impact.sessions}, screenshots=${impact.screenshots}`;
+          }),
+          "",
+          `Confirm with: ${formatCmd(`disconnect github confirm ${token}`)}`,
+        ];
+        await reply(lines.join("\n"), true);
+        return true;
+      }
       case "connections": {
         const conns = await listConnections(this.db, identity.id);
         if (conns.length === 0) {
@@ -1056,15 +1183,31 @@ export class BotController {
         const conns = await listConnections(this.db, identity.id);
         for (const conn of conns) {
           try {
-            if (conn.type === "github") {
-              if (cloud.github_app) {
+            if (conn.type === "github_app") {
+              if (!cloud.github_app) {
+                this.logger.warn("[cloud] github_app not configured; cannot refresh repos.");
+              } else if (!conn.installation_id) {
+                this.logger.warn("[cloud] github_app connection missing installation_id; cannot refresh repos.");
+              } else {
                 const token = await ensureGithubAppToken({
                   db: this.db,
                   config: cloud.github_app,
+                  secretKey: cloud.secrets_key,
                   connection: conn,
                   forceRefresh: true,
                 });
                 const repos = await fetchGithubInstallationRepos({ token: token.token, apiBaseUrl: cloud.github_app.api_base_url });
+                await replaceGithubInstallationRepos(this.db, {
+                  installationId: conn.installation_id,
+                  repos: repos.map((r) => ({
+                    providerRepoId: r.providerRepoId,
+                    name: r.name,
+                    url: r.url,
+                    defaultBranch: r.defaultBranch,
+                    archived: r.archived,
+                    private: r.private,
+                  })),
+                });
                 for (const r of repos) {
                   await this.db
                     .selectFrom("repos")
@@ -1074,7 +1217,39 @@ export class BotController {
                     .executeTakeFirst()
                     .then(async (existing) => {
                       if (existing) return;
-                      await this.db.insertInto("repos").values({
+                      await this.db
+                        .insertInto("repos")
+                        .values({
+                          id: crypto.randomUUID(),
+                          connection_id: conn.id,
+                          provider: "github",
+                          provider_repo_id: r.providerRepoId,
+                          name: r.name,
+                          url: r.url,
+                          default_branch: r.defaultBranch,
+                          fingerprint: null,
+                          created_at: nowMs(),
+                          updated_at: nowMs(),
+                        })
+                        .execute();
+                    });
+                }
+              }
+            }
+            if (conn.type === "github_oauth" && cloud.oauth.github) {
+              const repos = await fetchGithubRepos({ token: conn.access_token, apiBaseUrl: cloud.oauth.github.api_base_url });
+              for (const r of repos) {
+                await this.db
+                  .selectFrom("repos")
+                  .select(["id"])
+                  .where("connection_id", "=", conn.id)
+                  .where("provider_repo_id", "=", r.providerRepoId)
+                  .executeTakeFirst()
+                  .then(async (existing) => {
+                    if (existing) return;
+                    await this.db
+                      .insertInto("repos")
+                      .values({
                         id: crypto.randomUUID(),
                         connection_id: conn.id,
                         provider: "github",
@@ -1085,36 +1260,9 @@ export class BotController {
                         fingerprint: null,
                         created_at: nowMs(),
                         updated_at: nowMs(),
-                      }).execute();
-                    });
-                }
-              } else if (cloud.oauth.github) {
-                const repos = await fetchGithubRepos({ token: conn.access_token, apiBaseUrl: cloud.oauth.github.api_base_url });
-                for (const r of repos) {
-                  await this.db
-                    .selectFrom("repos")
-                    .select(["id"])
-                    .where("connection_id", "=", conn.id)
-                    .where("provider_repo_id", "=", r.providerRepoId)
-                    .executeTakeFirst()
-                    .then(async (existing) => {
-                      if (existing) return;
-                      await this.db.insertInto("repos").values({
-                        id: crypto.randomUUID(),
-                        connection_id: conn.id,
-                        provider: "github",
-                        provider_repo_id: r.providerRepoId,
-                        name: r.name,
-                        url: r.url,
-                        default_branch: r.defaultBranch,
-                        fingerprint: null,
-                        created_at: nowMs(),
-                        updated_at: nowMs(),
-                      }).execute();
-                    });
-                }
-              } else {
-                this.logger.warn("[cloud] github_app not configured; cannot refresh repos.");
+                      })
+                      .execute();
+                  });
               }
             }
             if (conn.type === "gitlab" && cloud.oauth.gitlab) {
@@ -1462,7 +1610,7 @@ export class BotController {
             repoIds = [identity.active_repo_id];
           } else {
             const conns = await listConnections(this.db, identity.id);
-            const hasGithub = conns.some((conn) => conn.type === "github");
+            const hasGithub = conns.some((conn) => conn.type === "github_app" || conn.type === "github_oauth");
             if (!hasGithub) {
               playground = true;
             } else {
@@ -1570,8 +1718,13 @@ export class BotController {
           const workspace = await provider.createWorkspace({ prefix: "lift" });
           let cloneToken = conn.access_token;
           let cloneUser: string | undefined;
-          if (conn.type === "github" && cloud.github_app) {
-            const token = await ensureGithubAppToken({ db: this.db, config: cloud.github_app, connection: conn });
+          if (conn.type === "github_app" && cloud.github_app) {
+            const token = await ensureGithubAppToken({
+              db: this.db,
+              config: cloud.github_app,
+              secretKey: cloud.secrets_key,
+              connection: conn,
+            });
             cloneToken = token.token;
             cloneUser = "x-access-token";
           }
@@ -3271,6 +3424,7 @@ function parseSettingsIntentFromSlack(text: string): SettingsIntent | null {
 
 type CloudCommand =
   | { kind: "connect"; provider: string }
+  | { kind: "disconnect"; provider: string; installationId?: string; confirmToken?: string; all?: boolean }
   | { kind: "connections" }
   | { kind: "repos"; provider?: string; search?: string }
   | { kind: "repo_select"; target: string }
@@ -3331,6 +3485,34 @@ function parseCloudCommand(text: string): CloudCommand | null {
 
   if (head === "connect" && tokens.length >= 1) {
     return { kind: "connect", provider: tokens[0]!.toLowerCase() };
+  }
+  if (head === "disconnect" && tokens.length >= 1) {
+    const provider = tokens.shift()!.toLowerCase();
+    let installationId: string | undefined;
+    let confirmToken: string | undefined;
+    let all = false;
+    for (let i = 0; i < tokens.length; i++) {
+      const t = tokens[i]!;
+      if (t === "confirm" && tokens[i + 1]) {
+        confirmToken = tokens[i + 1]!;
+        i++;
+        continue;
+      }
+      if (t === "--all") {
+        all = true;
+        continue;
+      }
+      if (t.startsWith("--installation=")) {
+        installationId = t.split("=", 2)[1];
+        continue;
+      }
+      if (t === "--installation" && tokens[i + 1]) {
+        installationId = tokens[i + 1]!;
+        i++;
+        continue;
+      }
+    }
+    return { kind: "disconnect", provider, installationId, confirmToken, all };
   }
   if (head === "connections") return { kind: "connections" };
   if (head === "repos") {
@@ -3628,6 +3810,7 @@ function buildCloudHelpText(platform: "telegram" | "slack"): string {
   const notes = [
     `- In group chats, finish connect + repo select in DM first, then use ${repoShareCmd}.`,
   ];
+  notes.push(`- To disconnect a GitHub App, use \`${cmd("disconnect github")}\` in a 1:1 chat.`);
   if (platform === "slack") {
     notes.push("- In Slack channels, mention the bot before the command (for example, `@bot connect github`).");
   }

@@ -98,6 +98,7 @@ export interface ConnectionsTable {
   id: string;
   identity_id: string;
   type: string;
+  installation_id: string | null;
   access_token: string;
   refresh_token: string | null;
   scope: string | null;
@@ -221,6 +222,72 @@ export interface OAuthStatesTable {
   expires_at: number;
 }
 
+export interface GithubInstallationsTable {
+  installation_id: string;
+  app_id: string;
+  account_login: string | null;
+  account_type: string | null;
+  status: string;
+  permissions_json: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface GithubInstallationTokensTable {
+  id: string;
+  installation_id: string;
+  encrypted_token: string;
+  expires_at: number | null;
+  created_at: number;
+}
+
+export interface GithubInstallationReposTable {
+  id: string;
+  installation_id: string;
+  provider_repo_id: string;
+  full_name: string;
+  url: string;
+  default_branch: string | null;
+  archived: number;
+  private: number;
+  permissions_json: string | null;
+  removed_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface GithubInstallationIdentitiesTable {
+  id: string;
+  installation_id: string;
+  identity_id: string;
+  created_at: number;
+}
+
+export interface GithubWebhookEventsTable {
+  delivery_id: string;
+  event: string;
+  action: string | null;
+  installation_id: string | null;
+  repo_id: string | null;
+  headers_json: string;
+  payload_json: string;
+  received_at: number;
+  processed_at: number | null;
+  status: string | null;
+  error: string | null;
+}
+
+export interface PendingActionsTable {
+  id: string;
+  action: string;
+  identity_id: string;
+  token_hash: string;
+  payload_json: string;
+  created_at: number;
+  expires_at: number;
+  consumed_at: number | null;
+}
+
 export interface DatabaseSchema {
   sessions: SessionsTable;
   session_stream_offsets: SessionStreamOffsetsTable;
@@ -239,6 +306,12 @@ export interface DatabaseSchema {
   setup_specs: SetupSpecsTable;
   shared_repos: SharedReposTable;
   oauth_states: OAuthStatesTable;
+  github_installations: GithubInstallationsTable;
+  github_installation_tokens: GithubInstallationTokensTable;
+  github_installation_repos: GithubInstallationReposTable;
+  github_installation_identities: GithubInstallationIdentitiesTable;
+  github_webhook_events: GithubWebhookEventsTable;
+  pending_actions: PendingActionsTable;
 }
 
 export type Db = Kysely<DatabaseSchema>;

@@ -115,6 +115,7 @@ export async function listConnections(db: Db, identityId: string) {
 export async function upsertConnection(db: Db, opts: {
   identityId: string;
   type: string;
+  installationId?: string | null;
   accessToken: string;
   refreshToken?: string | null;
   scope?: string | null;
@@ -137,6 +138,7 @@ export async function upsertConnection(db: Db, opts: {
         scope: opts.scope ?? null,
         token_expires_at: opts.tokenExpiresAt ?? null,
         metadata_json: opts.metadataJson ?? null,
+        installation_id: opts.installationId ?? null,
         updated_at: now,
       })
       .where("id", "=", existing.id)
@@ -150,6 +152,7 @@ export async function upsertConnection(db: Db, opts: {
       id,
       identity_id: opts.identityId,
       type: opts.type,
+      installation_id: opts.installationId ?? null,
       access_token: opts.accessToken,
       refresh_token: opts.refreshToken ?? null,
       scope: opts.scope ?? null,
@@ -665,5 +668,263 @@ export async function consumeOAuthState(db: Db, provider: string, state: string)
     return null;
   }
   await db.deleteFrom("oauth_states").where("id", "=", row.id).execute();
+  return row;
+}
+
+export async function upsertGithubInstallation(db: Db, opts: {
+  installationId: string;
+  appId: string;
+  accountLogin?: string | null;
+  accountType?: string | null;
+  status?: string;
+  permissionsJson?: string | null;
+}) {
+  const now = nowMs();
+  const existing = await db
+    .selectFrom("github_installations")
+    .select(["installation_id"])
+    .where("installation_id", "=", opts.installationId)
+    .executeTakeFirst();
+  if (existing) {
+    await db
+      .updateTable("github_installations")
+      .set({
+        app_id: opts.appId,
+        account_login: opts.accountLogin ?? null,
+        account_type: opts.accountType ?? null,
+        status: opts.status ?? "active",
+        permissions_json: opts.permissionsJson ?? null,
+        updated_at: now,
+      })
+      .where("installation_id", "=", opts.installationId)
+      .execute();
+    return;
+  }
+  await db
+    .insertInto("github_installations")
+    .values({
+      installation_id: opts.installationId,
+      app_id: opts.appId,
+      account_login: opts.accountLogin ?? null,
+      account_type: opts.accountType ?? null,
+      status: opts.status ?? "active",
+      permissions_json: opts.permissionsJson ?? null,
+      created_at: now,
+      updated_at: now,
+    })
+    .execute();
+}
+
+export async function updateGithubInstallationStatus(db: Db, opts: { installationId: string; status: string }) {
+  const now = nowMs();
+  const res = await db
+    .updateTable("github_installations")
+    .set({ status: opts.status, updated_at: now })
+    .where("installation_id", "=", opts.installationId)
+    .execute();
+  return Number(res.numUpdatedRows ?? 0);
+}
+
+export async function getGithubInstallation(db: Db, installationId: string) {
+  return await db
+    .selectFrom("github_installations")
+    .selectAll()
+    .where("installation_id", "=", installationId)
+    .executeTakeFirst();
+}
+
+export async function upsertGithubInstallationIdentity(db: Db, opts: { installationId: string; identityId: string }) {
+  const existing = await db
+    .selectFrom("github_installation_identities")
+    .select(["id"])
+    .where("installation_id", "=", opts.installationId)
+    .where("identity_id", "=", opts.identityId)
+    .executeTakeFirst();
+  if (existing) return;
+  const now = nowMs();
+  await db
+    .insertInto("github_installation_identities")
+    .values({
+      id: crypto.randomUUID(),
+      installation_id: opts.installationId,
+      identity_id: opts.identityId,
+      created_at: now,
+    })
+    .execute();
+}
+
+export async function listGithubInstallationsForIdentity(db: Db, identityId: string) {
+  return await db
+    .selectFrom("github_installation_identities")
+    .innerJoin("github_installations", "github_installations.installation_id", "github_installation_identities.installation_id")
+    .select([
+      "github_installations.installation_id",
+      "github_installations.app_id",
+      "github_installations.account_login",
+      "github_installations.account_type",
+      "github_installations.status",
+      "github_installations.created_at",
+      "github_installations.updated_at",
+    ])
+    .where("github_installation_identities.identity_id", "=", identityId)
+    .orderBy("github_installations.updated_at", "desc")
+    .execute();
+}
+
+export async function upsertGithubInstallationToken(db: Db, opts: {
+  installationId: string;
+  encryptedToken: string;
+  expiresAt: number | null;
+}) {
+  const now = nowMs();
+  const existing = await db
+    .selectFrom("github_installation_tokens")
+    .select(["id"])
+    .where("installation_id", "=", opts.installationId)
+    .executeTakeFirst();
+  if (existing) {
+    await db
+      .updateTable("github_installation_tokens")
+      .set({
+        encrypted_token: opts.encryptedToken,
+        expires_at: opts.expiresAt,
+        created_at: now,
+      })
+      .where("installation_id", "=", opts.installationId)
+      .execute();
+    return;
+  }
+  await db
+    .insertInto("github_installation_tokens")
+    .values({
+      id: crypto.randomUUID(),
+      installation_id: opts.installationId,
+      encrypted_token: opts.encryptedToken,
+      expires_at: opts.expiresAt,
+      created_at: now,
+    })
+    .execute();
+}
+
+export async function getGithubInstallationToken(db: Db, installationId: string) {
+  return await db
+    .selectFrom("github_installation_tokens")
+    .selectAll()
+    .where("installation_id", "=", installationId)
+    .executeTakeFirst();
+}
+
+export async function deleteGithubInstallationToken(db: Db, installationId: string) {
+  await db.deleteFrom("github_installation_tokens").where("installation_id", "=", installationId).execute();
+}
+
+export async function replaceGithubInstallationRepos(
+  db: Db,
+  opts: {
+    installationId: string;
+    repos: Array<{
+      providerRepoId: string;
+      name: string;
+      url: string;
+      defaultBranch: string | null;
+      archived?: boolean;
+      private?: boolean;
+      permissionsJson?: string | null;
+    }>;
+  },
+) {
+  const now = nowMs();
+  const repoIds = opts.repos.map((r) => r.providerRepoId);
+  if (repoIds.length === 0) {
+    await db
+      .updateTable("github_installation_repos")
+      .set({ removed_at: now, updated_at: now })
+      .where("installation_id", "=", opts.installationId)
+      .execute();
+  } else {
+    await db
+      .updateTable("github_installation_repos")
+      .set({ removed_at: now, updated_at: now })
+      .where("installation_id", "=", opts.installationId)
+      .where("provider_repo_id", "not in", repoIds)
+      .execute();
+  }
+  for (const repo of opts.repos) {
+    const existing = await db
+      .selectFrom("github_installation_repos")
+      .select(["id"])
+      .where("installation_id", "=", opts.installationId)
+      .where("provider_repo_id", "=", repo.providerRepoId)
+      .executeTakeFirst();
+    const values = {
+      installation_id: opts.installationId,
+      provider_repo_id: repo.providerRepoId,
+      full_name: repo.name,
+      url: repo.url,
+      default_branch: repo.defaultBranch ?? null,
+      archived: repo.archived ? 1 : 0,
+      private: repo.private ? 1 : 0,
+      permissions_json: repo.permissionsJson ?? null,
+      removed_at: null,
+      updated_at: now,
+    };
+    if (existing) {
+      await db.updateTable("github_installation_repos").set(values).where("id", "=", existing.id).execute();
+    } else {
+      await db
+        .insertInto("github_installation_repos")
+        .values({ id: crypto.randomUUID(), created_at: now, ...values })
+        .execute();
+    }
+  }
+}
+
+export async function listGithubInstallationRepos(db: Db, installationId: string) {
+  return await db
+    .selectFrom("github_installation_repos")
+    .selectAll()
+    .where("installation_id", "=", installationId)
+    .where("removed_at", "is", null)
+    .execute();
+}
+
+export async function createPendingAction(db: Db, opts: {
+  action: string;
+  identityId: string;
+  tokenHash: string;
+  payloadJson: string;
+  ttlMs: number;
+}) {
+  const now = nowMs();
+  const id = crypto.randomUUID();
+  await db
+    .insertInto("pending_actions")
+    .values({
+      id,
+      action: opts.action,
+      identity_id: opts.identityId,
+      token_hash: opts.tokenHash,
+      payload_json: opts.payloadJson,
+      created_at: now,
+      expires_at: now + opts.ttlMs,
+      consumed_at: null,
+    })
+    .execute();
+  return id;
+}
+
+export async function consumePendingAction(db: Db, opts: { action: string; identityId: string; tokenHash: string }) {
+  const row = await db
+    .selectFrom("pending_actions")
+    .selectAll()
+    .where("action", "=", opts.action)
+    .where("identity_id", "=", opts.identityId)
+    .where("token_hash", "=", opts.tokenHash)
+    .executeTakeFirst();
+  if (!row) return null;
+  const now = nowMs();
+  if (row.expires_at < now) return null;
+  if (row.consumed_at) return null;
+  await db.updateTable("pending_actions").set({ consumed_at: now }).where("id", "=", row.id).execute();
   return row;
 }

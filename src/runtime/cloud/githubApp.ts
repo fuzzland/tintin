@@ -2,7 +2,17 @@ import crypto from "node:crypto";
 import type { CloudGithubAppSection, CloudSection } from "../config.js";
 import type { ConnectionsTable, Db } from "../db.js";
 import { nowMs } from "../util.js";
-import { createOAuthState, consumeOAuthState, markIdentityOnboarded, upsertConnection } from "./store.js";
+import {
+  createOAuthState,
+  consumeOAuthState,
+  markIdentityOnboarded,
+  upsertConnection,
+  upsertGithubInstallation,
+  upsertGithubInstallationIdentity,
+  upsertGithubInstallationToken,
+  getGithubInstallationToken,
+} from "./store.js";
+import { decryptSecret, encryptSecret } from "./secrets.js";
 
 const STATE_PROVIDER = "github_app";
 const TOKEN_REFRESH_BUFFER_MS = 60_000;
@@ -26,7 +36,7 @@ function normalizePrivateKey(key: string): string {
   return key.includes("\\n") ? key.replace(/\\n/g, "\n") : key;
 }
 
-function buildGithubAppJwt(cfg: CloudGithubAppSection): string {
+export function buildGithubAppJwt(cfg: CloudGithubAppSection): string {
   if (!cfg.app_id || !cfg.private_key) {
     throw new Error("GitHub App config missing app_id or private_key.");
   }
@@ -102,35 +112,61 @@ export function parseGithubAppMetadata(metadataJson: string | null): GithubAppMe
   }
 }
 
+export async function isGithubInstallationMissing(opts: {
+  config: CloudGithubAppSection;
+  installationId: string;
+}): Promise<boolean> {
+  const id = Number(opts.installationId);
+  if (!Number.isFinite(id)) throw new Error("Invalid installation id");
+  const url = `${opts.config.api_base_url.replace(/\/+$/, "")}/app/installations/${id}`;
+  const res = await fetch(url, {
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${buildGithubAppJwt(opts.config)}`,
+    },
+  });
+  if (res.status === 404) return true;
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`GitHub API failed: ${res.status} ${text}`);
+  }
+  return false;
+}
+
 export async function ensureGithubAppToken(opts: {
   db: Db;
   config: CloudGithubAppSection;
+  secretKey: string;
   connection: ConnectionsTable;
   forceRefresh?: boolean;
 }): Promise<{ token: string; expiresAt: number | null }> {
   const now = nowMs();
-  if (
-    !opts.forceRefresh &&
-    opts.connection.access_token &&
-    opts.connection.token_expires_at &&
-    opts.connection.token_expires_at > now + TOKEN_REFRESH_BUFFER_MS
-  ) {
-    return { token: opts.connection.access_token, expiresAt: opts.connection.token_expires_at };
+  const installationId = opts.connection.installation_id?.trim();
+  if (!installationId) throw new Error("GitHub App connection missing installation_id");
+  if (!opts.forceRefresh) {
+    const existing = await getGithubInstallationToken(opts.db, installationId);
+    if (existing?.encrypted_token) {
+      const expiresAt = existing.expires_at ?? null;
+      if (expiresAt && expiresAt > now + TOKEN_REFRESH_BUFFER_MS) {
+        const token = decryptSecret(existing.encrypted_token, opts.secretKey);
+        return { token, expiresAt };
+      }
+    }
   }
-  const metadata = parseGithubAppMetadata(opts.connection.metadata_json);
-  if (!metadata) throw new Error("GitHub App connection missing installation metadata");
-  const token = await createInstallationToken(opts.config, metadata.installation_id);
-  await opts.db
-    .updateTable("connections")
-    .set({ access_token: token.token, token_expires_at: token.expiresAt, updated_at: nowMs() })
-    .where("id", "=", opts.connection.id)
-    .execute();
+  const token = await createInstallationToken(opts.config, Number(installationId));
+  const encryptedToken = encryptSecret(token.token, opts.secretKey);
+  await upsertGithubInstallationToken(opts.db, {
+    installationId,
+    encryptedToken,
+    expiresAt: token.expiresAt,
+  });
   return token;
 }
 
 export async function createGithubPullRequest(opts: {
   db: Db;
   config: CloudGithubAppSection;
+  secretKey: string;
   connection: ConnectionsTable;
   owner: string;
   repo: string;
@@ -139,7 +175,12 @@ export async function createGithubPullRequest(opts: {
   base: string;
   body?: string | null;
 }): Promise<{ url: string | null; number: number | null }> {
-  const token = await ensureGithubAppToken({ db: opts.db, config: opts.config, connection: opts.connection });
+  const token = await ensureGithubAppToken({
+    db: opts.db,
+    config: opts.config,
+    secretKey: opts.secretKey,
+    connection: opts.connection,
+  });
   const apiBase = opts.config.api_base_url.replace(/\/+$/, "");
   const payload: Record<string, any> = {
     title: opts.title,
@@ -215,14 +256,33 @@ export async function handleGithubAppCallback(opts: {
     account_login,
     account_type,
   };
+  await upsertGithubInstallation(opts.db, {
+    installationId: String(installationId),
+    appId: cfg.app_id,
+    accountLogin: account_login,
+    accountType: account_type,
+    status: "active",
+    permissionsJson: null,
+  });
+  await upsertGithubInstallationIdentity(opts.db, {
+    installationId: String(installationId),
+    identityId: saved.identity_id,
+  });
+  const encryptedToken = encryptSecret(token.token, opts.cloud.secrets_key);
+  await upsertGithubInstallationToken(opts.db, {
+    installationId: String(installationId),
+    encryptedToken,
+    expiresAt: token.expiresAt,
+  });
   await upsertConnection(opts.db, {
     identityId: saved.identity_id,
-    type: "github",
-    accessToken: token.token,
+    type: "github_app",
+    installationId: String(installationId),
+    accessToken: "github_app",
     refreshToken: null,
     scope: null,
-    tokenExpiresAt: token.expiresAt,
-    metadataJson: JSON.stringify(metadata),
+    tokenExpiresAt: null,
+    metadataJson: null,
   });
   await markIdentityOnboarded(opts.db, saved.identity_id);
   return { identityId: saved.identity_id, provider: "github", metadataJson: saved.metadata_json ?? null };

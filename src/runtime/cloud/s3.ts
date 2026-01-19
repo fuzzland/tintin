@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { CloudUiSection } from "../config.js";
 
@@ -38,4 +38,13 @@ export async function signScreenshotUrl(cfg: CloudUiSection, key: string): Promi
   });
   const expiresIn = Math.max(1, Math.floor(cfg.s3_signed_url_ttl_ms / 1000));
   return await getSignedUrl(client, command, { expiresIn });
+}
+
+export async function deleteS3Object(cfg: CloudUiSection, key: string): Promise<void> {
+  const client = getClient(cfg);
+  const command = new DeleteObjectCommand({
+    Bucket: cfg.s3_bucket,
+    Key: key,
+  });
+  await client.send(command);
 }

@@ -125,9 +125,10 @@ export async function handleOAuthCallback(opts: {
     codeVerifier: saved.code_verifier,
   });
   if (!saved.identity_id) throw new Error("OAuth state missing identity");
+  const connectionType = opts.provider === "github" ? "github_oauth" : opts.provider;
   await upsertConnection(opts.db, {
     identityId: saved.identity_id,
-    type: opts.provider,
+    type: connectionType,
     accessToken: token.accessToken,
     refreshToken: token.refreshToken,
     scope: token.scope,
