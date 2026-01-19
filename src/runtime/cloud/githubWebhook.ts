@@ -121,7 +121,7 @@ function parseErrorState(raw: string | null): GithubWebhookErrorState {
     const attempts = typeof parsed.attempts === "number" && Number.isFinite(parsed.attempts) ? parsed.attempts : 0;
     return {
       attempts,
-      last_error: readString(parsed.last_error),
+      last_error: readString(parsed.last_error) ?? undefined,
       last_attempt_at: typeof parsed.last_attempt_at === "number" ? parsed.last_attempt_at : undefined,
       next_retry_at: typeof parsed.next_retry_at === "number" ? parsed.next_retry_at : undefined,
       processing_started_at: typeof parsed.processing_started_at === "number" ? parsed.processing_started_at : undefined,
