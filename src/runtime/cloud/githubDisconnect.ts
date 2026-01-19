@@ -222,6 +222,11 @@ export async function executeGithubDisconnect(opts: {
     await trx.deleteFrom("github_webhook_events").where("installation_id", "=", opts.installationId).execute();
 
     if (scope.repoIds.length > 0) {
+      await trx
+        .updateTable("identities")
+        .set({ active_repo_id: null, updated_at: now })
+        .where("active_repo_id", "in", scope.repoIds)
+        .execute();
       await trx.deleteFrom("shared_repos").where("repo_id", "in", scope.repoIds).execute();
       await trx.deleteFrom("setup_specs").where("repo_id", "in", scope.repoIds).execute();
       await trx.deleteFrom("cloud_run_repos").where("repo_id", "in", scope.repoIds).execute();

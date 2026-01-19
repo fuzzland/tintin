@@ -721,7 +721,7 @@ export async function updateGithubInstallationStatus(db: Db, opts: { installatio
     .updateTable("github_installations")
     .set({ status: opts.status, updated_at: now })
     .where("installation_id", "=", opts.installationId)
-    .execute();
+    .executeTakeFirst();
   return Number(res.numUpdatedRows ?? 0);
 }
 
