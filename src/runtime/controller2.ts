@@ -1206,6 +1206,7 @@ export class BotController {
                     defaultBranch: r.defaultBranch,
                     archived: r.archived,
                     private: r.private,
+                    permissionsJson: r.permissionsJson ?? null,
                   })),
                 });
                 for (const r of repos) {

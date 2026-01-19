@@ -171,6 +171,8 @@ public_base_url = "https://cloud.example.com"
 app_id = "123"
 app_slug = "tintin"
 private_key = "${pemB64}"
+webhook_path = "/github/webhook"
+webhook_secret = "secret"
 `),
     "utf8",
   );
@@ -201,6 +203,8 @@ public_base_url = "https://cloud.example.com"
 app_id = "123"
 app_slug = "tintin"
 private_key = "${pemInline}"
+webhook_path = "/github/webhook"
+webhook_secret = "secret"
 `),
     "utf8",
   );

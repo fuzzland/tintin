@@ -111,6 +111,8 @@ export interface CloudGithubAppSection {
   private_key: string;
   api_base_url: string;
   app_base_url: string;
+  webhook_path: string;
+  webhook_secret: string;
 }
 
 export interface CloudUiSection {
@@ -680,12 +682,19 @@ function normalizeCloudGithubAppSection(value: unknown): CloudGithubAppSection {
     typeof (raw as any).app_base_url === "string" && (raw as any).app_base_url.length > 0
       ? (raw as any).app_base_url
       : "https://github.com";
+  const webhookPathRaw = typeof (raw as any).webhook_path === "string" ? (raw as any).webhook_path : "/github/webhook";
+  const webhook_path = normalizeHttpPath(webhookPathRaw, "[cloud].github_app.webhook_path");
+  const webhookSecretRaw = typeof (raw as any).webhook_secret === "string" ? (raw as any).webhook_secret : "";
+  const webhook_secret = webhookSecretRaw.trim();
+  assert(webhook_secret.length > 0, "[cloud].github_app.webhook_secret is required");
   return {
     app_id,
     app_slug,
     private_key,
     api_base_url,
     app_base_url,
+    webhook_path,
+    webhook_secret,
   };
 }
 

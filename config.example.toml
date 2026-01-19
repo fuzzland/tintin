@@ -130,7 +130,7 @@ app_id = "env:GITHUB_APP_ID"
 app_slug = "your-app-slug"
 private_key = "env:GITHUB_APP_PRIVATE_KEY_B64"
 webhook_path = "/github/webhook"
-webhook_secrets = ["env:GITHUB_APP_WEBHOOK_SECRET"]
+webhook_secret = "env:GITHUB_APP_WEBHOOK_SECRET"
 # api_base_url = "https://api.github.com"
 # app_base_url = "https://github.com"
 

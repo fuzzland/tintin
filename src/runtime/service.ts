@@ -8,6 +8,16 @@ import { BotController, type CommitProposal, type CommitProposalStore } from "./
 import { CloudManager } from "./cloud/manager.js";
 import { handleOAuthCallback } from "./cloud/oauth.js";
 import { handleGithubAppCallback } from "./cloud/githubApp.js";
+import {
+  githubWebhookMaxBodyBytes,
+  githubWebhookAppIdMatches,
+  githubWebhookPollIntervalMs,
+  parseGithubWebhookPayload,
+  processPendingGithubWebhookEvents,
+  recordGithubWebhookEvent,
+  shouldHandleGithubWebhookEvent,
+  verifyGithubWebhookSignature,
+} from "./cloud/githubWebhook.js";
 import { handleProxyRequest } from "./cloud/proxy.js";
 import { JsonlStreamer, mapEventToFragments } from "./streamer.js";
 import { SessionManager } from "./sessionManager.js";
@@ -52,11 +62,20 @@ function readHeader(req: http.IncomingMessage, name: string): string | null {
   return value ?? null;
 }
 
-async function readRequestBody(req: http.IncomingMessage): Promise<string> {
+async function readRequestBody(req: http.IncomingMessage, maxBytes?: number): Promise<string> {
   return new Promise<string>((resolve, reject) => {
+    const limit = typeof maxBytes === "number" && Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : Number.POSITIVE_INFINITY;
     const chunks: Array<Buffer> = [];
+    let total = 0;
     req.on("data", (chunk: Buffer | string) => {
-      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+      const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+      total += buf.length;
+      if (total > limit) {
+        reject(new Error("Body too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(buf);
     });
     req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     req.on("error", (err) => reject(err));
@@ -188,6 +207,27 @@ export async function createBotService(deps: BotServiceDeps) {
   };
 
   const queue = new TaskQueue(16);
+  const githubWebhookIngestQueue = new TaskQueue(4);
+  const githubWebhookQueue = new TaskQueue(4);
+  let githubWebhookPollInFlight = false;
+  const githubWebhookEnabled = Boolean(config.cloud?.enabled && config.cloud.github_app);
+  const scheduleGithubWebhookProcessing = (reason: string) => {
+    if (!githubWebhookEnabled || !config.cloud) return;
+    if (githubWebhookPollInFlight) return;
+    githubWebhookPollInFlight = true;
+    githubWebhookQueue.enqueue(async () => {
+      try {
+        const result = await processPendingGithubWebhookEvents({ db, cloud: config.cloud!, logger });
+        if (result.processed > 0) {
+          logger.info(`[github_webhook] processed=${result.processed} skipped=${result.skipped} reason=${reason}`);
+        }
+      } catch (err) {
+        logger.warn(`[github_webhook] processing failed reason=${reason}: ${String(err)}`);
+      } finally {
+        githubWebhookPollInFlight = false;
+      }
+    });
+  };
   const firstMessageSent = new Set<string>();
   const firstMessageSending = new Set<string>();
   const reviewCommitDisabled = new Set<string>();
@@ -221,6 +261,11 @@ export async function createBotService(deps: BotServiceDeps) {
     process.once("exit", () => void playwrightMcp.stop());
     process.once("SIGINT", () => void playwrightMcp.stop());
     process.once("SIGTERM", () => void playwrightMcp.stop());
+  }
+  if (githubWebhookEnabled) {
+    scheduleGithubWebhookProcessing("startup");
+    const intervalMs = githubWebhookPollIntervalMs();
+    setInterval(() => scheduleGithubWebhookProcessing("poll"), intervalMs);
   }
 
   const notifyGithubConnected = async (metadataJson: string | null) => {
@@ -1553,6 +1598,93 @@ export async function createBotService(deps: BotServiceDeps) {
           });
           return;
         }
+      }
+
+      if (req.method === "POST" && shouldHandleGithubWebhookEvent(config.cloud, pathname)) {
+        const cfg = config.cloud!.github_app!;
+        const contentType = readHeader(req, "content-type") ?? "";
+        if (!contentType.toLowerCase().startsWith("application/json")) {
+          sendText(res, 415, "unsupported content-type");
+          return;
+        }
+        let bodyText = "";
+        try {
+          bodyText = await readRequestBody(req, githubWebhookMaxBodyBytes());
+        } catch (err) {
+          const msg = String(err);
+          logger.warn(`[github_webhook] body read failed: ${msg}`);
+          if (msg.toLowerCase().includes("too large")) {
+            sendText(res, 413, "payload too large");
+          } else {
+            sendText(res, 400, "bad request");
+          }
+          return;
+        }
+        const signatureHeader256 = readHeader(req, "x-hub-signature-256");
+        const signatureHeader = readHeader(req, "x-hub-signature");
+        if (
+          !verifyGithubWebhookSignature({
+            body: bodyText,
+            signature256: signatureHeader256,
+            signature: signatureHeader,
+            secret: cfg.webhook_secret,
+          })
+        ) {
+          logger.warn("[github_webhook] unauthorized (bad signature)");
+          sendText(res, 401, "unauthorized");
+          return;
+        }
+        let payload: unknown;
+        try {
+          payload = JSON.parse(bodyText);
+        } catch {
+          logger.warn("[github_webhook] invalid JSON");
+          sendText(res, 400, "bad request");
+          return;
+        }
+        const meta = parseGithubWebhookPayload(payload);
+        if (!githubWebhookAppIdMatches(meta.appId, cfg.app_id)) {
+          logger.warn("[github_webhook] app_id mismatch");
+          sendText(res, 403, "forbidden");
+          return;
+        }
+        const event = readHeader(req, "x-github-event") ?? "";
+        const deliveryId = readHeader(req, "x-github-delivery") ?? "";
+        if (!event || !deliveryId) {
+          sendText(res, 400, "missing webhook headers");
+          return;
+        }
+        const headersJson = JSON.stringify({
+          "x-github-event": event,
+          "x-github-delivery": deliveryId,
+          "x-hub-signature-256": signatureHeader256 ?? null,
+          "x-hub-signature": signatureHeader ?? null,
+          "user-agent": readHeader(req, "user-agent"),
+          "content-type": contentType,
+        });
+        githubWebhookIngestQueue.enqueue(async () => {
+          try {
+            const result = await recordGithubWebhookEvent({
+              db,
+              deliveryId,
+              event,
+              action: meta.action,
+              installationId: meta.installationId,
+              repoId: meta.repoId,
+              headersJson,
+              payloadJson: bodyText,
+            });
+            if (result === "duplicate") {
+              logger.debug(`[github_webhook] duplicate delivery_id=${deliveryId}`);
+              return;
+            }
+            scheduleGithubWebhookProcessing("webhook");
+          } catch (err) {
+            logger.error(`[github_webhook] persist failed delivery_id=${deliveryId}`, err);
+          }
+        });
+        sendText(res, 202, "accepted");
+        return;
       }
 
       if (config.cloud?.enabled && req.method === "GET" && pathname === config.cloud.oauth.callback_path) {

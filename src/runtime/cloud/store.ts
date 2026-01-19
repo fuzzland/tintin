@@ -221,6 +221,11 @@ export async function listReposForIdentity(db: Db, identityId: string) {
   return await db
     .selectFrom("repos")
     .innerJoin("connections", "connections.id", "repos.connection_id")
+    .leftJoin("github_installation_repos", (join) =>
+      join
+        .onRef("github_installation_repos.installation_id", "=", "connections.installation_id")
+        .onRef("github_installation_repos.provider_repo_id", "=", "repos.provider_repo_id"),
+    )
     .select([
       "repos.id",
       "repos.provider",
@@ -233,6 +238,16 @@ export async function listReposForIdentity(db: Db, identityId: string) {
       "connections.type as connection_type",
     ])
     .where("connections.identity_id", "=", identityId)
+    .where((eb) =>
+      eb.or([
+        eb("connections.type", "!=", "github_app"),
+        eb.and([
+          eb("connections.type", "=", "github_app"),
+          eb("github_installation_repos.removed_at", "is", null),
+          eb("github_installation_repos.id", "is not", null),
+        ]),
+      ]),
+    )
     .orderBy("repos.name", "asc")
     .execute();
 }

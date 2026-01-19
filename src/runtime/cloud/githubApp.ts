@@ -140,9 +140,27 @@ export async function ensureGithubAppToken(opts: {
   connection: ConnectionsTable;
   forceRefresh?: boolean;
 }): Promise<{ token: string; expiresAt: number | null }> {
-  const now = nowMs();
   const installationId = opts.connection.installation_id?.trim();
   if (!installationId) throw new Error("GitHub App connection missing installation_id");
+  return await ensureGithubAppTokenForInstallation({
+    db: opts.db,
+    config: opts.config,
+    secretKey: opts.secretKey,
+    installationId,
+    forceRefresh: opts.forceRefresh,
+  });
+}
+
+export async function ensureGithubAppTokenForInstallation(opts: {
+  db: Db;
+  config: CloudGithubAppSection;
+  secretKey: string;
+  installationId: string;
+  forceRefresh?: boolean;
+}): Promise<{ token: string; expiresAt: number | null }> {
+  const now = nowMs();
+  const installationId = opts.installationId.trim();
+  if (!installationId) throw new Error("GitHub App token missing installation_id");
   if (!opts.forceRefresh) {
     const existing = await getGithubInstallationToken(opts.db, installationId);
     if (existing?.encrypted_token) {
