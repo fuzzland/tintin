@@ -1001,22 +1001,69 @@ export class BotController {
         });
         try {
           if (provider === "github") {
-            const existing = (await listConnections(this.db, identity.id))
-              .filter((c) => c.type === "github_app")
-              .sort((a, b) => b.updated_at - a.updated_at)[0];
-            if (existing) {
-              const installationId = existing.installation_id ?? null;
-              const installation = installationId ? await getGithubInstallation(this.db, installationId) : null;
-              const connectedAt = existing.updated_at ? new Date(existing.updated_at).toISOString() : null;
-              const lines = ["*GitHub already connected*"];
-              if (installation?.account_login) {
-                const accountType = installation.account_type ?? "unknown";
-                lines.push(`- *Account:* \`${installation.account_login}\` (${accountType})`);
-              } else {
-                lines.push("- *Account:* _(unknown; reconnect to refresh)_");
+            const connections = (await listConnections(this.db, identity.id)).filter((c) => c.type === "github_app");
+            const activeConnections: Array<{
+              connection: (typeof connections)[number];
+              installation: Awaited<ReturnType<typeof getGithubInstallation>>;
+            }> = [];
+            const staleConnections: typeof connections = [];
+            const connectedStatuses = new Set(["active", "suspended", "disconnecting"]);
+            for (const conn of connections) {
+              const installationId = conn.installation_id ?? null;
+              if (!installationId) {
+                staleConnections.push(conn);
+                continue;
               }
-              if (installationId) lines.push(`- *Installation ID:* \`${installationId}\``);
-              if (connectedAt) lines.push(`- *Connected at:* \`${connectedAt}\``);
+              const installation = await getGithubInstallation(this.db, installationId);
+              if (!installation || !connectedStatuses.has(installation.status)) {
+                staleConnections.push(conn);
+                continue;
+              }
+              activeConnections.push({ connection: conn, installation });
+            }
+            if (staleConnections.length > 0) {
+              await this.db
+                .deleteFrom("connections")
+                .where(
+                  "id",
+                  "in",
+                  staleConnections.map((c) => c.id),
+                )
+                .execute();
+              this.logger.info(
+                `[cloud] cleaned stale github_app connections identity=${identity.id} count=${staleConnections.length}`,
+              );
+            }
+            if (activeConnections.length > 0) {
+              activeConnections.sort((a, b) => (b.connection.updated_at ?? 0) - (a.connection.updated_at ?? 0));
+              if (activeConnections.length === 1) {
+                const existing = activeConnections[0]!;
+                const installationId = existing.connection.installation_id ?? null;
+                const connectedAt = existing.connection.updated_at ? new Date(existing.connection.updated_at).toISOString() : null;
+                const lines = ["*GitHub already connected*"];
+                if (existing.installation?.account_login) {
+                  const accountType = existing.installation.account_type ?? "unknown";
+                  lines.push(`- *Account:* \`${existing.installation.account_login}\` (${accountType})`);
+                } else {
+                  lines.push("- *Account:* _(unknown; reconnect to refresh)_");
+                }
+                if (existing.installation?.status && existing.installation.status !== "active") {
+                  lines.push(`- *Status:* \`${existing.installation.status}\``);
+                }
+                if (installationId) lines.push(`- *Installation ID:* \`${installationId}\``);
+                if (connectedAt) lines.push(`- *Connected at:* \`${connectedAt}\``);
+                await reply(lines.join("\n"), true);
+                return true;
+              }
+              const lines = ["*GitHub already connected*", "Active installations:"];
+              for (const item of activeConnections) {
+                const installationId = item.connection.installation_id ?? "unknown";
+                const login = item.installation?.account_login ?? "unknown";
+                const accountType = item.installation?.account_type ?? "unknown";
+                const status = item.installation?.status ?? "unknown";
+                lines.push(`- \`${installationId}\`: ${login} (${accountType}), status=${status}`);
+              }
+              lines.push("", `Use ${formatCmd("disconnect github --installation <id>")} to remove a specific installation.`);
               await reply(lines.join("\n"), true);
               return true;
             }
