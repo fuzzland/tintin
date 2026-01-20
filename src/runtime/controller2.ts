@@ -69,6 +69,13 @@ import {
 } from "./store.js";
 import type { SessionListPage, SessionRow, WizardStateRow } from "./store.js";
 import { nowMs } from "./util.js";
+import {
+  completeChatgptOAuth,
+  getChatgptAccountForIdentity,
+  parseAuthorizationInput as parseChatgptAuthInput,
+  revokeChatgptAccount,
+  startChatgptOAuth,
+} from "./chatgpt/oauth.js";
 
 const REVIEW_PROMPT = "Run codex review";
 const COMMIT_PROMPT = "Stage all current changes and commit them with a clear, meaningful git commit message summarizing the diff.";
@@ -988,18 +995,94 @@ export class BotController {
           await reply(`Run ${formatCmd("connect")} in a 1:1 chat with the bot.`);
           return true;
         }
-        if (!cloud?.public_base_url) {
-          await reply("Missing [cloud].public_base_url configuration.");
-          return true;
-        }
         const cmd = opts.command as Extract<CloudCommand, { kind: "connect" }>;
         const provider = cmd.provider;
         const metadataJson = JSON.stringify({
           platform: opts.platform,
           chat_id: opts.chatId,
           user_id: opts.userId,
+          space_id: opts.spaceId,
         });
         try {
+          if (provider === "chatgpt") {
+            if (!this.config.chatgpt_oauth) {
+              await reply("ChatGPT OAuth is not configured.");
+              return true;
+            }
+            if (cmd.subcommand === "status") {
+              const account = await getChatgptAccountForIdentity({ db: this.db, config: this.config, identityId: identity.id });
+              if (!account) {
+                await reply("No ChatGPT account linked.", true);
+                return true;
+              }
+              const lines = [
+                "*ChatGPT account*",
+                `- Account ID: \`${account.chatgptUserId}\``,
+                account.email ? `- Email: \`${account.email}\`` : "- Email: (unknown)",
+                `- Expires at: \`${new Date(account.expiresAt).toISOString()}\``,
+                account.workspaceId ? `- Workspace: \`${account.workspaceId}\`` : "- Workspace: (none)",
+              ];
+            await reply(lines.join("\n"), true);
+            return true;
+          }
+          if (cmd.subcommand === "revoke") {
+            this.logger.info(
+              `[chatgpt][oauth] revoke requested platform=${opts.platform} chat=${opts.chatId} user=${opts.userId} identity=${identity.id}`,
+            );
+            await revokeChatgptAccount({ db: this.db, identityId: identity.id });
+            this.logger.info(`[chatgpt][oauth] revoked identity=${identity.id}`);
+            await reply("ChatGPT account unlinked.", true);
+            return true;
+          }
+            // Manual paste flow: /connect chatgpt <redirect-url>
+            if (cmd.payload) {
+              const parsed = parseChatgptAuthInput(cmd.payload);
+              if (!parsed.code || !parsed.state) {
+                await reply("Please paste the full redirect URL so I can read both code and state.");
+                return true;
+              }
+              try {
+                this.logger.info(
+                  `[chatgpt][oauth] manual redirect received platform=${opts.platform} chat=${opts.chatId} user=${opts.userId} identity=${identity.id} state=${parsed.state}`,
+                );
+                await completeChatgptOAuth({
+                  db: this.db,
+                  config: this.config,
+                  code: parsed.code,
+                  state: parsed.state,
+                  expectedIdentityId: identity.id,
+                  logger: this.logger,
+                });
+                this.logger.info(
+                  `[chatgpt][oauth] linked account platform=${opts.platform} chat=${opts.chatId} identity=${identity.id} state=${parsed.state}`,
+                );
+                await reply("ChatGPT connected.", true);
+              } catch (e) {
+                await reply(`ChatGPT connect failed: ${String(e)}`);
+              }
+              return true;
+            }
+            const { authorizeUrl } = await startChatgptOAuth({
+              db: this.db,
+              config: this.config,
+              identityId: identity.id,
+              metadataJson,
+            });
+            const lines = [
+              "*ChatGPT sign-in*",
+              "Open this link to sign in with ChatGPT.",
+              authorizeUrl,
+              "",
+              "*Important*: after login, copy the full redirect URL from your browser and send it with:",
+              `- ${formatCmd("connect chatgpt <paste-full-redirect-url>")}`,
+            ];
+            await reply(lines.join("\n"), true);
+            return true;
+          }
+          if (!cloud?.public_base_url) {
+            await reply("Missing [cloud].public_base_url configuration.");
+            return true;
+          }
           if (provider === "github") {
             const connections = (await listConnections(this.db, identity.id)).filter((c) => c.type === "github_app");
             const activeConnections: Array<{
@@ -1729,7 +1812,12 @@ export class BotController {
             slackThreadTs: opts.slackThreadTs,
           });
         } catch (e) {
-          await reply(`Run failed: ${String(e)}`);
+          const msg = String(e);
+          if (/ChatGPT auth missing or expired/i.test(msg) || /ChatGPT token unavailable/i.test(msg) || msg.includes("CHATGPT_AUTH_ERROR_PREFIX")) {
+            await reply(`Run failed: ChatGPT auth missing or expired. Please run ${formatCmd("connect chatgpt")} to re-auth.`);
+          } else {
+            await reply(`Run failed: ${msg}`);
+          }
         }
         return true;
       }
@@ -3471,7 +3559,7 @@ function parseSettingsIntentFromSlack(text: string): SettingsIntent | null {
 }
 
 type CloudCommand =
-  | { kind: "connect"; provider: string }
+  | { kind: "connect"; provider: string; subcommand?: string; payload?: string }
   | { kind: "disconnect"; provider: string; installationId?: string; confirmToken?: string; all?: boolean }
   | { kind: "connections" }
   | { kind: "repos"; provider?: string; search?: string }
@@ -3532,7 +3620,13 @@ function parseCloudCommand(text: string): CloudCommand | null {
   const head = tokens.shift()!.toLowerCase();
 
   if (head === "connect" && tokens.length >= 1) {
-    return { kind: "connect", provider: tokens[0]!.toLowerCase() };
+    const provider = tokens.shift()!.toLowerCase();
+    let subcommand: string | undefined;
+    if (tokens[0] && (tokens[0]!.toLowerCase() === "status" || tokens[0]!.toLowerCase() === "revoke")) {
+      subcommand = tokens.shift()!.toLowerCase();
+    }
+    const payload = tokens.length > 0 ? tokens.join(" ").trim() : undefined;
+    return { kind: "connect", provider, subcommand, payload };
   }
   if (head === "disconnect" && tokens.length >= 1) {
     const provider = tokens.shift()!.toLowerCase();
@@ -3868,29 +3962,40 @@ function buildCloudHelpText(platform: "telegram" | "slack"): string {
     "",
     "Quick start",
     "1) Connect (do this in a 1:1 chat with the bot)",
+    `- \`${cmd("connect chatgpt")}\` (opens ChatGPT login)`,
+    `- \`${cmd("connect chatgpt status")}\` (view linked account)`,
+    `- \`${cmd("connect chatgpt revoke")}\` (unlink account)`,
     `- \`${cmd("connect github")}\` (or \`${cmd("connect gitlab")}\`, \`${cmd("connect local")}\`)`,
+    "",
     "2) Pick repos (or Playground)",
     `- \`${cmd("repos")}\` (optional: \`${cmd("repos --provider github --search <term>")}\`)`,
     `- \`${cmd("repo select <number>")}\` (or \`${cmd("repo select playground")}\`)`,
+    "",
     "3) Share to a group (optional)",
     `- ${repoShareCmd}`,
+    "",
     "4) Run an action",
     `- \`${cmd("run <prompt>")}\` (multi-repo: \`--repos id1,id2\`)`,
+    "",
     "5) Check results",
     `- \`${cmd("status <runId>")}\``,
     `- \`${cmd("pull <runId>")}\``,
+    "",
     "6) Secrets (optional)",
     `- \`${cmd("secrets create NAME VALUE")}\``,
     `- \`${cmd("secrets update NAME VALUE")}\``,
     `- \`${cmd("secrets list")}\``,
     `- \`${cmd("secrets delete NAME")}\``,
+    "",
     "7) CLI (optional)",
     `- \`${cmd("tinc token")}\` (get a token for the tinc CLI)`,
+    "",
     "8) Snapshots (restore cloud workspaces)",
     `- \`${cmd("snapshot save [note]")}\``,
     `- \`${cmd("snapshot list [limit]")}\``,
     `- \`${cmd("snapshot search <query>")}\``,
     `- \`${cmd("snapshot restore <index|snapshotId>")}\``,
+    "",
     "9) Disconnect",
     `- \`${cmd("disconnect github")}\``,
     `- \`${cmd("disconnect github --installation <id>")}\``,

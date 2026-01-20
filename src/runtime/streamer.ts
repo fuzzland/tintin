@@ -13,6 +13,7 @@ import type { SessionRow } from "./store.js";
 import { PlaywrightMcpManager } from "./playwrightMcp.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { revokeChatgptAccount } from "./chatgpt/oauth.js";
 
 interface BufferState {
   text: string;
@@ -44,6 +45,7 @@ export class JsonlStreamer {
   private readonly playwrightCloudSessions = new Set<string>();
   private readonly pendingUserPriority = new Map<string, number>();
   private readonly lastUserMessageAtSeen = new Map<string, number | null>();
+  private readonly chatgptAuthWarned = new Set<string>();
   private running = false;
 
   constructor(
@@ -180,6 +182,7 @@ export class JsonlStreamer {
             const obj = JSON.parse(trimmed) as unknown;
             this.logCloudCodexEvent(session, obj, trimmed);
             void this.maybeCapturePlaywrightScreenshot(session.id, obj as Record<string, unknown>);
+            await this.maybeHandleChatgptAuthError(session, obj as Record<string, unknown>);
 
             const planFragment = this.parsePlanUpdate(obj, session.id);
             if (planFragment) {
@@ -252,12 +255,15 @@ export class JsonlStreamer {
 
       if (finalize) {
         await this.maybeSendPendingPlaywrightScreenshot(session.id);
-        await this.flushIfNeeded(session.id, true);
+        await this.flushIfNeeded(session.id, true, { final: true });
       } else {
         await this.flushIfNeeded(session.id, false);
       }
     }
     if (!onlySessionIds) this.cleanupPriorityState(runningSessionIds);
+    for (const warned of Array.from(this.chatgptAuthWarned)) {
+      if (!runningSessionIds.has(warned)) this.chatgptAuthWarned.delete(warned);
+    }
   }
 
   private append(sessionId: string, text: string, opts?: { continuous?: boolean }) {
@@ -265,6 +271,29 @@ export class JsonlStreamer {
     const continuous = opts?.continuous ?? false;
     const next = s.text ? (continuous ? `${s.text}${text}` : `${s.text}\n${text}`) : text;
     this.buffers.set(sessionId, { ...s, text: next });
+  }
+
+  private async maybeHandleChatgptAuthError(session: SessionRow, obj: Record<string, unknown>) {
+    if (this.chatgptAuthWarned.has(session.id)) return;
+    const message = stringOrEmpty((obj as { message?: unknown }).message) || stringOrEmpty((obj as { error?: unknown }).error);
+    if (!message) return;
+    const normalized = message.toLowerCase();
+    const isAuth401 =
+      normalized.includes("unexpected status 401") ||
+      normalized.includes("401 unauthorized") ||
+      normalized.includes("chatgpt auth missing") ||
+      normalized.includes("chatgpt auth expired");
+    if (!isAuth401) return;
+    this.chatgptAuthWarned.add(session.id);
+    try {
+      await this.sendToSession(session.id, {
+        text: "ChatGPT auth failed (401). Please run /connect chatgpt to re-login.",
+        priority: "user",
+      });
+    } catch {
+      /* ignore */
+    }
+    // Keep tokens for manual retry; user can choose to /connect chatgpt to replace.
   }
 
   private async maybeCapturePlaywrightScreenshot(sessionId: string, obj: Record<string, unknown>) {
@@ -605,12 +634,14 @@ export class JsonlStreamer {
   private logCloudCodexEvent(session: SessionRow, obj: unknown, rawLine: string) {
     if (session.agent !== "codex") return;
     if (!isCloudProjectId(session.project_id)) return;
-    if (this.config.bot.log_level !== "debug") return;
     if (!obj || typeof obj !== "object") return;
 
     const type = stringOrEmpty((obj as { type?: unknown }).type);
     const payload = (obj as { payload?: unknown }).payload;
     const payloadType = payload && typeof payload === "object" ? stringOrEmpty((payload as { type?: unknown }).type) : "";
+    const isErrorEvent =
+      type === "error" || type === "turn.failed" || type === "thread.failed" || payloadType === "error";
+    if (this.config.bot.log_level !== "debug" && !isErrorEvent) return;
     const eventTs = eventTimestamp(obj as Record<string, unknown>);
     const ts = new Date().toISOString();
     const redacted = redactText(rawLine);
@@ -624,7 +655,8 @@ export class JsonlStreamer {
       eventTs !== null ? `event_ts=${eventTs}` : null,
       clipped ? `raw=${clipped}` : null,
     ].filter(Boolean);
-    this.logger.debug(`[cloud][codex][event] ${parts.join(" ")}`);
+    const log = isErrorEvent ? this.logger.warn.bind(this.logger) : this.logger.debug.bind(this.logger);
+    log(`[cloud][codex][event] ${parts.join(" ")}`);
   }
 
   private parsePlanUpdate(obj: unknown, sessionId: string): StreamFragment | null {
@@ -818,6 +850,30 @@ function mapCodexEventToFragments(
   const includeEvents = verbosity >= 2;
   const includeTools = verbosity >= 3;
   const type = (obj as { type?: unknown }).type;
+
+  if (typeof type === "string") {
+    if (type === "turn.completed" || type === "thread.completed") {
+      return [{ kind: "final" }];
+    }
+    if (type === "turn.failed" || type === "thread.failed") {
+      if (!includeEvents) return [];
+      const error = (obj as { error?: unknown }).error;
+      const message =
+        stringOrEmpty((obj as { message?: unknown }).message) ||
+        stringOrEmpty((error as { message?: unknown })?.message) ||
+        stringOrEmpty(error);
+      const body = message || "Unknown error";
+      return [{ kind: "text", text: formatTitledText("Run failed", body) }];
+    }
+
+    if (type === "error") {
+      if (!includeEvents) return [];
+      const message = stringOrEmpty((obj as { message?: unknown }).message);
+      if (!message) return [];
+      if (/^reconnecting/i.test(message)) return [];
+      return [{ kind: "text", text: formatTitledText("Error", message) }];
+    }
+  }
 
   // RolloutLine: { timestamp, type, payload }
   if (typeof type === "string" && (obj as { payload?: unknown }).payload !== undefined) {
@@ -1179,6 +1235,7 @@ function mapEventMsgPayload(
   switch (evType) {
     case "error":
       if (!includeEvents) return [];
+      if (/^reconnecting/i.test(stringOrEmpty(payload.message))) return [];
       return text(formatTitledText("Error", stringOrEmpty(payload.message)));
     case "warning":
       if (!includeEvents) return [];

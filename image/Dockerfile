@@ -5,56 +5,57 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install system dependencies + Chrome, then clean apt caches
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-pip \
-    xvfb \
-    x11vnc \
-    xdotool \
-    wget \
-    curl \
-    git \
-    nodejs \
-    npm \
-    xfce4 \
-    x11-xserver-utils \
-    papirus-icon-theme \
-    arc-theme \
-    fonts-noto \
-    fonts-noto-color-emoji \
-    ripgrep \
-    build-essential \
-    dbus-x11 \
-    colord \
-    socat \
-    scrot \
-    sudo \
-    tmux \
-    && wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb \
-    && apt-get install -y --no-install-recommends /tmp/chrome.deb \
-    && apt-get -y -f install \
-    && rm -f /tmp/chrome.deb \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+  python3 \
+  python3-pip \
+  xvfb \
+  x11vnc \
+  xdotool \
+  wget \
+  curl \
+  git \
+  nodejs \
+  npm \
+  xfce4 \
+  x11-xserver-utils \
+  papirus-icon-theme \
+  arc-theme \
+  fonts-noto \
+  fonts-noto-color-emoji \
+  ripgrep \
+  build-essential \
+  dbus-x11 \
+  colord \
+  socat \
+  scrot \
+  sudo \
+  tmux \
+  && wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb \
+  && apt-get install -y --no-install-recommends /tmp/chrome.deb \
+  && apt-get -y -f install \
+  && rm -f /tmp/chrome.deb \
+  && apt-get clean \
+  && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /tmp/.X11-unix \
-    && chown root:root /tmp/.X11-unix \
-    && chmod 1777 /tmp/.X11-unix
+  && chown root:root /tmp/.X11-unix \
+  && chmod 1777 /tmp/.X11-unix
 
 # Install Codex + Claude Code CLIs (Node 18+ required for Claude Code)
 RUN npm i -g @openai/codex @anthropic-ai/claude-code @playwright/mcp \
-    && npm cache clean --force \
-    && rm -rf /root/.npm
+  && npm cache clean --force \
+  && rm -rf /root/.npm
 
 # Install ttyd
 RUN wget -q https://github.com/tsl0922/ttyd/releases/download/1.7.3/ttyd.x86_64 -O /usr/local/bin/ttyd \
-    && chmod +x /usr/local/bin/ttyd
+  && chmod +x /usr/local/bin/ttyd
 
 # Install code-server (VS Code Web)
 RUN curl -fsSL https://code-server.dev/install.sh | sh \
-    && rm -rf /root/.cache /tmp/* /var/tmp/*
+  && rm -rf /root/.cache /tmp/* /var/tmp/*
 
 COPY tintin-log-agent.js /usr/local/bin/tintin-log-agent
-RUN chmod +x /usr/local/bin/tintin-log-agent
+COPY tintin-chatgpt-proxy.js /usr/local/bin/tintin-chatgpt-proxy.js
+RUN chmod +x /usr/local/bin/tintin-log-agent /usr/local/bin/tintin-chatgpt-proxy.js
 
 RUN mkdir -p /home/ubuntu/.image
 RUN chown -R ubuntu:ubuntu /home/ubuntu

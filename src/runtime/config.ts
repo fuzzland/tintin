@@ -148,6 +148,11 @@ export interface PineconeSection {
   dimension?: number;
 }
 
+export type ChatgptOAuthSection = {
+  redirect_uri: string;
+  refresh_margin_ms: number;
+};
+
 export interface SnapshotCleanupSection {
   enabled?: boolean;
   ttl_days?: number;
@@ -238,6 +243,7 @@ export interface AppConfig {
   playwright_mcp?: PlaywrightMcpSection | null;
   cloud?: CloudSection | null;
   pinecone?: PineconeSection | null;
+  chatgpt_oauth?: ChatgptOAuthSection | null;
   config_dir: string;
 }
 
@@ -815,6 +821,15 @@ function normalizeCloudSection(value: unknown, opts: { configDir: string; dataDi
   };
 }
 
+function normalizeChatgptOAuthSection(cloud: CloudSection | null): ChatgptOAuthSection {
+  assert(cloud && typeof cloud.secrets_key === "string" && cloud.secrets_key.trim().length > 0, "[chatgpt_oauth] requires [cloud].secrets_key");
+  const redirect_uri = "http://localhost:1455/auth/callback";
+  return {
+    redirect_uri,
+    refresh_margin_ms: 5 * 60 * 1000,
+  };
+}
+
 function normalizePineconeSection(value: unknown): PineconeSection | null {
   if (value === undefined) return null;
   if (value === null) return null;
@@ -1045,6 +1060,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
 
   const cloud = normalizeCloudSection((resolved as any).cloud, { configDir, dataDir: botSection.data_dir });
   const pinecone = normalizePineconeSection((resolved as any).pinecone);
+  const chatgpt_oauth = normalizeChatgptOAuthSection(cloud);
   if (cloud?.enabled && cloud.public_base_url.length > 0) {
     cloud.public_base_url = normalizeUrl(cloud.public_base_url, "[cloud].public_base_url");
   }
@@ -1070,6 +1086,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     playwright_mcp: playwrightMcp,
     cloud,
     pinecone,
+    chatgpt_oauth,
     config_dir: configDir,
   };
 }

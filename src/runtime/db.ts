@@ -288,6 +288,31 @@ export interface PendingActionsTable {
   consumed_at: number | null;
 }
 
+export interface ChatgptAccountsTable {
+  id: string;
+  identity_id: string;
+  chatgpt_user_id: string;
+  email: string | null;
+  access_token: string;
+  refresh_token: string;
+  expires_at: number;
+  scope: string | null;
+  workspace_id: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface ChatgptOAuthStatesTable {
+  id: string;
+  identity_id: string;
+  state: string;
+  code_verifier: string;
+  redirect_uri: string;
+  metadata_json: string | null;
+  expires_at: number;
+  created_at: number;
+}
+
 export interface DatabaseSchema {
   sessions: SessionsTable;
   session_stream_offsets: SessionStreamOffsetsTable;
@@ -312,6 +337,8 @@ export interface DatabaseSchema {
   github_installation_identities: GithubInstallationIdentitiesTable;
   github_webhook_events: GithubWebhookEventsTable;
   pending_actions: PendingActionsTable;
+  chatgpt_accounts: ChatgptAccountsTable;
+  chatgpt_oauth_states: ChatgptOAuthStatesTable;
 }
 
 export type Db = Kysely<DatabaseSchema>;

@@ -10,10 +10,10 @@ import { redactText } from "./redact.js";
 import { sleep } from "./util.js";
 import picomatch from "picomatch";
 
-export function resolveSessionsRoot(codexCwd: string, sessionsDir: string): string {
+export function resolveSessionsRoot(codexCwd: string, sessionsDir: string, homeOverride?: string): string {
   // Expand ~ to home directory if present
   if (sessionsDir.startsWith("~")) {
-    const home = process.env.HOME || process.env.USERPROFILE || "";
+    const home = homeOverride ?? (process.env.HOME || process.env.USERPROFILE || "");
     const expanded =
       sessionsDir === "~"
         ? home

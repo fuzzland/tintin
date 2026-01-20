@@ -1,5 +1,5 @@
 import path from "node:path";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile, open as openFile } from "node:fs/promises";
 import type { AppConfig, PlaywrightMcpBrowserbaseSection, PlaywrightMcpHyperbrowserSection, PlaywrightMcpSection } from "../config.js";
 import type { CloudRunsTable, CloudSnapshotsTable, Db, ReposTable, SessionAgent, SessionStatus } from "../db.js";
 import type { Logger } from "../log.js";
@@ -22,6 +22,7 @@ import { createGithubPullRequest, ensureGithubAppToken } from "./githubApp.js";
 import { findRemoteJsonlFiles, getRemoteFileSize, RemoteLogSync } from "./modalLogs.js";
 import { createProxyToken } from "./proxy.js";
 import { getAgentAdapter } from "../agents.js";
+import { getChatgptAccountForIdentity, persistChatgptProxyTokens } from "../chatgpt/oauth.js";
 import {
   addRunRepo,
   createCloudRun,
@@ -43,7 +44,9 @@ import {
 import {
   createSession,
   deleteSessionOffsets,
+  listPendingMessages,
   listSessionOffsets,
+  consumePendingMessages,
   updateSession,
   upsertSessionOffset,
   type SessionRow,
@@ -123,6 +126,8 @@ export class CloudManager {
   private readonly browserbaseSessions = new Map<string, BrowserbaseSessionState>();
   private readonly hyperbrowserSessions = new Map<string, HyperbrowserSessionState>();
   private readonly forcedStopSessions = new Set<string>();
+  private readonly chatgptRefreshPaths = new Map<string, string>();
+  private readonly chatgptLogPaths = new Map<string, string[]>();
   private workspaceSweepTimer: NodeJS.Timeout | null = null;
   private snapshotSweepTimer: NodeJS.Timeout | null = null;
   private readonly workspaceHeartbeatTimers = new Map<string, NodeJS.Timeout>();
@@ -176,6 +181,14 @@ export class CloudManager {
         ? Math.floor(raw.sweep_minutes)
         : defaults.sweepMinutes;
     return { enabled, ttlMs: ttlDays * 24 * 60 * 60 * 1000, keepPerIdentity: keep, sweepMinutes };
+  }
+
+  private formatRemoteCommandLog(cmd: string): string {
+    const flags: string[] = [];
+    if (cmd.includes("tintin-chatgpt-proxy.js")) flags.push("chatgpt_proxy");
+    if (cmd.includes("@playwright/mcp")) flags.push("playwright_mcp");
+    const flagText = flags.length > 0 ? flags.join(",") : "-";
+    return `bootstrap+agent len=${cmd.length} flags=${flagText}`;
   }
 
   private ensureEnabled() {
@@ -1078,6 +1091,27 @@ export class CloudManager {
     if (identity?.git_user_email && identity.git_user_email.trim().length > 0) {
       env.TINTIN_GIT_USER_EMAIL = identity.git_user_email.trim();
     }
+    if (this.config.chatgpt_oauth) {
+      try {
+        const account = await getChatgptAccountForIdentity({ db: this.db, config: this.config, identityId });
+        if (account?.accessToken && account.accessToken.length > 0) {
+          env.CHATGPT_PROXY_ENABLED = "1";
+          env.CHATGPT_ACCESS_TOKEN = account.accessToken;
+          env.CHATGPT_REFRESH_TOKEN = account.refreshToken;
+          env.CHATGPT_EXPIRES_AT = String(account.expiresAt);
+          env.CHATGPT_ACCOUNT_ID = account.chatgptUserId;
+          env.OPENAI_BASE_URL = env.OPENAI_BASE_URL ?? "http://127.0.0.1:19191";
+          env.OPENAI_API_KEY = env.OPENAI_API_KEY ?? "chatgpt-oauth";
+          this.logger.info(
+            `[cloud] applied ChatGPT OAuth tokens for identity=${identityId} account=${account.chatgptUserId} exp=${new Date(account.expiresAt).toISOString()}`,
+          );
+        }
+      } catch (e) {
+        this.logger.warn(
+          `[cloud] ChatGPT token unavailable for identity=${identityId}; please re-auth with /connect chatgpt. Err=${String(e)}`,
+        );
+      }
+    }
     if (secretCount > 0) {
       this.logger.info(`[cloud] loaded ${secretCount} secrets for identity=${identityId}`);
     }
@@ -1099,6 +1133,32 @@ export class CloudManager {
       if (!(key in env)) env[key] = value;
     }
     return env;
+  }
+
+  private resolveRemoteSessionsRoot(cwd: string, sessionsDir: string): string {
+    const homeOverride = this.provider.id === "modal" ? "/home/ubuntu" : undefined;
+    return resolveSessionsRoot(cwd, sessionsDir, homeOverride);
+  }
+
+  private ensureNoProxyForLocalhost(env: Record<string, string>): void {
+    const additions = ["127.0.0.1", "localhost", "::1"];
+    for (const key of ["NO_PROXY", "no_proxy"] as const) {
+      const raw = env[key] ?? "";
+      const cur = raw.trim();
+      if (cur === "*") continue;
+      const parts = cur
+        .split(",")
+        .map((p) => p.trim())
+        .filter((p) => p.length > 0);
+      const set = new Set(parts);
+      let changed = false;
+      for (const a of additions) {
+        if (set.has(a)) continue;
+        set.add(a);
+        changed = true;
+      }
+      if (changed) env[key] = Array.from(set).join(",");
+    }
   }
 
   private async readRemoteText(sandbox: Sandbox, targetPath: string): Promise<string | null> {
@@ -1899,6 +1959,9 @@ export class CloudManager {
         "debug",
       );
       envOverrides = this.applyProxyEnv(envOverrides, opts.identityId, opts.agent);
+      if (opts.agent === "codex") {
+        envOverrides = this.normalizeChatgptProxyEnv(sessionId, envOverrides);
+      }
       this.logger.info(
         `[cloud] spawn agent=${opts.agent} session=${sessionId} cwd=${opts.projectPath} env_keys=${Object.keys(envOverrides).length}`,
       );
@@ -2006,11 +2069,100 @@ export class CloudManager {
     return out;
   }
 
+  private normalizeChatgptProxyEnv(sessionId: string, env: Record<string, string>): Record<string, string> {
+    if (env.CHATGPT_PROXY_ENABLED !== "1") return env;
+    const out = { ...env };
+    const host = out.CHATGPT_PROXY_HOST || "127.0.0.1";
+    const port = out.CHATGPT_PROXY_PORT || "19191";
+    const refreshPath = out.CHATGPT_REFRESH_OUT ?? `/tmp/tintin-chatgpt-refresh-${sessionId}.json`;
+    const logPath = out.CHATGPT_PROXY_LOG ?? `/tmp/tintin-chatgpt-proxy-${sessionId}.log`;
+    out.CHATGPT_REFRESH_OUT = refreshPath;
+    out.CHATGPT_PROXY_LOG = logPath;
+    out.CHATGPT_PROXY_LOG_PREFIX = out.CHATGPT_PROXY_LOG_PREFIX ?? `[chatgpt][proxy][${sessionId}]`;
+    out.CHATGPT_REFRESH_PREFIX = out.CHATGPT_REFRESH_PREFIX ?? `[chatgpt][refresh][${sessionId}]`;
+    if (!out.OPENAI_BASE_URL) out.OPENAI_BASE_URL = `http://${host}:${port}`;
+    if (!out.OPENAI_API_BASE) out.OPENAI_API_BASE = out.OPENAI_BASE_URL;
+    if (!out.OPENAI_API_KEY) out.OPENAI_API_KEY = "chatgpt-oauth";
+    this.ensureNoProxyForLocalhost(out);
+    this.chatgptRefreshPaths.set(sessionId, refreshPath);
+    return out;
+  }
+
+  private describeOpenaiAuthSource(env: Record<string, string>): { source: string; account?: string } {
+    if (env.CHATGPT_PROXY_ENABLED === "1") {
+      const account = typeof env.CHATGPT_ACCOUNT_ID === "string" ? env.CHATGPT_ACCOUNT_ID : "";
+      return { source: "chatgpt_oauth", ...(account ? { account } : {}) };
+    }
+    const cloud = this.config.cloud;
+    const proxy = cloud?.proxy;
+    const base = cloud?.public_base_url ?? "";
+    const openaiBase = env.OPENAI_BASE_URL || env.OPENAI_API_BASE || "";
+    if (proxy?.enabled && base && openaiBase) {
+      const trimmed = base.endsWith("/") ? base.slice(0, -1) : base;
+      const expected = `${trimmed}${proxy.openai_path}`;
+      if (openaiBase === expected) return { source: "cloud_proxy" };
+    }
+    const hasKey = typeof env.OPENAI_API_KEY === "string" && env.OPENAI_API_KEY.length > 0;
+    if (openaiBase && hasKey) return { source: "api_key" };
+    if (openaiBase && !hasKey) return { source: "custom_base" };
+    if (hasKey) return { source: "api_key" };
+    return { source: "missing" };
+  }
+
+  private async persistChatgptRefreshFromLines(sessionId: string, identityId: string, lines: string[]): Promise<boolean> {
+    let updated = false;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const brace = trimmed.indexOf("{");
+      const jsonPart = brace >= 0 ? trimmed.slice(brace) : trimmed;
+      try {
+        const obj = JSON.parse(jsonPart) as Record<string, any>;
+        const access = typeof obj.access_token === "string" ? obj.access_token : "";
+        const refresh = typeof obj.refresh_token === "string" ? obj.refresh_token : "";
+        const expRaw = obj.expires_at ?? obj.expiresAt;
+        const exp = typeof expRaw === "number" ? expRaw : Number(expRaw);
+        if (!access || !refresh || !Number.isFinite(exp)) continue;
+        await persistChatgptProxyTokens({
+          db: this.db,
+          config: this.config,
+          identityId,
+          accessToken: access,
+          refreshToken: refresh,
+          expiresAt: exp,
+          scope: typeof obj.scope === "string" ? obj.scope : null,
+          expectedAccountId: typeof obj.account_id === "string" ? obj.account_id : undefined,
+        });
+        updated = true;
+      } catch {
+        continue;
+      }
+    }
+    return updated;
+  }
+
   private async writeRemoteText(sandbox: Sandbox, targetPath: string, text: string): Promise<void> {
     const file = await sandbox.open(targetPath, "w");
     await file.write(Buffer.from(text, "utf8"));
     await file.flush();
     await file.close();
+  }
+
+  private async readTailLines(filePath: string, maxBytes: number): Promise<string[]> {
+    try {
+      const fh = await openFile(filePath, "r");
+      const stat = await fh.stat();
+      const size = stat.size;
+      const start = size > maxBytes ? size - maxBytes : 0;
+      const length = size - start;
+      const buf = Buffer.alloc(Math.max(0, length));
+      if (length > 0) await fh.read(buf, 0, length, start);
+      await fh.close();
+      const raw = buf.toString("utf8");
+      return raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    } catch {
+      return [];
+    }
   }
 
   private async runRemoteCommand(
@@ -2042,6 +2194,80 @@ export class CloudManager {
     }
   }
 
+  private async captureChatgptRefreshFromSandbox(sessionId: string, sandbox: Sandbox | null): Promise<void> {
+    if (!sandbox) return;
+    const refreshPath = this.chatgptRefreshPaths.get(sessionId);
+    if (!refreshPath) return;
+    const run = await getCloudRunBySession(this.db, sessionId);
+    const identityId = run?.identity_id ?? null;
+    if (!identityId) return;
+    const read = await this.runRemoteCommand(
+      sandbox,
+      `[ -f ${shellQuote(refreshPath)} ] && cat ${shellQuote(refreshPath)} || true`,
+      { cwd: "/", timeoutMs: 10_000, stdout: "pipe", stderr: "ignore" },
+    );
+    const raw = (read.stdout ?? "").trim();
+    if (!raw) return;
+    const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const updated = await this.persistChatgptRefreshFromLines(sessionId, identityId, lines);
+    if (!updated) {
+      // Fall back: the refresh file may be pure JSON without prefix.
+      for (const line of lines) {
+        try {
+          const obj = JSON.parse(line) as Record<string, any>;
+          const access = typeof obj.access_token === "string" ? obj.access_token : "";
+          const refresh = typeof obj.refresh_token === "string" ? obj.refresh_token : "";
+          const expRaw = obj.expires_at ?? obj.expiresAt;
+          const exp = typeof expRaw === "number" ? expRaw : Number(expRaw);
+          if (!access || !refresh || !Number.isFinite(exp)) continue;
+          await persistChatgptProxyTokens({
+            db: this.db,
+            config: this.config,
+            identityId,
+            accessToken: access,
+            refreshToken: refresh,
+            expiresAt: exp,
+            scope: typeof obj.scope === "string" ? obj.scope : null,
+            expectedAccountId: typeof obj.account_id === "string" ? obj.account_id : undefined,
+          });
+          this.logger.info(`[chatgpt][oauth] persisted refreshed tokens (fallback) session=${sessionId} identity=${identityId}`);
+          return;
+        } catch {
+          continue;
+        }
+      }
+    } else {
+      this.logger.info(`[chatgpt][oauth] persisted refreshed tokens session=${sessionId} identity=${identityId}`);
+    }
+  }
+
+  private buildChatgptProxyLines(env: Record<string, string>): string[] {
+    if (env.CHATGPT_PROXY_ENABLED !== "1") return [];
+    const bin = "/usr/local/bin/tintin-chatgpt-proxy.js";
+    const host = env.CHATGPT_PROXY_HOST || "127.0.0.1";
+    const port = env.CHATGPT_PROXY_PORT || "19191";
+    const logPath = env.CHATGPT_PROXY_LOG || "/tmp/tintin-chatgpt-proxy.log";
+
+    return [
+      `if [ -x ${shellQuote(bin)} ]; then`,
+      `  CHATGPT_PROXY_LOG=${shellQuote(logPath)}`,
+      "  export CHATGPT_PROXY_LOG",
+      '  echo "[chatgpt][proxy] starting local proxy port=${CHATGPT_PROXY_PORT:-19191}" >&2',
+      `  node ${shellQuote(bin)} >> "$CHATGPT_PROXY_LOG" 2>&1 &`,
+      "  CHATGPT_PROXY_PID=$!",
+      '  echo "[chatgpt][proxy] waiting for proxy to be ready..." >&2',
+      // Wait for port to be listening (max 10 seconds)
+      `  for i in $(seq 1 20); do`,
+      `    if nc -z ${host} ${port} 2>/dev/null || curl -s http://${host}:${port}/ >/dev/null 2>&1; then`,
+      '      echo "[chatgpt][proxy] proxy ready" >&2',
+      '      break',
+      '    fi',
+      '    sleep 0.5',
+      '  done',
+      "fi",
+    ];
+  }
+
   private buildRemoteBootstrap(opts: {
     promptFile: string;
     promptText: string;
@@ -2052,6 +2278,12 @@ export class CloudManager {
     extraLines?: string[] | null;
   }): string {
     const lines: string[] = ["set -e"];
+    lines.push("_tintin_cleanup() {");
+    lines.push('  if [ -n "${CHATGPT_PROXY_PID:-}" ]; then');
+    lines.push('    kill "$CHATGPT_PROXY_PID" >/dev/null 2>&1 || true');
+    lines.push("  fi");
+    lines.push("}");
+    lines.push("trap _tintin_cleanup EXIT");
     lines.push('BOOTSTRAP_START=$(date +%s)');
     lines.push('BOOTSTRAP_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")');
     lines.push('printf \'{"type":"event_msg","payload":{"type":"background_event","message":"tintin bootstrap start ts=%s"}}\\n\' "$BOOTSTRAP_TS"');
@@ -2172,7 +2404,7 @@ export class CloudManager {
 
     if (opts.agent === "claude_code") {
       if (!this.config.claude_code) throw new Error("Claude Code is not configured.");
-      sessionsRoot = resolveSessionsRoot(opts.cwd, this.config.claude_code.sessions_dir);
+      sessionsRoot = this.resolveRemoteSessionsRoot(opts.cwd, this.config.claude_code.sessions_dir);
       const resolvedConfigDir = resolveClaudeConfigDirFromSessionsRoot(sessionsRoot);
       configDir = resolvedConfigDir;
       const baseArgs = this.buildClaudeArgs(agentSessionId);
@@ -2190,7 +2422,7 @@ export class CloudManager {
         CLAUDE_CONFIG_DIR: toPosix(resolvedConfigDir),
       };
     } else {
-      sessionsRoot = resolveSessionsRoot(opts.cwd, this.config.codex.sessions_dir);
+      sessionsRoot = this.resolveRemoteSessionsRoot(opts.cwd, this.config.codex.sessions_dir);
       const homeDir = resolveCodexHomeFromSessionsRoot(sessionsRoot);
       codexHome = toPosix(homeDir);
       const baseArgs = this.buildCodexArgs(opts.cwd);
@@ -2210,6 +2442,8 @@ export class CloudManager {
     }
 
     env = this.ensureModalEnv(env);
+    const chatgptLines = this.buildChatgptProxyLines(env);
+    const combinedExtraLines = [...(opts.playwright?.bootstrapLines ?? []), ...chatgptLines];
     const bootstrap = this.buildRemoteBootstrap({
       promptFile,
       promptText,
@@ -2217,25 +2451,27 @@ export class CloudManager {
       configDir: configDir ? toPosix(configDir) : null,
       codexHome,
       includeCodexAuth: opts.agent === "codex",
-      extraLines: opts.playwright?.bootstrapLines ?? null,
+      extraLines: combinedExtraLines.length > 0 ? combinedExtraLines : null,
     });
     cmd = `${bootstrap}\n${cmd}`;
     const relayUrl = this.buildAgentRelayUrl(opts.sessionId);
-    if (relayUrl) {
-      const token = this.issueAgentToken(opts.sessionId);
-      relayConfig = { token, url: relayUrl };
-      relayLogPath = await this.ensureAgentLogPath(opts.sessionId, "exec");
-      localLogPaths.push(relayLogPath);
-      this.logger.info(`[cloud] log relay enabled session=${opts.sessionId} url=${relayUrl}`);
-    } else {
-      this.logger.info(`[cloud] log relay disabled session=${opts.sessionId} (missing cloud.public_base_url)`);
-    }
+      if (relayUrl) {
+        const token = this.issueAgentToken(opts.sessionId);
+        relayConfig = { token, url: relayUrl };
+        relayLogPath = await this.ensureAgentLogPath(opts.sessionId, "exec");
+        localLogPaths.push(relayLogPath);
+        this.logger.info(`[cloud] log relay enabled session=${opts.sessionId} url=${relayUrl}`);
+      } else {
+        this.logger.info(`[cloud] log relay disabled session=${opts.sessionId} (missing cloud.public_base_url)`);
+      }
     const openaiKeyLen = typeof env.OPENAI_API_KEY === "string" ? env.OPENAI_API_KEY.length : 0;
     const anthropicKeyLen = typeof env.ANTHROPIC_API_KEY === "string" ? env.ANTHROPIC_API_KEY.length : 0;
     const openaiBase = env.OPENAI_BASE_URL || env.OPENAI_API_BASE || "";
     const anthropicBase = env.ANTHROPIC_BASE_URL || "";
+    const openaiAuth = this.describeOpenaiAuthSource(env);
+    const authAccount = openaiAuth.account ? ` account=${openaiAuth.account}` : "";
     this.logger.info(
-      `[cloud] env check openai_key=${openaiKeyLen > 0 ? `len=${openaiKeyLen}` : "missing"} openai_base=${openaiBase || "(none)"} anthropic_key=${anthropicKeyLen > 0 ? `len=${anthropicKeyLen}` : "missing"} anthropic_base=${anthropicBase || "(none)"}`,
+      `[cloud] env check openai_key=${openaiKeyLen > 0 ? `len=${openaiKeyLen}` : "missing"} openai_base=${openaiBase || "(none)"} openai_auth=${openaiAuth.source}${authAccount} anthropic_key=${anthropicKeyLen > 0 ? `len=${anthropicKeyLen}` : "missing"} anthropic_base=${anthropicBase || "(none)"}`,
     );
     const errPath = `/tmp/tintin-agent-${opts.sessionId}.err`;
     if (relayConfig) {
@@ -2273,8 +2509,9 @@ export class CloudManager {
 
     await this.ensureRemoteDir(sandbox, opts.cwd, modalCfg.command_timeout_ms);
 
+    const cmdLog = this.formatRemoteCommandLog(cmd);
     this.logger.info(
-      `[cloud] exec agent=${opts.agent} session=${opts.sessionId} agent_session=${agentSessionId || "(pending)"} cmd=${cmd} env_keys=${Object.keys(env).length}`,
+      `[cloud] exec agent=${opts.agent} session=${opts.sessionId} agent_session=${agentSessionId || "(pending)"} cmd=${cmdLog} env_keys=${Object.keys(env).length}`,
     );
 
     const proc = await this.time(
@@ -2391,6 +2628,10 @@ export class CloudManager {
       }
     }
 
+    if (localLogPaths.length > 0) {
+      this.chatgptLogPaths.set(opts.sessionId, localLogPaths);
+    }
+
     return { handle, agentSessionId, logSyncers, debug: { sandbox, errPath } };
   }
 
@@ -2437,7 +2678,7 @@ export class CloudManager {
 
     if (opts.agent === "claude_code") {
       if (!this.config.claude_code) throw new Error("Claude Code is not configured.");
-      sessionsRoot = resolveSessionsRoot(opts.cwd, this.config.claude_code.sessions_dir);
+      sessionsRoot = this.resolveRemoteSessionsRoot(opts.cwd, this.config.claude_code.sessions_dir);
       const resolvedConfigDir = resolveClaudeConfigDirFromSessionsRoot(sessionsRoot);
       configDir = resolvedConfigDir;
       const baseArgs = this.buildClaudeResumeArgs(opts.agentSessionId);
@@ -2455,7 +2696,7 @@ export class CloudManager {
         CLAUDE_CONFIG_DIR: toPosix(resolvedConfigDir),
       };
     } else {
-      sessionsRoot = resolveSessionsRoot(opts.cwd, this.config.codex.sessions_dir);
+      sessionsRoot = this.resolveRemoteSessionsRoot(opts.cwd, this.config.codex.sessions_dir);
       const homeDir = resolveCodexHomeFromSessionsRoot(sessionsRoot);
       codexHome = toPosix(homeDir);
       const baseArgs = this.buildCodexArgs(opts.cwd);
@@ -2470,6 +2711,8 @@ export class CloudManager {
     }
 
     env = this.ensureModalEnv(env);
+    const chatgptLines = this.buildChatgptProxyLines(env);
+    const combinedExtraLines = [...(opts.playwright?.bootstrapLines ?? []), ...chatgptLines];
     const bootstrap = this.buildRemoteBootstrap({
       promptFile,
       promptText,
@@ -2477,7 +2720,7 @@ export class CloudManager {
       configDir: configDir ? toPosix(configDir) : null,
       codexHome,
       includeCodexAuth: opts.agent === "codex",
-      extraLines: opts.playwright?.bootstrapLines ?? null,
+      extraLines: combinedExtraLines.length > 0 ? combinedExtraLines : null,
     });
     cmd = `${bootstrap}\n${cmd}`;
     const relayUrl = this.buildAgentRelayUrl(opts.sessionId);
@@ -2493,8 +2736,10 @@ export class CloudManager {
     const anthropicKeyLen = typeof env.ANTHROPIC_API_KEY === "string" ? env.ANTHROPIC_API_KEY.length : 0;
     const openaiBase = env.OPENAI_BASE_URL || env.OPENAI_API_BASE || "";
     const anthropicBase = env.ANTHROPIC_BASE_URL || "";
+    const openaiAuth = this.describeOpenaiAuthSource(env);
+    const authAccount = openaiAuth.account ? ` account=${openaiAuth.account}` : "";
     this.logger.info(
-      `[cloud] env check openai_key=${openaiKeyLen > 0 ? `len=${openaiKeyLen}` : "missing"} openai_base=${openaiBase || "(none)"} anthropic_key=${anthropicKeyLen > 0 ? `len=${anthropicKeyLen}` : "missing"} anthropic_base=${anthropicBase || "(none)"}`,
+      `[cloud] env check openai_key=${openaiKeyLen > 0 ? `len=${openaiKeyLen}` : "missing"} openai_base=${openaiBase || "(none)"} openai_auth=${openaiAuth.source}${authAccount} anthropic_key=${anthropicKeyLen > 0 ? `len=${anthropicKeyLen}` : "missing"} anthropic_base=${anthropicBase || "(none)"}`,
     );
     if (mcpEnabled) {
       const mcpPort = opts.playwright?.port ?? this.config.playwright_mcp!.port_start;
@@ -2611,6 +2856,14 @@ export class CloudManager {
       }
     }
 
+    const localPaths: string[] = [];
+    if (relayConfig && this.agentLogPaths.has(opts.sessionId)) {
+      localPaths.push(this.agentLogPaths.get(opts.sessionId)!);
+    }
+    if (localPaths.length > 0) {
+      this.chatgptLogPaths.set(opts.sessionId, localPaths);
+    }
+
     const proc = await this.time(
       "remote.exec",
       () =>
@@ -2664,6 +2917,36 @@ export class CloudManager {
       }
       for (const syncer of opts.logSyncers) syncer.stop();
       for (const syncer of opts.logSyncers) await syncer.drain().catch(() => {});
+      try {
+        const run = await getCloudRunBySession(this.db, opts.sessionId);
+        const identityId = run?.identity_id ?? null;
+        if (identityId) {
+          // Prefer the dedicated refresh file (small, targeted).
+          await this.captureChatgptRefreshFromSandbox(opts.sessionId, opts.debug?.sandbox ?? null).catch((e) => {
+            this.logger.warn(`[chatgpt][oauth] refresh capture failed session=${opts.sessionId}: ${String(e)}`);
+          });
+
+          // Then parse any relay/log files we already synced locally, tail-only to reduce overhead.
+          const logPaths = this.chatgptLogPaths.get(opts.sessionId) ?? [];
+          let aggregated = false;
+          for (const p of logPaths) {
+            try {
+              const lines = await this.readTailLines(p, 32768);
+              if (lines.length === 0) continue;
+              const updated = await this.persistChatgptRefreshFromLines(opts.sessionId, identityId, lines);
+              aggregated = aggregated || updated;
+            } catch {
+              continue;
+            }
+          }
+          if (aggregated) {
+            this.logger.info(`[chatgpt][oauth] persisted refreshed tokens from logs session=${opts.sessionId} identity=${identityId}`);
+          }
+        }
+      } finally {
+        this.chatgptRefreshPaths.delete(opts.sessionId);
+        this.chatgptLogPaths.delete(opts.sessionId);
+      }
       if (this.sessionManager) {
         try {
           await this.sessionManager.drainSession(opts.sessionId);
@@ -2671,6 +2954,29 @@ export class CloudManager {
           this.logger.warn(`[cloud] final drain failed session=${opts.sessionId}: ${String(e)}`);
         }
       }
+
+      const pending = await listPendingMessages(this.db, opts.sessionId, 100);
+      if (pending.length > 0) {
+        const next = pending[0]!;
+        const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", opts.sessionId).executeTakeFirst();
+        if (session) {
+          try {
+            const resumed = await this.resumeCloudSession(session as SessionRow, next.message_text);
+            if (resumed === "resumed") {
+              await consumePendingMessages(this.db, [next.id]);
+              this.logger.info(
+                `[cloud] resumed queued message session=${opts.sessionId} pending=${pending.length}`,
+              );
+              return;
+            }
+          } catch (e) {
+            this.logger.warn(
+              `[cloud] resume queued message failed session=${opts.sessionId}: ${String(e)}`,
+            );
+          }
+        }
+      }
+
       await updateSession(this.db, opts.sessionId, {
         status,
         exit_code: exitCode,
@@ -2744,6 +3050,7 @@ export class CloudManager {
       run.identity_id,
       session.agent,
     );
+    const normalizedEnv = session.agent === "codex" ? this.normalizeChatgptProxyEnv(session.id, envOverrides) : envOverrides;
     let playwrightSetup: RemotePlaywrightSetup | null = null;
     if (this.isBrowserbaseEnabled()) {
       const existing = this.buildExistingBrowserbaseSetup(session.id);
@@ -2795,7 +3102,7 @@ export class CloudManager {
             cwd: session.codex_cwd,
             agent: session.agent,
             workspace,
-            envOverrides,
+            envOverrides: normalizedEnv,
             playwright: playwrightSetup,
           }),
         `session=${session.id} agent=${session.agent}`,
