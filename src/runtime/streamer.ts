@@ -13,7 +13,6 @@ import type { SessionRow } from "./store.js";
 import { PlaywrightMcpManager } from "./playwrightMcp.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { revokeChatgptAccount } from "./chatgpt/oauth.js";
 
 interface BufferState {
   text: string;

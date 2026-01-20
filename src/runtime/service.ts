@@ -287,10 +287,18 @@ export async function createBotService(deps: BotServiceDeps) {
         logger.warn(`[chatgpt][oauth] state sweep failed: ${String(e)}`);
       }
     };
+    let sweepScheduled = false;
+    const scheduleSweep = () => {
+      if (sweepScheduled) return;
+      sweepScheduled = true;
+      void sweep();
+    };
     void sweep();
     const intervalMs = 5 * 60 * 1000;
     setInterval(() => void sweep(), intervalMs);
-    process.once("exit", () => void sweep());
+    process.once("beforeExit", scheduleSweep);
+    process.once("SIGINT", scheduleSweep);
+    process.once("SIGTERM", scheduleSweep);
   }
   const handleChatgptCallback = async (
     req: http.IncomingMessage,
@@ -668,62 +676,6 @@ export async function createBotService(deps: BotServiceDeps) {
     }
     lastTelegramMessageId.set(sessionId, messageId);
     telegramMessageToSession.set(telegramMessageKey(chatId, messageId), sessionId);
-  };
-
-  const attachReviewAndCommitButtonsToLastMessage = async (
-    sessionId: string,
-    session: { platform: string; chat_id: string; project_id: string | null },
-  ) => {
-    const includeStopSandbox = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
-    if (session.platform === "telegram") {
-      if (!telegram) return false;
-      const chatId = Number(session.chat_id);
-      const messageId = lastTelegramMessageId.get(sessionId);
-      if (!messageId || Number.isNaN(chatId)) return false;
-      try {
-        await telegram.editMessageReplyMarkup({
-          chatId,
-          messageId,
-          replyMarkup: buildTelegramInlineKeyboard({
-            sessionId,
-            includeKill: false,
-            includeReview: true,
-            includeCommit: true,
-            includeStopSandbox,
-          }),
-          priority: "user",
-        });
-        return true;
-      } catch {
-        return false;
-      }
-    }
-
-    if (session.platform === "slack") {
-      if (!slack) return false;
-      const channel = session.chat_id;
-      const last = lastSlackMessage.get(sessionId);
-      if (!last) return false;
-      try {
-        await slack.updateMessage({
-          channel,
-          ts: last.ts,
-          text: last.text,
-          blocks: buildSlackButtons({
-            sessionId,
-            includeKill: false,
-            includeReview: true,
-            includeCommit: true,
-            includeStopSandbox,
-          }),
-        });
-        return true;
-      } catch {
-        return false;
-      }
-    }
-
-    return false;
   };
 
   const sendSessionCompleteNotice = async (opts: {

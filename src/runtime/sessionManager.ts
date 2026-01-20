@@ -2,7 +2,7 @@ import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "n
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { createServer } from "node:net";
+import { createConnection, createServer } from "node:net";
 import process from "node:process";
 import type { AppConfig } from "./config.js";
 import type { Db, SessionAgent, SessionStatus } from "./db.js";
@@ -519,23 +519,58 @@ export class SessionManager {
     });
   }
 
+  private async tryConnectToChatgptProxy(host: string, port: number, timeoutMs: number): Promise<boolean> {
+    return await new Promise((resolve) => {
+      let done = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const socket = createConnection({ host, port });
+      const finish = (ok: boolean) => {
+        if (done) return;
+        done = true;
+        if (timer) clearTimeout(timer);
+        socket.removeAllListeners();
+        socket.destroy();
+        resolve(ok);
+      };
+      socket.once("connect", () => finish(true));
+      socket.once("error", () => finish(false));
+      timer = setTimeout(() => finish(false), timeoutMs);
+    });
+  }
+
+  private async waitForChatgptProxyReady(
+    host: string,
+    port: number,
+    timeoutMs: number,
+    shouldAbort?: () => boolean,
+  ): Promise<boolean> {
+    const deadline = nowMs() + timeoutMs;
+    while (nowMs() < deadline) {
+      if (shouldAbort?.()) return false;
+      const ok = await this.tryConnectToChatgptProxy(host, port, 500);
+      if (ok) return true;
+      await sleep(200);
+    }
+    return false;
+  }
+
   private async maybePrepareChatgptProxy(session: SessionRow, baseEnv: Record<string, string>): Promise<Record<string, string>> {
     if (session.agent !== "codex") return baseEnv;
     if (this.chatgptProxies.has(session.id)) return baseEnv;
-    let env = { ...baseEnv };
+    const base = { ...baseEnv };
     try {
       const identity = await getIdentity(this.db, {
         platform: session.platform,
         workspaceId: session.workspace_id ?? null,
         userId: session.created_by_user_id,
       });
-      if (!identity) return env;
+      if (!identity) return base;
       const account = await getChatgptAccountForIdentity({ db: this.db, config: this.config, identityId: identity.id });
-      if (!account) return env;
+      if (!account) return base;
       const proxyBin = await this.resolveChatgptProxyBin();
       if (!proxyBin) throw new Error("ChatGPT proxy binary not found");
       const refreshPath = path.join(os.tmpdir(), `tintin-chatgpt-refresh-${session.id}.json`);
-      const requestedPort = env.CHATGPT_PROXY_PORT ? Number(env.CHATGPT_PROXY_PORT) : 0;
+      const requestedPort = base.CHATGPT_PROXY_PORT ? Number(base.CHATGPT_PROXY_PORT) : 0;
       let port = 0;
       if (Number.isFinite(requestedPort) && requestedPort > 0) {
         port = requestedPort;
@@ -547,9 +582,9 @@ export class SessionManager {
           if (!port) throw new Error("Failed to allocate ChatGPT proxy port (localhost). Retry or set CHATGPT_PROXY_PORT to a free port.");
         }
       }
-      const host = env.CHATGPT_PROXY_HOST || "127.0.0.1";
-      env = {
-        ...env,
+      const host = base.CHATGPT_PROXY_HOST || "127.0.0.1";
+      const proxyEnv = {
+        ...base,
         CHATGPT_PROXY_ENABLED: "1",
         CHATGPT_ACCESS_TOKEN: account.accessToken,
         CHATGPT_REFRESH_TOKEN: account.refreshToken,
@@ -558,29 +593,72 @@ export class SessionManager {
         CHATGPT_PROXY_PORT: String(port),
         CHATGPT_PROXY_HOST: host,
         CHATGPT_REFRESH_OUT: refreshPath,
-        CHATGPT_PROXY_LOG_PREFIX: env.CHATGPT_PROXY_LOG_PREFIX ?? `[chatgpt][proxy][${session.id}]`,
-        CHATGPT_REFRESH_PREFIX: env.CHATGPT_REFRESH_PREFIX ?? `[chatgpt][refresh][${session.id}]`,
+        CHATGPT_PROXY_LOG_PREFIX: base.CHATGPT_PROXY_LOG_PREFIX ?? `[chatgpt][proxy][${session.id}]`,
+        CHATGPT_REFRESH_PREFIX: base.CHATGPT_REFRESH_PREFIX ?? `[chatgpt][refresh][${session.id}]`,
       };
-      if (!env.OPENAI_BASE_URL) env.OPENAI_BASE_URL = `http://${host}:${port}`;
-      if (!env.OPENAI_API_BASE) env.OPENAI_API_BASE = env.OPENAI_BASE_URL;
-      if (!env.OPENAI_API_KEY) env.OPENAI_API_KEY = "chatgpt-oauth";
 
       const proc = spawn(process.execPath, [proxyBin], {
-        env: { ...process.env, ...env },
+        env: { ...process.env, ...proxyEnv },
         stdio: ["ignore", "ignore", "pipe"],
+      });
+      let proxyReady = false;
+      let exitInfo: string | null = null;
+      const recordExit = (info: string) => {
+        if (exitInfo) return;
+        exitInfo = info;
+      };
+      const handleProxyExit = (info: string) => {
+        const entry = this.chatgptProxies.get(session.id);
+        if (!entry || entry.proc !== proc) return;
+        this.chatgptProxies.delete(session.id);
+        void this.persistChatgptRefreshFile(session.id, entry.refreshPath, entry.identityId);
+        if (proxyReady) {
+          this.logger.warn(`[chatgpt][proxy] exited session=${session.id} ${info}`);
+        }
+      };
+      proc.once("error", (err) => {
+        const info = `error=${String(err)}`;
+        recordExit(info);
+        handleProxyExit(info);
+      });
+      proc.once("exit", (code, signal) => {
+        const info = `exit code=${code ?? "null"} signal=${signal ?? "none"}`;
+        recordExit(info);
+        handleProxyExit(info);
       });
       proc.stderr?.on("data", (buf) => {
         const line = buf.toString("utf8").trim();
-        if (line) this.logger.info(redactText(line));
+        if (line) this.logger.debug(redactText(line));
       });
       this.chatgptProxies.set(session.id, { proc, refreshPath, identityId: identity.id });
+      this.logger.debug(`[chatgpt][proxy] spawn session=${session.id} port=${port} account=${account.chatgptUserId}`);
+      const startupTimeoutMsRaw = Number(base.CHATGPT_PROXY_STARTUP_TIMEOUT_MS ?? 5000);
+      const startupTimeoutMs = Number.isFinite(startupTimeoutMsRaw) && startupTimeoutMsRaw > 0 ? startupTimeoutMsRaw : 5000;
+      const ready = await this.waitForChatgptProxyReady(host, port, startupTimeoutMs, () => exitInfo !== null);
+      if (!ready || exitInfo) {
+        const reason = exitInfo ?? "not ready before timeout";
+        this.logger.warn(`[chatgpt][proxy] startup failed session=${session.id} ${reason}`);
+        this.chatgptProxies.delete(session.id);
+        try {
+          proc.kill("SIGTERM");
+        } catch {
+          /* ignore */
+        }
+        await this.persistChatgptRefreshFile(session.id, refreshPath, identity.id);
+        return base;
+      }
+      proxyReady = true;
+      const envWithProxy = { ...proxyEnv };
+      if (!envWithProxy.OPENAI_BASE_URL) envWithProxy.OPENAI_BASE_URL = `http://${host}:${port}`;
+      if (!envWithProxy.OPENAI_API_BASE) envWithProxy.OPENAI_API_BASE = envWithProxy.OPENAI_BASE_URL;
+      if (!envWithProxy.OPENAI_API_KEY) envWithProxy.OPENAI_API_KEY = "chatgpt-oauth";
       this.logger.info(
-        `[chatgpt][proxy] local start session=${session.id} port=${port} account=${account.chatgptUserId} exp=${new Date(account.expiresAt).toISOString()}`,
+        `[chatgpt][proxy] ready session=${session.id} port=${port} account=${account.chatgptUserId} exp=${new Date(account.expiresAt).toISOString()}`,
       );
-      return env;
+      return envWithProxy;
     } catch (e) {
       this.logger.warn(`[chatgpt][proxy] setup failed session=${session.id}: ${String(e)}`);
-      return env;
+      return base;
     }
   }
 
