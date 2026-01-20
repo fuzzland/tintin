@@ -583,7 +583,7 @@ export class SessionManager {
         }
       }
       const host = base.CHATGPT_PROXY_HOST || "127.0.0.1";
-      const proxyEnv = {
+      const proxyEnv: Record<string, string> = {
         ...base,
         CHATGPT_PROXY_ENABLED: "1",
         CHATGPT_ACCESS_TOKEN: account.accessToken,
@@ -648,7 +648,7 @@ export class SessionManager {
         return base;
       }
       proxyReady = true;
-      const envWithProxy = { ...proxyEnv };
+      const envWithProxy: Record<string, string> = { ...proxyEnv };
       if (!envWithProxy.OPENAI_BASE_URL) envWithProxy.OPENAI_BASE_URL = `http://${host}:${port}`;
       if (!envWithProxy.OPENAI_API_BASE) envWithProxy.OPENAI_API_BASE = envWithProxy.OPENAI_BASE_URL;
       if (!envWithProxy.OPENAI_API_KEY) envWithProxy.OPENAI_API_KEY = "chatgpt-oauth";
