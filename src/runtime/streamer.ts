@@ -13,6 +13,7 @@ import type { SessionRow } from "./store.js";
 import { PlaywrightMcpManager } from "./playwrightMcp.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { isUserLanguage, t, type UserLanguage } from "../locales/index.js";
 
 interface BufferState {
   text: string;
@@ -55,6 +56,20 @@ export class JsonlStreamer {
     private readonly playwrightMcp: PlaywrightMcpManager | null,
   ) {}
 
+  private resolveSessionLanguage(session: { language?: string | null }): UserLanguage {
+    const language = session.language;
+    return typeof language === "string" && isUserLanguage(language) ? language : "en";
+  }
+
+  private async resolveSessionLanguageById(sessionId: string): Promise<UserLanguage> {
+    const row = await this.db
+      .selectFrom("sessions")
+      .select(["language"])
+      .where("id", "=", sessionId)
+      .executeTakeFirst();
+    return row ? this.resolveSessionLanguage(row) : "en";
+  }
+
   start() {
     if (this.running) return;
     this.running = true;
@@ -67,7 +82,8 @@ export class JsonlStreamer {
 
   async drainSession(sessionId: string) {
     await this.pollOnce([sessionId]);
-    await this.maybeSendPendingPlaywrightScreenshot(sessionId);
+    const lang = await this.resolveSessionLanguageById(sessionId);
+    await this.maybeSendPendingPlaywrightScreenshot(sessionId, lang);
     await this.flushIfNeeded(sessionId, true);
   }
 
@@ -115,6 +131,7 @@ export class JsonlStreamer {
     for (const session of sessions) {
       if (onlySessionIds && !onlySessionIds.includes(session.id)) continue;
       runningSessionIds.add(session.id);
+      const lang = this.resolveSessionLanguage(session);
       if (isCloudProjectId(session.project_id)) this.playwrightCloudSessions.add(session.id);
       else this.playwrightCloudSessions.delete(session.id);
       this.noteUserActivity(session.id, session.last_user_message_at, session.created_at);
@@ -180,7 +197,7 @@ export class JsonlStreamer {
           try {
             const obj = JSON.parse(trimmed) as unknown;
             this.logCloudCodexEvent(session, obj, trimmed);
-            void this.maybeCapturePlaywrightScreenshot(session.id, obj as Record<string, unknown>);
+            void this.maybeCapturePlaywrightScreenshot(session.id, obj as Record<string, unknown>, lang);
             await this.maybeHandleChatgptAuthError(session, obj as Record<string, unknown>);
 
             const planFragment = this.parsePlanUpdate(obj, session.id);
@@ -196,6 +213,7 @@ export class JsonlStreamer {
               ...mapper(obj, {
                 includeUserMessages: session.platform !== "telegram",
                 verbosity: messageVerbosity,
+                lang,
               }),
             );
           } catch {
@@ -253,7 +271,7 @@ export class JsonlStreamer {
       }
 
       if (finalize) {
-        await this.maybeSendPendingPlaywrightScreenshot(session.id);
+        await this.maybeSendPendingPlaywrightScreenshot(session.id, lang);
         await this.flushIfNeeded(session.id, true, { final: true });
       } else {
         await this.flushIfNeeded(session.id, false);
@@ -285,8 +303,10 @@ export class JsonlStreamer {
     if (!isAuth401) return;
     this.chatgptAuthWarned.add(session.id);
     try {
+      const lang = this.resolveSessionLanguage(session);
+      const cmd = session.platform === "telegram" ? "/connect chatgpt" : "connect chatgpt";
       await this.sendToSession(session.id, {
-        text: "ChatGPT auth failed (401). Please run /connect chatgpt to re-login.",
+        text: t("chatgpt.auth_failed", lang, { cmd: `\`${cmd}\`` }),
         priority: "user",
       });
     } catch {
@@ -295,7 +315,11 @@ export class JsonlStreamer {
     // Keep tokens for manual retry; user can choose to /connect chatgpt to replace.
   }
 
-  private async maybeCapturePlaywrightScreenshot(sessionId: string, obj: Record<string, unknown>) {
+  private async maybeCapturePlaywrightScreenshot(
+    sessionId: string,
+    obj: Record<string, unknown>,
+    lang: UserLanguage,
+  ) {
     if (!this.playwrightMcp || !this.config.playwright_mcp?.enabled) return;
     const turnKey = this.currentTurnKey(sessionId);
     const type = (obj as { type?: unknown }).type;
@@ -319,7 +343,7 @@ export class JsonlStreamer {
           if (!callId) continue;
           this.rememberPlaywrightCall(sessionId, callId, parsed.tool);
           if (parsed.tool === "browser_close") {
-            await this.maybeSendPendingPlaywrightScreenshot(sessionId);
+            await this.maybeSendPendingPlaywrightScreenshot(sessionId, lang);
           }
           continue;
         }
@@ -338,7 +362,7 @@ export class JsonlStreamer {
           }
 
           if (tool === "browser_close") {
-            await this.maybeSendPendingPlaywrightScreenshot(sessionId);
+            await this.maybeSendPendingPlaywrightScreenshot(sessionId, lang);
             this.markCapturedPlaywrightCall(sessionId, callId);
             continue;
           }
@@ -346,7 +370,7 @@ export class JsonlStreamer {
           if (tool === "browser_take_screenshot" && turnKey !== null) {
             const extracted = extractPlaywrightInlineScreenshotFromClaudeToolResult((block as { content?: unknown }).content);
             if (extracted) {
-              const ok = await this.sendPlaywrightScreenshotFromToolOutput(sessionId, turnKey, extracted);
+              const ok = await this.sendPlaywrightScreenshotFromToolOutput(sessionId, turnKey, extracted, lang);
               if (ok) {
                 this.markCapturedPlaywrightCall(sessionId, callId);
                 continue;
@@ -377,7 +401,7 @@ export class JsonlStreamer {
         if (parsed && parsed.server.toLowerCase() === "playwright" && callId) {
           this.rememberPlaywrightCall(sessionId, callId, parsed.tool);
           if (parsed.tool === "browser_close") {
-            await this.maybeSendPendingPlaywrightScreenshot(sessionId);
+            await this.maybeSendPendingPlaywrightScreenshot(sessionId, lang);
           }
         }
         return;
@@ -395,7 +419,7 @@ export class JsonlStreamer {
         if (tool === "browser_take_screenshot" && turnKey !== null) {
           const extracted = extractPlaywrightInlineScreenshot((payload as { output?: unknown }).output);
           if (extracted) {
-            const ok = await this.sendPlaywrightScreenshotFromToolOutput(sessionId, turnKey, extracted);
+            const ok = await this.sendPlaywrightScreenshotFromToolOutput(sessionId, turnKey, extracted, lang);
             if (ok) {
               this.markCapturedPlaywrightCall(sessionId, callId);
               return;
@@ -425,7 +449,7 @@ export class JsonlStreamer {
     const callId = stringOrEmpty((invocation as { call_id?: unknown }).call_id);
     if (this.hasCapturedPlaywrightCall(sessionId, callId)) return;
     if (tool === "browser_close") {
-      await this.maybeSendPendingPlaywrightScreenshot(sessionId);
+      await this.maybeSendPendingPlaywrightScreenshot(sessionId, lang);
       this.markCapturedPlaywrightCall(sessionId, callId);
       return;
     }
@@ -433,7 +457,7 @@ export class JsonlStreamer {
     if (tool === "browser_take_screenshot" && turnKey !== null) {
       const extracted = extractPlaywrightInlineScreenshotFromMcpResult((payload as { result?: unknown }).result);
       if (extracted) {
-        const ok = await this.sendPlaywrightScreenshotFromToolOutput(sessionId, turnKey, extracted);
+        const ok = await this.sendPlaywrightScreenshotFromToolOutput(sessionId, turnKey, extracted, lang);
         if (ok) {
           this.markCapturedPlaywrightCall(sessionId, callId);
           return;
@@ -478,7 +502,12 @@ export class JsonlStreamer {
     this.playwrightCapturedCallIds.set(sessionId, set);
   }
 
-  private async captureAndSendPlaywrightScreenshot(sessionId: string, callId?: string, tool?: string): Promise<boolean> {
+  private async captureAndSendPlaywrightScreenshot(
+    sessionId: string,
+    lang: UserLanguage,
+    callId?: string,
+    tool?: string,
+  ): Promise<boolean> {
     try {
       const result = await this.playwrightMcp?.takeScreenshot({
         sessionId,
@@ -487,7 +516,9 @@ export class JsonlStreamer {
       });
       if (result?.savedPath) {
         const buf = await readFile(result.savedPath);
-        const caption = tool ? `Playwright ${tool} screenshot` : "Playwright screenshot";
+        const caption = tool
+          ? t("image.playwright_screenshot_tool", lang, { tool })
+          : t("image.playwright_screenshot", lang);
         await this.sendToSession(sessionId, {
           type: "image",
           path: result.savedPath,
@@ -517,7 +548,7 @@ export class JsonlStreamer {
     this.playwrightScreenshotPendingTurn.set(sessionId, turnKey);
   }
 
-  private async maybeSendPendingPlaywrightScreenshot(sessionId: string): Promise<void> {
+  private async maybeSendPendingPlaywrightScreenshot(sessionId: string, lang?: UserLanguage): Promise<void> {
     if (!this.playwrightMcp || !this.config.playwright_mcp?.enabled) return;
     if (this.playwrightCloudSessions.has(sessionId)) return;
     const turnKey = this.currentTurnKey(sessionId);
@@ -527,8 +558,9 @@ export class JsonlStreamer {
     if (this.playwrightScreenshotPendingTurn.get(sessionId) !== turnKey) return;
 
     this.playwrightScreenshotSendingTurn.set(sessionId, turnKey);
+    const resolvedLang = lang ?? (await this.resolveSessionLanguageById(sessionId));
     try {
-      const ok = await this.captureAndSendPlaywrightScreenshot(sessionId, undefined, "auto");
+      const ok = await this.captureAndSendPlaywrightScreenshot(sessionId, resolvedLang, undefined, "auto");
       if (ok) {
         this.playwrightScreenshotSentTurn.set(sessionId, turnKey);
         this.playwrightScreenshotPendingTurn.delete(sessionId);
@@ -542,6 +574,7 @@ export class JsonlStreamer {
     sessionId: string,
     turnKey: number,
     screenshot: { file: Buffer; mimeType: string; filename: string; savedPath?: string },
+    lang: UserLanguage,
   ): Promise<boolean> {
     if (this.playwrightScreenshotSentTurn.get(sessionId) === turnKey) return true;
     if (this.playwrightScreenshotSendingTurn.get(sessionId) === turnKey) return false;
@@ -554,7 +587,7 @@ export class JsonlStreamer {
         file: screenshot.file,
         filename: screenshot.filename,
         mimeType: screenshot.mimeType,
-        caption: "Playwright screenshot",
+        caption: t("image.playwright_screenshot", lang),
         priority: "user",
       });
       this.playwrightScreenshotSentTurn.set(sessionId, turnKey);
@@ -840,10 +873,11 @@ function extractMcpResultText(result: unknown): string {
 
 function mapCodexEventToFragments(
   obj: unknown,
-  opts?: { includeUserMessages?: boolean; verbosity?: MessageVerbosity },
+  opts?: { includeUserMessages?: boolean; verbosity?: MessageVerbosity; lang?: UserLanguage },
 ): StreamFragment[] {
   if (!obj || typeof obj !== "object") return [];
   const verbosity = normalizeMessageVerbosity(opts?.verbosity);
+  const lang = opts?.lang ?? "en";
   const includeUserMessages = opts?.includeUserMessages !== false;
   const includeReasoning = verbosity >= 2;
   const includeEvents = verbosity >= 2;
@@ -861,8 +895,8 @@ function mapCodexEventToFragments(
         stringOrEmpty((obj as { message?: unknown }).message) ||
         stringOrEmpty((error as { message?: unknown })?.message) ||
         stringOrEmpty(error);
-      const body = message || "Unknown error";
-      return [{ kind: "text", text: formatTitledText("Run failed", body) }];
+      const body = message || t("streamer.unknown_error", lang);
+      return [{ kind: "text", text: formatTitledText(t("streamer.run_failed", lang), body) }];
     }
 
     if (type === "error") {
@@ -870,7 +904,7 @@ function mapCodexEventToFragments(
       const message = stringOrEmpty((obj as { message?: unknown }).message);
       if (!message) return [];
       if (/^reconnecting/i.test(message)) return [];
-      return [{ kind: "text", text: formatTitledText("Error", message) }];
+      return [{ kind: "text", text: formatTitledText(t("streamer.error", lang), message) }];
     }
   }
 
@@ -893,7 +927,7 @@ function mapCodexEventToFragments(
         if (typeof name !== "string") return [];
         const argsText = typeof argumentsRaw === "string" ? argumentsRaw : "";
         const cmd = extractCommandFromToolArgs(name, argsText);
-        const text = cmd ? `$ ${cmd}` : `Tool: ${name}`;
+        const text = cmd ? `$ ${cmd}` : t("streamer.tool", lang, { name });
         return [{ kind: "tool_call", text }];
       }
 
@@ -911,7 +945,7 @@ function mapCodexEventToFragments(
         const input = (payload as { input?: unknown }).input;
         if (typeof name !== "string") return [];
         const line = typeof input === "string" && input.length > 0 ? `${name}: ${input}` : `${name}`;
-        return [{ kind: "tool_call", text: `Tool: ${line}` }];
+        return [{ kind: "tool_call", text: t("streamer.tool", lang, { name: line }) }];
       }
 
       if (itemType === "custom_tool_call_output") {
@@ -926,7 +960,7 @@ function mapCodexEventToFragments(
         if (!includeTools) return [];
         const action = (payload as { action?: unknown }).action;
         const query = action && typeof action === "object" ? (action as { query?: unknown }).query : undefined;
-        if (typeof query === "string") return [{ kind: "text", text: `Web search: ${query}` }];
+        if (typeof query === "string") return [{ kind: "text", text: t("streamer.web_search", lang, { query }) }];
       }
 
       if (itemType === "local_shell_call") {
@@ -946,6 +980,7 @@ function mapCodexEventToFragments(
         includeReasoning,
         includeEvents,
         includeTools,
+        lang,
       });
     }
 
@@ -967,7 +1002,7 @@ function mapCodexEventToFragments(
       if (!text) return [];
       const { title, content } = extractTitleFromPayload({ type: "agent_reasoning", text });
       const body = content ?? text;
-      return [{ kind: "text", text: formatTitledText(title ?? "Reasoning", body, { inline: false }) }];
+      return [{ kind: "text", text: formatTitledText(title ?? t("streamer.reasoning", lang), body, { inline: false }) }];
     }
     if (detailsType === "command_execution") {
       if (!includeTools) return [];
@@ -979,17 +1014,30 @@ function mapCodexEventToFragments(
       if (isStart) {
         return cmd ? [{ kind: "tool_call", text: `$ ${cmd}` }] : [];
       }
+      const commandLabel = cmd ? `$ ${cmd}` : t("streamer.command", lang);
       if (output) {
-        const suffix = exit !== null ? `\n(exit ${exit})` : "";
+        const suffix = exit !== null ? `\n${t("streamer.command_exit", lang, { code: exit })}` : "";
         return [{ kind: "tool_output", text: `${output}${suffix}` }];
       }
       if (exit !== null) {
-        return [{ kind: "text", text: `Command completed (exit ${exit})` }];
+        const base = cmd
+          ? t("streamer.command_completed_with", lang, { command: commandLabel })
+          : t("streamer.command_completed", lang);
+        return [{ kind: "text", text: `${base} ${t("streamer.command_exit", lang, { code: exit })}`.trim() }];
       }
       if (status === "failed") {
-        return [{ kind: "text", text: cmd ? `Command failed: ${cmd}` : "Command failed" }];
+        return [
+          {
+            kind: "text",
+            text: cmd
+              ? t("streamer.command_failed_with", lang, { command: commandLabel })
+              : t("streamer.command_failed", lang),
+          },
+        ];
       }
-      return cmd ? [{ kind: "text", text: `Command completed: ${cmd}` }] : [];
+      return cmd
+        ? [{ kind: "text", text: t("streamer.command_completed_with", lang, { command: commandLabel }) }]
+        : [{ kind: "text", text: t("streamer.command_completed", lang) }];
     }
     if (detailsType === "mcp_tool_call") {
       if (!includeTools) return [];
@@ -999,18 +1047,22 @@ function mapCodexEventToFragments(
       const status = stringOrEmpty((item as { status?: unknown }).status);
       const label = [server, tool].filter(Boolean).join(".");
       const argText = args === undefined ? "" : ` ${truncateJson(args, 300)}`;
+      const toolLabel = label ? `MCP ${label}` : t("streamer.mcp_tool", lang);
       const isStart = type === "item.started" || status === "in_progress";
       if (isStart) {
-        return [{ kind: "tool_call", text: `${label ? `MCP ${label}` : "MCP tool"}${argText}` }];
+        return [{ kind: "tool_call", text: `${toolLabel}${argText}` }];
       }
       const output = extractMcpResultText((item as { result?: unknown }).result);
       const err = stringOrEmpty((item as { error?: unknown }).error);
       let body = output || "";
-      if (err) body = body ? `${body}\nError: ${err}` : `Error: ${err}`;
+      if (err) {
+        const errorLabel = t("streamer.error", lang);
+        body = body ? `${body}\n${errorLabel}: ${err}` : `${errorLabel}: ${err}`;
+      }
       if (!body && (item as { result?: unknown }).result !== undefined) {
         body = truncateJson((item as { result?: unknown }).result, 800);
       }
-      if (!body) return [{ kind: "text", text: `${label ? `MCP ${label}` : "MCP tool"} completed` }];
+      if (!body) return [{ kind: "text", text: t("streamer.tool_completed", lang, { tool: toolLabel }) }];
       return [{ kind: "tool_output", text: truncateLogLine(body, 4000) }];
     }
     if (detailsType === "file_change") {
@@ -1021,13 +1073,20 @@ function mapCodexEventToFragments(
           if (!change || typeof change !== "object") return "";
           const kindRaw = (change as { kind?: unknown }).kind;
           const kind = typeof kindRaw === "string" ? kindRaw : "change";
-          const label = kind === "add" ? "Added" : kind === "modify" ? "Modified" : kind === "delete" ? "Deleted" : kind;
+          const label =
+            kind === "add"
+              ? t("streamer.file_added", lang)
+              : kind === "modify"
+                ? t("streamer.file_modified", lang)
+                : kind === "delete"
+                  ? t("streamer.file_deleted", lang)
+                  : kind;
           const p = stringOrEmpty((change as { path?: unknown }).path);
           return p ? `${label}: ${p}` : label;
         })
         .filter(Boolean);
-      const body = lines.length > 0 ? lines.join("\n") : "Files changed";
-      return [{ kind: "text", text: formatTitledText("Files changed", body, { inline: false }) }];
+      const body = lines.length > 0 ? lines.join("\n") : t("streamer.files_changed_empty", lang);
+      return [{ kind: "text", text: formatTitledText(t("streamer.files_changed", lang), body, { inline: false }) }];
     }
   }
 
@@ -1036,10 +1095,11 @@ function mapCodexEventToFragments(
 
 function mapClaudeEventToFragments(
   obj: unknown,
-  opts?: { includeUserMessages?: boolean; verbosity?: MessageVerbosity },
+  opts?: { includeUserMessages?: boolean; verbosity?: MessageVerbosity; lang?: UserLanguage },
 ): StreamFragment[] {
   if (!obj || typeof obj !== "object") return [];
   const verbosity = normalizeMessageVerbosity(opts?.verbosity);
+  const lang = opts?.lang ?? "en";
   const includeUserMessages = opts?.includeUserMessages !== false;
   const includeEvents = verbosity >= 2;
   const includeTools = verbosity >= 3;
@@ -1051,9 +1111,11 @@ function mapClaudeEventToFragments(
     // Keep chat quiet on success unless verbosity requests events.
     const subtype = stringOrEmpty((obj as { subtype?: unknown }).subtype);
     const isError = Boolean((obj as { is_error?: unknown }).is_error);
+    const statusLabel = subtype || t("streamer.unknown", lang);
+    const statusSuffix = isError ? t("streamer.result_error_suffix", lang) : "";
     const msg =
       includeEvents && (isError || (subtype && subtype !== "success"))
-        ? formatTitledText("Result", `${subtype || "unknown"}${isError ? " (error)" : ""}`.trim())
+        ? formatTitledText(t("streamer.result", lang), `${statusLabel}${statusSuffix}`.trim())
         : null;
     const prefix = msg ? [{ kind: "text" as const, text: msg }] : [];
     return [...prefix, { kind: "final" }];
@@ -1075,7 +1137,7 @@ function mapClaudeEventToFragments(
 
     if (typeof content === "string") {
       if (type === "user") {
-        if (includeUserMessages) pushText(`User: ${content}`);
+        if (includeUserMessages) pushText(t("streamer.user", lang, { message: content }));
       } else {
         pushText(content, false, true);
       }
@@ -1090,7 +1152,12 @@ function mapClaudeEventToFragments(
 
       if (blockType === "text" && typeof (block as { text?: unknown }).text === "string") {
         if (type === "user" && !includeUserMessages) continue;
-        pushText((block as { text: string }).text, false, separateNext);
+        const blockText = (block as { text: string }).text;
+        if (type === "user") {
+          pushText(t("streamer.user", lang, { message: blockText }), false, separateNext);
+        } else {
+          pushText(blockText, false, separateNext);
+        }
         separateNext = false;
         continue;
       }
@@ -1099,7 +1166,7 @@ function mapClaudeEventToFragments(
         if (!includeTools) continue;
         const name = stringOrEmpty((block as { name?: unknown }).name);
         const input = (block as { input?: unknown }).input;
-        const formatted = formatClaudeToolUse(name, input);
+        const formatted = formatClaudeToolUse(name, input, lang);
         if (formatted) fragments.push({ kind: "tool_call", text: formatted });
         continue;
       }
@@ -1118,7 +1185,7 @@ function mapClaudeEventToFragments(
   if (type === "system") {
     if (!includeEvents) return [];
     const subtype = stringOrEmpty((obj as { subtype?: unknown }).subtype);
-    const text = subtype ? formatTitledText("System", subtype) : null;
+    const text = subtype ? formatTitledText(t("streamer.system", lang), subtype) : null;
     return text ? [{ kind: "text", text }] : [];
   }
 
@@ -1126,26 +1193,26 @@ function mapClaudeEventToFragments(
     if (!includeEvents) return [];
     const tool = stringOrEmpty((obj as { tool_name?: unknown }).tool_name);
     const elapsed = numberOrNull((obj as { elapsed_time_seconds?: unknown }).elapsed_time_seconds);
-    const suffix = tool ? `${tool}${elapsed !== null ? ` (${elapsed}s)` : ""}` : "tool";
-    return [{ kind: "text", text: formatTitledText("Tool progress", suffix) }];
+    const suffix = tool ? `${tool}${elapsed !== null ? ` (${elapsed}s)` : ""}` : t("streamer.tool_progress_fallback", lang);
+    return [{ kind: "text", text: formatTitledText(t("streamer.tool_progress", lang), suffix) }];
   }
 
   return [];
 }
 
-function formatClaudeToolUse(name: string, input: unknown): string | null {
+function formatClaudeToolUse(name: string, input: unknown, lang: UserLanguage): string | null {
   if (!name) return null;
 
   if (name === "Bash") {
     const cmd =
       input && typeof input === "object" ? ((input as { command?: unknown }).command as unknown) : undefined;
     if (typeof cmd === "string" && cmd.trim().length > 0) return `$ ${cmd.trim()}`;
-    return "Tool: Bash";
+    return t("streamer.tool", lang, { name: "Bash" });
   }
 
   const parsed = parseMcpFunctionName(name);
   if (parsed) return `MCP: ${parsed.server}.${parsed.tool}`;
-  return `Tool: ${name}`;
+  return t("streamer.tool", lang, { name });
 }
 
 function formatClaudeToolResult(block: Record<string, unknown>): string | null {
@@ -1174,7 +1241,7 @@ function formatClaudeToolResult(block: Record<string, unknown>): string | null {
 
 const EVENT_MAPPERS: Record<
   SessionAgent,
-  (obj: unknown, opts?: { includeUserMessages?: boolean; verbosity?: MessageVerbosity }) => StreamFragment[]
+  (obj: unknown, opts?: { includeUserMessages?: boolean; verbosity?: MessageVerbosity; lang?: UserLanguage }) => StreamFragment[]
 > = {
   codex: mapCodexEventToFragments,
   claude_code: mapClaudeEventToFragments,
@@ -1183,7 +1250,7 @@ const EVENT_MAPPERS: Record<
 export function mapEventToFragments(
   agent: SessionAgent,
   obj: unknown,
-  opts?: { includeUserMessages?: boolean; verbosity?: MessageVerbosity },
+  opts?: { includeUserMessages?: boolean; verbosity?: MessageVerbosity; lang?: UserLanguage },
 ): StreamFragment[] {
   const mapper = EVENT_MAPPERS[agent];
   return mapper ? mapper(obj, opts) : [];
@@ -1217,10 +1284,17 @@ function extractTitleFromPayload(
 
 function mapEventMsgPayload(
   payload: Record<string, unknown>,
-  opts?: { includeUserMessages?: boolean; includeReasoning?: boolean; includeEvents?: boolean; includeTools?: boolean },
+  opts?: {
+    includeUserMessages?: boolean;
+    includeReasoning?: boolean;
+    includeEvents?: boolean;
+    includeTools?: boolean;
+    lang?: UserLanguage;
+  },
 ): StreamFragment[] {
   const evType = typeof payload.type === "string" ? payload.type : null;
   if (!evType) return [];
+  const lang = opts?.lang ?? "en";
   const includeUserMessages = opts?.includeUserMessages !== false;
   const includeReasoning = opts?.includeReasoning !== false;
   const includeEvents = opts?.includeEvents !== false;
@@ -1235,24 +1309,24 @@ function mapEventMsgPayload(
     case "error":
       if (!includeEvents) return [];
       if (/^reconnecting/i.test(stringOrEmpty(payload.message))) return [];
-      return text(formatTitledText("Error", stringOrEmpty(payload.message)));
+      return text(formatTitledText(t("streamer.error", lang), stringOrEmpty(payload.message)));
     case "warning":
       if (!includeEvents) return [];
-      return text(formatTitledText("Warning", stringOrEmpty(payload.message)));
+      return text(formatTitledText(t("streamer.warning", lang), stringOrEmpty(payload.message)));
     case "context_compacted":
       if (!includeEvents) return [];
-      return text(formatTitledText("Context compacted"));
+      return text(formatTitledText(t("streamer.context_compacted", lang)));
     case "task_started": {
       if (!includeEvents) return [];
       const ctxWin = numberOrNull(payload.model_context_window);
-      const suffix = ctxWin !== null ? `context window ${ctxWin}` : "";
-      return text(formatTitledText("Task started", suffix || null));
+      const suffix = ctxWin !== null ? t("streamer.context_window", lang, { n: ctxWin }) : "";
+      return text(formatTitledText(t("streamer.task_started", lang), suffix || null));
     }
     case "task_complete": {
       if (!includeEvents) return [];
       const last = stringOrEmpty(payload.last_agent_message);
-      const body = last ? `Last message: ${last}` : null;
-      return text(formatTitledText("Task complete", body));
+      const body = last ? t("streamer.last_message", lang, { message: last }) : null;
+      return text(formatTitledText(t("streamer.task_complete", lang), body));
     }
     case "token_count":
       return [];
@@ -1261,7 +1335,9 @@ function mapEventMsgPayload(
       return text(msg, false, true);
     }
     case "user_message":
-      return includeUserMessages ? text(`User: ${stringOrEmpty(payload.message)}`) : [];
+      return includeUserMessages
+        ? text(t("streamer.user", lang, { message: stringOrEmpty(payload.message) }))
+        : [];
     case "agent_message_delta":
     case "agent_message_content_delta":
       return text(stringOrEmpty(payload.delta), true);
@@ -1272,7 +1348,9 @@ function mapEventMsgPayload(
         title,
         content,
       } = extractTitleFromPayload(payload);
-      return content ? text(formatTitledText(title ?? "Reasoning", content ?? msg, { inline: false })) : [];
+      return content
+        ? text(formatTitledText(title ?? t("streamer.reasoning", lang), content ?? msg, { inline: false }))
+        : [];
     }
     case "agent_reasoning_delta":
     case "reasoning_content_delta":
@@ -1280,7 +1358,7 @@ function mapEventMsgPayload(
     case "agent_reasoning_raw_content": {
       if (!includeReasoning) return [];
       const msg = stringOrEmpty(payload.text);
-      const title = stringOrEmpty((payload as { title?: unknown }).title) || "Reasoning (raw)";
+      const title = stringOrEmpty((payload as { title?: unknown }).title) || t("streamer.reasoning_raw", lang);
       return msg ? text(formatTitledText(title, msg, { inline: false })) : [];
     }
     case "agent_reasoning_raw_content_delta":
@@ -1290,15 +1368,15 @@ function mapEventMsgPayload(
       return includeReasoning ? text("\n----\n", true) : [];
     case "session_configured":
       if (!includeEvents) return [];
-      return text(formatTitledText("Session configured", formatSessionConfigured(payload) || null));
+      return text(formatTitledText(t("streamer.session_configured", lang), formatSessionConfigured(payload) || null));
     case "mcp_startup_update": {
       if (!includeEvents) return [];
-      const update = formatMcpStartupUpdate(payload);
+      const update = formatMcpStartupUpdate(payload, lang);
       return text(formatTitledText(update.title, update.detail || null));
     }
     case "mcp_startup_complete": {
       if (!includeEvents) return [];
-      const summary = formatMcpStartupComplete(payload);
+      const summary = formatMcpStartupComplete(payload, lang);
       return text(formatTitledText(summary.title, summary.detail));
     }
     case "mcp_tool_call_begin": {
@@ -1308,16 +1386,16 @@ function mapEventMsgPayload(
     }
     case "mcp_tool_call_end": {
       if (!includeTools) return [];
-      const summary = formatMcpToolResult(payload.result, payload.invocation);
+      const summary = formatMcpToolResult(payload.result, payload.invocation, lang);
       return summary ? [{ kind: "tool_output", text: summary }] : [];
     }
     case "web_search_begin":
       if (!includeTools) return [];
-      return text("Web search started");
+      return text(t("streamer.web_search_started", lang));
     case "web_search_end": {
       if (!includeTools) return [];
       const query = stringOrEmpty(payload.query);
-      return query ? text(`Web search: ${query}`) : [];
+      return query ? text(t("streamer.web_search", lang, { query })) : [];
     }
     case "exec_command_begin": {
       if (!includeTools) return [];
@@ -1343,16 +1421,20 @@ function mapEventMsgPayload(
       if (!includeTools) return [];
       const exit = numberOrNull(payload.exit_code);
       const cmd = formatCommand(payload.command);
-      const status = exit !== null ? ` (exit ${exit})` : "";
+      const status = exit !== null ? ` ${t("streamer.command_exit", lang, { code: exit })}` : "";
       const suffix = stringOrEmpty(payload.stderr);
-      const summary = `${cmd ? `$ ${cmd}` : "Command"} completed${status}`;
+      const commandLabel = cmd ? `$ ${cmd}` : t("streamer.command", lang);
+      const base = cmd
+        ? t("streamer.command_completed_with", lang, { command: commandLabel })
+        : t("streamer.command_completed", lang);
+      const summary = `${base}${status}`;
       if (suffix) return text(`${summary}: ${suffix}`);
       return text(summary);
     }
     case "view_image_tool_call": {
       if (!includeTools) return [];
       const path = stringOrEmpty(payload.path);
-      return path ? text(`View image: ${path}`) : [];
+      return path ? text(t("streamer.view_image", lang, { path })) : [];
     }
     case "exec_approval_request": {
       if (!includeEvents) return [];
@@ -1362,27 +1444,27 @@ function mapEventMsgPayload(
       const parts = [];
       if (cwd) parts.push(`[${cwd}]`);
       if (cmd) parts.push(`$ ${cmd}`);
-      if (reason) parts.push(`reason: ${reason}`);
-      return text(formatTitledText("Approval needed", parts.join(" ").trim() || null));
+      if (reason) parts.push(t("streamer.reason", lang, { reason }));
+      return text(formatTitledText(t("streamer.approval_needed", lang), parts.join(" ").trim() || null));
     }
     case "elicitation_request": {
       if (!includeEvents) return [];
       const server = stringOrEmpty(payload.server_name);
       const message = stringOrEmpty(payload.message);
       const prefix = server ? `${server}: ` : "";
-      return text(formatTitledText("Elicitation request", `${prefix}${message}`.trim() || null));
+      return text(formatTitledText(t("streamer.elicitation_request", lang), `${prefix}${message}`.trim() || null));
     }
     case "apply_patch_approval_request": {
       if (!includeEvents) return [];
-      const summary = formatPatchApprovalRequest(payload);
-      return summary ? text(formatTitledText("Patch approval needed", summary)) : [];
+      const summary = formatPatchApprovalRequest(payload, lang);
+      return summary ? text(formatTitledText(t("streamer.patch_approval_needed", lang), summary)) : [];
     }
     case "deprecation_notice": {
       if (!includeEvents) return [];
       const summary = stringOrEmpty(payload.summary);
       const details = stringOrEmpty(payload.details);
       const body = details ? `${summary} - ${details}` : summary;
-      return text(formatTitledText("Deprecated", body || null));
+      return text(formatTitledText(t("streamer.deprecated", lang), body || null));
     }
     case "background_event":
       if (!includeEvents) return [];
@@ -1394,27 +1476,27 @@ function mapEventMsgPayload(
     case "undo_started": {
       if (!includeEvents) return [];
       const msg = stringOrEmpty(payload.message);
-      return text(formatTitledText("Undo started", msg || null));
+      return text(formatTitledText(t("streamer.undo_started", lang), msg || null));
     }
     case "undo_completed": {
       if (!includeEvents) return [];
       const msg = stringOrEmpty(payload.message);
       const success = typeof payload.success === "boolean" ? payload.success : false;
-      const base = success ? "Undo completed" : "Undo failed";
+      const base = success ? t("streamer.undo_completed", lang) : t("streamer.undo_failed", lang);
       return text(formatTitledText(base, msg || null));
     }
     case "stream_error":
       if (!includeEvents) return [];
-      return text(formatTitledText("Stream error", stringOrEmpty(payload.message)));
+      return text(formatTitledText(t("streamer.stream_error", lang), stringOrEmpty(payload.message)));
     case "patch_apply_begin": {
       if (!includeEvents) return [];
-      const summary = formatPatchApplyBegin(payload);
-      return text(formatTitledText("Applying patch", summary));
+      const summary = formatPatchApplyBegin(payload, lang);
+      return text(formatTitledText(t("streamer.applying_patch", lang), summary));
     }
     case "patch_apply_end": {
       if (!includeEvents) return [];
-      const summary = formatPatchApplyEnd(payload);
-      return text(formatTitledText("Patch apply", summary));
+      const summary = formatPatchApplyEnd(payload, lang);
+      return text(formatTitledText(t("streamer.patch_apply", lang), summary));
     }
     case "turn_diff": {
       if (!includeTools) return [];
@@ -1427,17 +1509,18 @@ function mapEventMsgPayload(
       const logId = numberOrNull(payload.log_id);
       const entry = (payload as { entry?: unknown }).entry;
       const found = entry !== null && entry !== undefined;
-      const label = `History entry${logId !== null ? ` log ${logId}` : ""}${
-        offset !== null ? ` offset ${offset}` : ""
-      }`;
-      return text(formatTitledText(label, found ? "returned" : "not found"));
+      const parts: string[] = [];
+      if (logId !== null) parts.push(t("streamer.history_entry_log", lang, { id: logId }));
+      if (offset !== null) parts.push(t("streamer.history_entry_offset", lang, { offset }));
+      const label = [t("streamer.history_entry", lang), parts.join(" ")].filter(Boolean).join(" ");
+      return text(formatTitledText(label, found ? t("streamer.history_entry_returned", lang) : t("streamer.history_entry_not_found", lang)));
     }
     case "mcp_list_tools_response":
       if (!includeEvents) return [];
-      return text(formatTitledText("MCP list", formatMcpListTools(payload)));
+      return text(formatTitledText(t("streamer.mcp_list", lang), formatMcpListTools(payload, lang)));
     case "list_custom_prompts_response":
       if (!includeEvents) return [];
-      return text(formatTitledText("Custom prompts", formatCustomPrompts(payload)));
+      return text(formatTitledText(t("streamer.custom_prompts", lang), formatCustomPrompts(payload, lang)));
     case "plan_update": {
       const parsed = parsePlanUpdatePayload(payload);
       if (!parsed) return [];
@@ -1446,21 +1529,21 @@ function mapEventMsgPayload(
     case "turn_aborted": {
       if (!includeEvents) return [];
       const reason = formatTurnAbortReason(payload.reason);
-      return text(formatTitledText("Turn aborted", reason || null));
+      return text(formatTitledText(t("streamer.turn_aborted", lang), reason || null));
     }
     case "shutdown_complete": {
-      const message = includeEvents ? text(formatTitledText("Shutdown complete")) : [];
+      const message = includeEvents ? text(formatTitledText(t("streamer.shutdown_complete", lang))) : [];
       return [...message, { kind: "final" }];
     }
     case "entered_review_mode": {
       if (!includeEvents) return [];
-      const summary = formatEnteredReview(payload);
-      return text(formatTitledText("Entered review mode", summary));
+      const summary = formatEnteredReview(payload, lang);
+      return text(formatTitledText(t("streamer.entered_review_mode", lang), summary));
     }
     case "exited_review_mode": {
       if (!includeEvents) return [];
-      const summary = formatExitedReview(payload);
-      return text(formatTitledText("Exited review mode", summary));
+      const summary = formatExitedReview(payload, lang);
+      return text(formatTitledText(t("streamer.exited_review_mode", lang), summary));
     }
     case "raw_response_item":
     case "item_started":
@@ -1620,8 +1703,8 @@ function formatSessionConfigured(payload: Record<string, unknown>): string {
   return parts.join(" | ");
 }
 
-function formatMcpStartupUpdate(payload: Record<string, unknown>): { title: string; detail: string } {
-  const server = stringOrEmpty(payload.server) || "server";
+function formatMcpStartupUpdate(payload: Record<string, unknown>, lang: UserLanguage): { title: string; detail: string } {
+  const server = stringOrEmpty(payload.server) || t("streamer.mcp_server", lang);
   const statusObj = (payload as { status?: unknown }).status;
   let status = "";
   if (typeof statusObj === "string") {
@@ -1634,14 +1717,21 @@ function formatMcpStartupUpdate(payload: Record<string, unknown>): { title: stri
       if (error) status += ` (${error})`;
     }
   }
-  return { title: `MCP ${server}`, detail: status || "status unknown" };
+  return { title: `MCP ${server}`, detail: status || t("streamer.mcp_status_unknown", lang) };
 }
 
-function formatMcpStartupComplete(payload: Record<string, unknown>): { title: string; detail: string } {
+function formatMcpStartupComplete(payload: Record<string, unknown>, lang: UserLanguage): { title: string; detail: string } {
   const ready = Array.isArray(payload.ready) ? payload.ready.length : 0;
   const failed = Array.isArray(payload.failed) ? payload.failed.length : 0;
   const cancelled = Array.isArray(payload.cancelled) ? payload.cancelled.length : 0;
-  return { title: "MCP startup", detail: `ready=${ready}, failed=${failed}, cancelled=${cancelled}` };
+  return {
+    title: t("streamer.mcp_startup", lang),
+    detail: [
+      `${t("streamer.mcp_startup_ready", lang)}=${ready}`,
+      `${t("streamer.mcp_startup_failed", lang)}=${failed}`,
+      `${t("streamer.mcp_startup_cancelled", lang)}=${cancelled}`,
+    ].join(", "),
+  };
 }
 
 function formatMcpInvocation(invocation: unknown): string | null {
@@ -1663,7 +1753,7 @@ function decodeBase64ToString(chunk: unknown): string | null {
   }
 }
 
-function formatMcpToolResult(result: unknown, invocation: unknown): string | null {
+function formatMcpToolResult(result: unknown, invocation: unknown, lang: UserLanguage): string | null {
   const target = formatMcpInvocation(invocation);
   if (result && typeof result === "object") {
     if ("Ok" in (result as Record<string, unknown>)) {
@@ -1680,12 +1770,13 @@ function formatMcpToolResult(result: unknown, invocation: unknown): string | nul
     }
     if ("Err" in (result as Record<string, unknown>)) {
       const err = stringOrEmpty((result as { Err?: unknown }).Err);
-      const text = err ? `Error: ${err}` : "Error";
+      const errorLabel = t("streamer.error", lang);
+      const text = err ? `${errorLabel}: ${err}` : errorLabel;
       return target ? `${target}: ${text}` : text;
     }
   }
   if (typeof result === "string") return target ? `${target}: ${result}` : result;
-  return target ? `${target}: (no result)` : null;
+  return target ? `${target}: ${t("streamer.no_result", lang)}` : null;
 }
 
 function formatMcpContentBlock(block: unknown): string | null {
@@ -1865,14 +1956,14 @@ function parseDataUrl(url: string): { mimeType: string; data: Buffer } | null {
   }
 }
 
-function formatPatchApprovalRequest(payload: Record<string, unknown>): string | null {
+function formatPatchApprovalRequest(payload: Record<string, unknown>, lang: UserLanguage): string | null {
   const changes = payload.changes;
   const count = changes && typeof changes === "object" ? Object.keys(changes as Record<string, unknown>).length : 0;
   const reason = stringOrEmpty(payload.reason);
   const grantRoot = stringOrEmpty(payload.grant_root);
-  const parts = [`${count} file(s)`];
-  if (grantRoot) parts.push(`grant ${grantRoot}`);
-  if (reason) parts.push(`reason: ${reason}`);
+  const parts = [t("streamer.files_count", lang, { count })];
+  if (grantRoot) parts.push(t("streamer.patch_grant", lang, { root: grantRoot }));
+  if (reason) parts.push(t("streamer.reason", lang, { reason }));
   return parts.length > 0 ? parts.join(", ") : null;
 }
 
@@ -1880,23 +1971,25 @@ function countMapEntries(value: unknown): number {
   return value && typeof value === "object" ? Object.keys(value as Record<string, unknown>).length : 0;
 }
 
-function formatPatchApplyBegin(payload: Record<string, unknown>): string {
+function formatPatchApplyBegin(payload: Record<string, unknown>, lang: UserLanguage): string {
   const count = countMapEntries(payload.changes);
   const auto = (payload as { auto_approved?: unknown }).auto_approved === true;
-  return `${count} file(s)${auto ? " [auto-approved]" : ""}`;
+  return `${t("streamer.files_count", lang, { count })}${auto ? t("streamer.patch_auto_approved", lang) : ""}`;
 }
 
-function formatPatchApplyEnd(payload: Record<string, unknown>): string {
+function formatPatchApplyEnd(payload: Record<string, unknown>, lang: UserLanguage): string {
   const count = countMapEntries(payload.changes);
   const success = (payload as { success?: unknown }).success === true;
   const stderr = stringOrEmpty(payload.stderr);
   const stdout = stringOrEmpty(payload.stdout);
   const details = stderr || stdout;
-  const base = `${success ? "succeeded" : "failed"} (${count} file(s))`;
+  const base = success
+    ? t("streamer.patch_apply_succeeded", lang, { count })
+    : t("streamer.patch_apply_failed", lang, { count });
   return details ? `${base}: ${details}` : base;
 }
 
-function formatMcpListTools(payload: Record<string, unknown>): string {
+function formatMcpListTools(payload: Record<string, unknown>, lang: UserLanguage): string {
   const tools = payload.tools && typeof payload.tools === "object" ? Object.keys(payload.tools as Record<string, unknown>).length : 0;
   const resources =
     payload.resources && typeof payload.resources === "object"
@@ -1910,17 +2003,17 @@ function formatMcpListTools(payload: Record<string, unknown>): string {
           .map((v) => (Array.isArray(v) ? v.length : 0))
           .reduce((a, b) => a + b, 0)
       : 0;
-  return `${tools} tool(s), ${resources} resource(s), ${templates} template(s)`;
+  return t("streamer.mcp_list_summary", lang, { tools, resources, templates });
 }
 
-function formatCustomPrompts(payload: Record<string, unknown>): string {
+function formatCustomPrompts(payload: Record<string, unknown>, lang: UserLanguage): string {
   const prompts = Array.isArray(payload.custom_prompts) ? payload.custom_prompts : [];
   const names = prompts
     .map((p) => (p && typeof p === "object" ? stringOrEmpty((p as { name?: unknown }).name) : ""))
     .filter((n) => n.length > 0);
-  if (names.length === 0) return "none";
+  if (names.length === 0) return t("streamer.custom_prompts_none", lang);
   const preview = names.slice(0, 5).join(", ");
-  const suffix = names.length > 5 ? ` (+${names.length - 5} more)` : "";
+  const suffix = names.length > 5 ? t("streamer.custom_prompts_more", lang, { count: names.length - 5 }) : "";
   return `${preview}${suffix}`;
 }
 
@@ -1947,7 +2040,7 @@ function parsePlanUpdatePayload(
   return { plan, explanation: explanation || undefined };
 }
 
-function formatPlanUpdate(payload: Record<string, unknown>): string | null {
+function formatPlanUpdate(payload: Record<string, unknown>, lang: UserLanguage = "en"): string | null {
   const plan = Array.isArray(payload.plan) ? payload.plan : [];
   const explanation = stringOrEmpty(payload.explanation);
   const lines = plan
@@ -1961,7 +2054,7 @@ function formatPlanUpdate(payload: Record<string, unknown>): string | null {
     .filter((l) => l.length > 0);
 
   if (lines.length === 0 && !explanation) return null;
-  const header = formatTitledText("Plan update", explanation || null, { inline: false });
+  const header = formatTitledText(t("streamer.plan_update", lang), explanation || null, { inline: false });
   if (lines.length === 0) return header;
   return [header, ...lines].join("\n");
 }
@@ -1974,45 +2067,51 @@ function formatTurnAbortReason(reason: unknown): string | null {
   return null;
 }
 
-function formatReviewTarget(target: unknown): string | null {
+function formatReviewTarget(target: unknown, lang: UserLanguage): string | null {
   if (!target || typeof target !== "object") return null;
-  const t = stringOrEmpty((target as { type?: unknown }).type);
-  if (t === "uncommittedChanges") return "uncommitted changes";
-  if (t === "baseBranch") {
+  const targetType = stringOrEmpty((target as { type?: unknown }).type);
+  if (targetType === "uncommittedChanges") return t("streamer.review_target_uncommitted", lang);
+  if (targetType === "baseBranch") {
     const branch = stringOrEmpty((target as { branch?: unknown }).branch);
-    return branch ? `base branch ${branch}` : "base branch";
+    const base = t("streamer.review_target_base_branch", lang);
+    return branch ? `${base} ${branch}` : base;
   }
-  if (t === "commit") {
+  if (targetType === "commit") {
     const sha = stringOrEmpty((target as { sha?: unknown }).sha);
     const title = stringOrEmpty((target as { title?: unknown }).title);
     const suffix = title ? ` (${title})` : "";
-    return sha ? `commit ${sha}${suffix}` : "commit";
+    const label = t("streamer.review_target_commit", lang);
+    return sha ? `${label} ${sha}${suffix}` : label;
   }
-  if (t === "custom") {
+  if (targetType === "custom") {
     const instructions = stringOrEmpty((target as { instructions?: unknown }).instructions);
-    return instructions ? `custom: ${instructions}` : "custom instructions";
+    return instructions
+      ? t("streamer.review_target_custom", lang, { instructions })
+      : t("streamer.review_target_custom_instructions", lang);
   }
   return null;
 }
 
-function formatEnteredReview(payload: Record<string, unknown>): string | null {
-  const target = formatReviewTarget(payload.target);
+function formatEnteredReview(payload: Record<string, unknown>, lang: UserLanguage): string | null {
+  const target = formatReviewTarget(payload.target, lang);
   const hint = stringOrEmpty(payload.user_facing_hint);
   const parts: string[] = [];
-  if (target) parts.push(`for ${target}`);
+  if (target) parts.push(t("streamer.review_for", lang, { target }));
   if (hint) parts.push(hint);
   if (parts.length === 0) return null;
   return parts.join(" - ");
 }
 
-function formatExitedReview(payload: Record<string, unknown>): string | null {
+function formatExitedReview(payload: Record<string, unknown>, lang: UserLanguage): string | null {
   const reviewOutput = payload.review_output;
   if (!reviewOutput || typeof reviewOutput !== "object") return null;
   const findings = Array.isArray((reviewOutput as { findings?: unknown }).findings)
     ? (reviewOutput as { findings: unknown[] }).findings.length
     : 0;
   const correctness = stringOrEmpty((reviewOutput as { overall_correctness?: unknown }).overall_correctness);
-  const base = findings > 0 ? `findings: ${findings}` : "no findings";
+  const base = findings > 0
+    ? t("streamer.review_findings", lang, { count: findings })
+    : t("streamer.review_no_findings", lang);
   return correctness ? `${base} - ${correctness}` : base;
 }
 

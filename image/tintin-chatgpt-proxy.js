@@ -32,6 +32,25 @@ const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const TIMEOUT_MS = Number(process.env.CHATGPT_PROXY_TIMEOUT_MS || "60000");
 const REFRESH_OUT = process.env.CHATGPT_REFRESH_OUT || "";
+const LANGUAGE_PROMPT_RAW = (process.env.CHATGPT_PROXY_LANGUAGE_PROMPT || "").trim();
+const LANGUAGE_PROMPT_B64 = (process.env.CHATGPT_PROXY_LANGUAGE_PROMPT_B64 || "").trim();
+const LANGUAGE_RAW = (process.env.CHATGPT_PROXY_LANGUAGE || "").trim();
+const LANGUAGE_STRICT = process.env.CHATGPT_PROXY_LANGUAGE_STRICT === "1";
+const LANGUAGE_CHECK = process.env.CHATGPT_PROXY_LANGUAGE_CHECK !== "0";
+const LANGUAGE_CHECK_LIMIT = Number(process.env.CHATGPT_PROXY_LANGUAGE_CHECK_LIMIT || "6");
+const LANGUAGE_REMINDER_RAW = (process.env.CHATGPT_PROXY_LANGUAGE_REMINDER || "").trim();
+let LANGUAGE_PROMPT = LANGUAGE_PROMPT_RAW;
+if (!LANGUAGE_PROMPT && LANGUAGE_PROMPT_B64) {
+  try {
+    LANGUAGE_PROMPT = Buffer.from(LANGUAGE_PROMPT_B64, "base64").toString("utf8").trim();
+  } catch {
+    LANGUAGE_PROMPT = "";
+  }
+}
+const TARGET_LANGUAGE = resolveTargetLanguage(LANGUAGE_RAW, LANGUAGE_PROMPT);
+const STRICT_GUARD = buildStrictGuard(TARGET_LANGUAGE);
+const LANGUAGE_DIRECTIVE = [LANGUAGE_PROMPT, STRICT_GUARD].filter(Boolean).join("\n");
+const LANGUAGE_REMINDER = LANGUAGE_REMINDER_RAW || defaultLanguageReminder(TARGET_LANGUAGE);
 
 // GitHub URLs for Codex instructions
 const GITHUB_API = "https://api.github.com/repos/openai/codex/releases/latest";
@@ -328,6 +347,137 @@ const TOOL_REMAP_MESSAGE = `IMPORTANT: If you see tool names in Codex prompts th
 - read_plan → todoread (for reading tasks)
 Use the tools available to you, not the ones mentioned in instructions.`;
 
+function resolveTargetLanguage(raw, prompt) {
+  const normalized = (raw || "").trim().toLowerCase();
+  if (["zh", "zh-cn", "zh_cn", "cn", "chinese"].includes(normalized)) return "zh";
+  if (["en", "en-us", "en_us", "english"].includes(normalized)) return "en";
+  if (prompt && /[\u4e00-\u9fff]/.test(prompt)) return "zh";
+  if (prompt && /[A-Za-z]/.test(prompt)) return "en";
+  return "";
+}
+
+function defaultLanguageReminder(lang) {
+  if (lang === "zh") return "请用中文回复。";
+  if (lang === "en") return "Respond in English.";
+  return "";
+}
+
+function buildStrictGuard(lang) {
+  if (lang === "zh") {
+    return "自检：在输出前确认整段内容为中文；若发现任何英文（除代码、命令、路径、专有名词或原始日志片段），立即改写为中文后再输出。";
+  }
+  if (lang === "en") {
+    return "Self-check: ensure the entire output is in English; if any non-English text appears (except code, commands, paths, proper nouns, or raw logs), rewrite fully in English before responding.";
+  }
+  return "";
+}
+
+function resolveAcceptLanguage(lang) {
+  if (lang === "zh") return "zh-CN,zh;q=0.9,en;q=0.4";
+  if (lang === "en") return "en-US,en;q=0.9";
+  return "";
+}
+
+function isLikelyChinese(text) {
+  return /[\u4e00-\u9fff]/.test(text);
+}
+
+function isLikelyEnglish(text) {
+  return /[A-Za-z]/.test(text) && !/[\u4e00-\u9fff]/.test(text);
+}
+
+function matchesTargetLanguage(text) {
+  if (!TARGET_LANGUAGE) return true;
+  if (!text || typeof text !== "string") return true;
+  if (TARGET_LANGUAGE === "zh") return isLikelyChinese(text);
+  if (TARGET_LANGUAGE === "en") return isLikelyEnglish(text);
+  return true;
+}
+
+function shouldSkipLanguageSample(text) {
+  if (!text || typeof text !== "string") return true;
+  if (text.length > 2000) return true;
+  if (/^[A-Za-z0-9+/=]+$/.test(text) && text.length > 200) return true;
+  return false;
+}
+
+function extractTextCandidates(payload) {
+  const out = [];
+  const stack = [{ value: payload, key: "" }];
+  while (stack.length > 0) {
+    const { value, key } = stack.pop();
+    if (value === null || value === undefined) continue;
+    if (typeof value === "string") {
+      const k = String(key || "").toLowerCase();
+      if (["text", "delta", "message", "summary", "title", "content"].includes(k)) {
+        out.push(value);
+      }
+      continue;
+    }
+    if (Array.isArray(value)) {
+      for (let i = value.length - 1; i >= 0; i -= 1) {
+        stack.push({ value: value[i], key });
+      }
+      continue;
+    }
+    if (typeof value === "object") {
+      for (const [k, v] of Object.entries(value)) {
+        stack.push({ value: v, key: k });
+      }
+    }
+  }
+  return out;
+}
+
+function createLanguageObserver() {
+  if (!LANGUAGE_CHECK || !TARGET_LANGUAGE) return null;
+  const limit = Number.isFinite(LANGUAGE_CHECK_LIMIT) && LANGUAGE_CHECK_LIMIT > 0 ? LANGUAGE_CHECK_LIMIT : 6;
+  let buffer = "";
+  let violations = 0;
+  let okLogged = false;
+  const logViolation = (type, sample) => {
+    if (violations >= limit) return;
+    violations += 1;
+    log(`language_mismatch target=${TARGET_LANGUAGE} type=${type} sample=${truncateOneLine(sample, 160)}`);
+  };
+  const logOk = (type, sample) => {
+    if (okLogged) return;
+    okLogged = true;
+    log(`language_ok target=${TARGET_LANGUAGE} type=${type} sample=${truncateOneLine(sample, 120)}`);
+  };
+  return {
+    push(chunk) {
+      buffer += chunk;
+      let idx = buffer.indexOf("\n");
+      while (idx !== -1) {
+        const line = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+        if (line.startsWith("data:")) {
+          const payload = line.slice(5).trim();
+          if (payload && payload !== "[DONE]") {
+            let obj;
+            try {
+              obj = JSON.parse(payload);
+            } catch {
+              obj = null;
+            }
+            if (obj) {
+              const type = typeof obj.type === "string" ? obj.type : "unknown";
+              const texts = extractTextCandidates(obj);
+              for (const text of texts) {
+                if (shouldSkipLanguageSample(text)) continue;
+                if (matchesTargetLanguage(text)) logOk(type, text);
+                else logViolation(type, text);
+              }
+            }
+          }
+        }
+        idx = buffer.indexOf("\n");
+      }
+    },
+  };
+}
+
 // ============================================================================
 // INPUT FILTERING
 // ============================================================================
@@ -415,6 +565,33 @@ function addToolRemapMessage(input, hasTools) {
   return [toolRemapMessageItem, ...input];
 }
 
+function addLanguageMessage(input, role) {
+  if (!LANGUAGE_DIRECTIVE || !Array.isArray(input)) return input;
+  const safeRole = role === "user" ? "user" : "developer";
+
+  const languageMessageItem = {
+    type: "message",
+    role: safeRole,
+    content: [{ type: "input_text", text: LANGUAGE_DIRECTIVE }],
+  };
+
+  return [languageMessageItem, ...input];
+}
+
+function addLanguageReminderToUserMessages(input) {
+  if (!LANGUAGE_REMINDER || !Array.isArray(input)) return { input, count: 0 };
+  let count = 0;
+  const updated = input.map((item) => {
+    if (!item || typeof item !== "object") return item;
+    if (item.type !== "message" || item.role !== "user") return item;
+    const content = Array.isArray(item.content) ? item.content.slice() : [];
+    content.push({ type: "input_text", text: LANGUAGE_REMINDER });
+    count += 1;
+    return { ...item, content };
+  });
+  return { input: updated, count };
+}
+
 // ============================================================================
 // REASONING CONFIG
 // ============================================================================
@@ -482,13 +659,27 @@ async function transformRequestBody(body, codexInstructions) {
   transformed.stream = true; // Always stream
 
   // 3. Set instructions
-  transformed.instructions = codexInstructions;
+  if (LANGUAGE_DIRECTIVE) {
+    transformed.instructions = LANGUAGE_STRICT
+      ? `${LANGUAGE_DIRECTIVE}\n\n${codexInstructions}\n\n${LANGUAGE_DIRECTIVE}`
+      : `${codexInstructions}\n\n${LANGUAGE_DIRECTIVE}`;
+  } else {
+    transformed.instructions = codexInstructions;
+  }
 
   // 4. Filter and transform input
   if (transformed.input && Array.isArray(transformed.input)) {
     transformed.input = filterInput(transformed.input);
     transformed.input = addToolRemapMessage(transformed.input, !!transformed.tools);
+    transformed.input = addLanguageMessage(transformed.input, "developer");
+    const reminderResult = addLanguageReminderToUserMessages(transformed.input);
+    transformed.input = reminderResult.input;
     transformed.input = normalizeOrphanedToolOutputs(transformed.input);
+    if (LANGUAGE_DIRECTIVE) {
+      log(
+        `language inject target=${TARGET_LANGUAGE || "unknown"} reminder_count=${reminderResult.count} strict=${LANGUAGE_STRICT ? 1 : 0}`,
+      );
+    }
   }
 
   // 5. Configure reasoning
@@ -496,6 +687,7 @@ async function transformRequestBody(body, codexInstructions) {
 
   // 6. Configure text verbosity (medium is Codex CLI default)
   transformed.text = { verbosity: "medium" };
+
 
   // 7. Add include for encrypted reasoning content
   // Required for stateless operation with store=false
@@ -631,6 +823,9 @@ function createCodexHeaders(originalHeaders, opts) {
   headers.set("chatgpt-account-id", ACCOUNT_ID);
   headers.set("OpenAI-Beta", "responses=experimental");
   headers.set("originator", "codex_cli_rs");
+  const acceptLang = resolveAcceptLanguage(TARGET_LANGUAGE);
+  if (acceptLang) headers.set("accept-language", acceptLang);
+  if (TARGET_LANGUAGE) headers.set("x-tintin-language", TARGET_LANGUAGE);
   headers.set("accept", "text/event-stream");
   headers.set("Content-Type", "application/json");
   const cacheKey = opts?.promptCacheKey;
@@ -744,7 +939,9 @@ async function forwardOnce(req, bodyBuffer, { retryOn401 }) {
       const transformed = await transformRequestBody(bodyJson, instructions);
       promptCacheKey = typeof transformed.prompt_cache_key === "string" ? transformed.prompt_cache_key : "";
       transformedBody = JSON.stringify(transformed);
-      log(`transformed request: model=${bodyJson.model} → ${transformed.model}, reasoning=${JSON.stringify(transformed.reasoning)}`);
+      log(
+        `transformed request: model=${bodyJson.model} → ${transformed.model}, reasoning=${JSON.stringify(transformed.reasoning)} language=${TARGET_LANGUAGE || "unknown"}`,
+      );
     } catch (e) {
       log(`body transform failed, using original: ${e.message}`);
     }
@@ -856,6 +1053,8 @@ async function handler(req, res) {
     if (upstreamRes.body) {
       // Node.js fetch returns a web ReadableStream, need to pipe properly
       const reader = upstreamRes.body.getReader();
+      const decoder = new TextDecoder("utf8");
+      const languageObserver = createLanguageObserver();
       const pump = async () => {
         try {
           while (true) {
@@ -863,6 +1062,9 @@ async function handler(req, res) {
             if (done) {
               res.end();
               break;
+            }
+            if (languageObserver && value) {
+              languageObserver.push(decoder.decode(value, { stream: true }));
             }
             res.write(value);
           }
@@ -890,6 +1092,9 @@ async function handler(req, res) {
 
 const server = http.createServer(handler);
 server.listen(PORT, HOST, () => {
+  log(
+    `language target=${TARGET_LANGUAGE || "unknown"} prompt_len=${LANGUAGE_PROMPT.length} reminder_len=${LANGUAGE_REMINDER.length} strict=${LANGUAGE_STRICT ? 1 : 0} check=${LANGUAGE_CHECK ? 1 : 0}`,
+  );
   log(`listening on http://${HOST}:${PORT} account=${ACCOUNT_ID || "(none)"} access=${redactToken(accessToken)}`);
 });
 

@@ -13,11 +13,13 @@ import type { SendToSessionFn } from "./messaging.js";
 import { redactText } from "./redact.js";
 import { nowMs, sleep } from "./util.js";
 import { PlaywrightMcpManager } from "./playwrightMcp.js";
+import { buildLocalizedPrompt } from "./prompt.js";
 import {
   consumePendingMessages,
   countConcurrentSessionsForChat,
   countSessionsForChat,
   createSession,
+  getUserLanguage,
   listPendingMessages,
   listSessionOffsets,
   upsertSessionOffset,
@@ -26,6 +28,7 @@ import {
 import type { SessionRow } from "./store.js";
 import { getChatgptAccountForIdentity, persistChatgptProxyTokens } from "./chatgpt/oauth.js";
 import { getIdentity } from "./cloud/store.js";
+import { isUserLanguage, t, type UserLanguage } from "../locales/index.js";
 
 interface RunningProcess {
   child: ChildProcessWithoutNullStreams;
@@ -33,6 +36,23 @@ interface RunningProcess {
   kind: "exec" | "resume";
   agent: SessionAgent;
   debug: SpawnedAgentProcess["debug"];
+}
+
+type SessionNoticeKey = Parameters<typeof t>[0];
+type KillReason = string | { key: SessionNoticeKey; params?: Record<string, string | number> };
+
+export class SessionStartError extends Error {
+  constructor(
+    public readonly code: "max_sessions" | "max_concurrent",
+    public readonly limit: number,
+  ) {
+    const message =
+      code === "max_sessions"
+        ? "This chat has reached the max sessions limit"
+        : "This chat has reached the max concurrent sessions limit";
+    super(message);
+    this.name = "SessionStartError";
+  }
 }
 
 export class SessionManager {
@@ -51,8 +71,57 @@ export class SessionManager {
       status: SessionStatus,
       code: number | null,
       signal: NodeJS.Signals | null,
-    ) => Promise<void>,
+  ) => Promise<void>,
   ) {}
+
+  private resolveSessionLanguage(session: { language?: string | null }): UserLanguage {
+    const language = session.language;
+    return typeof language === "string" && isUserLanguage(language) ? language : "en";
+  }
+
+  private applyLanguageEnv(env: Record<string, string>, lang: UserLanguage): Record<string, string> {
+    const out = { ...env };
+    const directive = t("prompt.language_directive", lang);
+    if (directive) {
+      out.CHATGPT_PROXY_LANGUAGE_PROMPT = directive;
+      out.CHATGPT_PROXY_LANGUAGE_PROMPT_B64 = Buffer.from(directive, "utf8").toString("base64");
+    }
+    out.CHATGPT_PROXY_LANGUAGE = lang;
+    if (!out.CHATGPT_PROXY_LANGUAGE_STRICT) out.CHATGPT_PROXY_LANGUAGE_STRICT = "1";
+    if (!out.CHATGPT_PROXY_LANGUAGE_CHECK) out.CHATGPT_PROXY_LANGUAGE_CHECK = "1";
+    out.TINTIN_USER_LANGUAGE = lang;
+    const locale = lang === "zh" ? "zh_CN.UTF-8" : "en_US.UTF-8";
+    if (!out.LANG) out.LANG = locale;
+    if (!out.LC_ALL) out.LC_ALL = locale;
+    return out;
+  }
+
+  private async resolveSessionLanguageById(sessionId: string): Promise<UserLanguage> {
+    const row = await this.db
+      .selectFrom("sessions")
+      .select(["language"])
+      .where("id", "=", sessionId)
+      .executeTakeFirst();
+    return row ? this.resolveSessionLanguage(row) : "en";
+  }
+
+  private async formatSessionText(
+    sessionId: string,
+    key: SessionNoticeKey,
+    params?: Record<string, string | number>,
+  ): Promise<string> {
+    const lang = await this.resolveSessionLanguageById(sessionId);
+    return t(key, lang, params);
+  }
+
+  private async sendSessionNotice(
+    sessionId: string,
+    key: SessionNoticeKey,
+    params?: Record<string, string | number>,
+  ): Promise<void> {
+    const text = await this.formatSessionText(sessionId, key, params);
+    await this.sendToSession(sessionId, { text, priority: "user" });
+  }
 
   async reconcileStaleSessions(): Promise<number> {
     const candidates = await this.db
@@ -90,11 +159,11 @@ export class SessionManager {
 
     const total = await countSessionsForChat(this.db, opts.platform, opts.chatId);
     if (total >= this.config.security.max_sessions_per_chat) {
-      throw new Error("This chat has reached the max sessions limit");
+      throw new SessionStartError("max_sessions", this.config.security.max_sessions_per_chat);
     }
     const conc = await countConcurrentSessionsForChat(this.db, opts.platform, opts.chatId);
     if (conc >= this.config.security.max_concurrent_sessions_per_chat) {
-      throw new Error("This chat has reached the max concurrent sessions limit");
+      throw new SessionStartError("max_concurrent", this.config.security.max_concurrent_sessions_per_chat);
     }
   }
 
@@ -115,6 +184,8 @@ export class SessionManager {
 
     const id = crypto.randomUUID();
     const now = nowMs();
+    const language = await getUserLanguage(this.db, opts.platform, opts.userId);
+    const agentPrompt = buildLocalizedPrompt(opts.initialPrompt, language);
     const session: SessionRow = {
       id,
       agent: opts.agent,
@@ -138,6 +209,7 @@ export class SessionManager {
       created_at: now,
       updated_at: now,
       last_user_message_at: now,
+      language,
     };
 
     await createSession(this.db, session);
@@ -150,7 +222,8 @@ export class SessionManager {
       const sessionsRoot = adapter.resolveSessionsRoot(session.codex_cwd, this.config);
       const homeDir = adapter.resolveHomeDir(sessionsRoot);
       await adapter.ensureSessionsRootExists(sessionsRoot);
-      const envOverrides = await this.maybePrepareChatgptProxy(session, opts.envOverrides ?? {});
+      const envSeed = this.applyLanguageEnv(opts.envOverrides ?? {}, language);
+      const envOverrides = await this.maybePrepareChatgptProxy(session, envSeed);
 
       this.logger.debug(
         `[session] spawn agent=${opts.agent} kind=exec session=${id} project=${opts.projectId} cwd=${session.codex_cwd} sessionsRoot=${sessionsRoot} home=${homeDir}`,
@@ -160,7 +233,7 @@ export class SessionManager {
         config: this.config,
         logger: this.logger,
         cwd: session.codex_cwd,
-        prompt: opts.initialPrompt,
+        prompt: agentPrompt,
         homeDir,
         extraEnv: envOverrides,
         extraArgs: extraArgs ?? undefined,
@@ -170,7 +243,7 @@ export class SessionManager {
       await updateSession(this.db, id, { pid: spawnedProc.child.pid ?? null, started_at: nowMs(), status: "starting" });
 
       const timeout = setTimeout(() => {
-        void this.killSession(id, "timed out, terminating…");
+        void this.killSession(id, { key: "session.timeout_terminating" });
       }, adapter.timeoutSeconds(this.config) * 1000);
 
       this.processes.set(id, {
@@ -189,7 +262,7 @@ export class SessionManager {
       }).catch(async (e) => {
         this.logger.error("session start error", e);
         await updateSession(this.db, id, { status: "error", finished_at: nowMs() });
-        await this.sendToSession(id, { text: `Session error: ${String(e)}`, priority: "user" });
+        await this.sendSessionNotice(id, "session.error", { error: String(e) });
       });
 
       spawnedProc.child.on("exit", (code, signal) => {
@@ -229,7 +302,8 @@ export class SessionManager {
     const sessionsRoot = adapter.resolveSessionsRoot(session.codex_cwd, this.config);
     const homeDir = adapter.resolveHomeDir(sessionsRoot);
     await adapter.ensureSessionsRootExists(sessionsRoot);
-    const envWithChatgpt = await this.maybePrepareChatgptProxy(session, envOverrides ?? {});
+    const envSeed = this.applyLanguageEnv(envOverrides ?? {}, this.resolveSessionLanguage(session));
+    const envWithChatgpt = await this.maybePrepareChatgptProxy(session, envSeed);
 
     // Ensure offsets exist.
     const existingOffsets = await listSessionOffsets(this.db, session.id);
@@ -253,6 +327,7 @@ export class SessionManager {
       }
     }
 
+    const agentPrompt = buildLocalizedPrompt(prompt, this.resolveSessionLanguage(session));
     let spawned;
     try {
       spawned = adapter.spawnResume({
@@ -260,7 +335,7 @@ export class SessionManager {
         logger: this.logger,
         cwd: session.codex_cwd,
         sessionId: session.codex_session_id,
-        prompt,
+        prompt: agentPrompt,
         homeDir,
         extraEnv: envWithChatgpt,
         extraArgs: (await this.playwrightCliArgs(session.agent)) ?? undefined,
@@ -272,7 +347,7 @@ export class SessionManager {
     void spawned.agentSessionId.catch(() => {});
 
     const timeout = setTimeout(() => {
-      void this.killSession(session.id, "timed out, terminating…");
+      void this.killSession(session.id, { key: "session.timeout_terminating" });
     }, adapter.timeoutSeconds(this.config) * 1000);
     this.processes.set(session.id, {
       child: spawned.child,
@@ -340,7 +415,7 @@ export class SessionManager {
       pollMs: 200,
     });
     if (files.length === 0) {
-      await this.sendToSession(sessionId, { text: "Warning: could not locate session JSONL logs for streaming yet.", priority: "user" });
+      await this.sendSessionNotice(sessionId, "session.logs_missing");
       return;
     }
     for (const f of files) {
@@ -354,11 +429,14 @@ export class SessionManager {
     }
   }
 
-  async killSession(sessionId: string, reason: string) {
+  async killSession(sessionId: string, reason: KillReason) {
     const proc = this.processes.get(sessionId);
     if (!proc) return;
-    await this.sendToSession(sessionId, { text: reason, priority: "user" });
-    this.logger.info(`[session] killing session=${sessionId} reason=${reason}`);
+    const text =
+      typeof reason === "string" ? reason : await this.formatSessionText(sessionId, reason.key, reason.params);
+    await this.sendToSession(sessionId, { text, priority: "user" });
+    const reasonLabel = typeof reason === "string" ? reason : reason.key;
+    this.logger.info(`[session] killing session=${sessionId} reason=${reasonLabel}`);
     proc.child.kill("SIGTERM");
     await sleep(200);
     if (!proc.child.killed) {
@@ -441,7 +519,7 @@ export class SessionManager {
     const pending = await listPendingMessages(this.db, sessionId, 100);
     if (pending.length > 0) {
       const next = pending[0]!;
-      await this.sendToSession(sessionId, { text: `Processing 1 queued message…`, priority: "user" });
+      await this.sendSessionNotice(sessionId, "session.processing_queued");
       await consumePendingMessages(this.db, [next.id]);
 
       const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
@@ -451,7 +529,7 @@ export class SessionManager {
       }
     }
 
-    if (status === "killed") await this.sendToSession(sessionId, { text: "Session stopped.", priority: "user" });
+    if (status === "killed") await this.sendSessionNotice(sessionId, "session.stopped");
     else if (status === "finished") {
       // Keep the chat quiet on successful completion.
     } else {
@@ -460,15 +538,16 @@ export class SessionManager {
         if (tail) {
           const maxChars = 1500;
           const snippet = tail.length > maxChars ? `${tail.slice(0, maxChars)}…` : tail;
-          await this.sendToSession(sessionId, {
-            text: `Session exited with code ${code ?? "?"}.\n\n${String(agent ?? "agent")} stderr (tail):\n${snippet}`,
-            priority: "user",
+          await this.sendSessionNotice(sessionId, "session.exited_with_stderr", {
+            code: String(code ?? "?"),
+            agent: String(agent ?? "agent"),
+            snippet,
           });
         } else {
-          await this.sendToSession(sessionId, { text: `Session exited with code ${code ?? "?"}.`, priority: "user" });
+          await this.sendSessionNotice(sessionId, "session.exited", { code: String(code ?? "?") });
         }
       } else {
-        await this.sendToSession(sessionId, { text: `Session exited with code ${code ?? "?"}.`, priority: "user" });
+        await this.sendSessionNotice(sessionId, "session.exited", { code: String(code ?? "?") });
       }
     }
 
@@ -583,6 +662,10 @@ export class SessionManager {
         }
       }
       const host = base.CHATGPT_PROXY_HOST || "127.0.0.1";
+      const languageDirective = base.CHATGPT_PROXY_LANGUAGE_PROMPT ?? t("prompt.language_directive", this.resolveSessionLanguage(session));
+      const languageDirectiveB64 =
+        base.CHATGPT_PROXY_LANGUAGE_PROMPT_B64 ??
+        (languageDirective ? Buffer.from(languageDirective, "utf8").toString("base64") : "");
       const proxyEnv: Record<string, string> = {
         ...base,
         CHATGPT_PROXY_ENABLED: "1",
@@ -595,6 +678,8 @@ export class SessionManager {
         CHATGPT_REFRESH_OUT: refreshPath,
         CHATGPT_PROXY_LOG_PREFIX: base.CHATGPT_PROXY_LOG_PREFIX ?? `[chatgpt][proxy][${session.id}]`,
         CHATGPT_REFRESH_PREFIX: base.CHATGPT_REFRESH_PREFIX ?? `[chatgpt][refresh][${session.id}]`,
+        CHATGPT_PROXY_LANGUAGE_PROMPT: languageDirective,
+        CHATGPT_PROXY_LANGUAGE_PROMPT_B64: languageDirectiveB64,
       };
 
       const proc = spawn(process.execPath, [proxyBin], {

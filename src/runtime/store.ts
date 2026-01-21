@@ -1,4 +1,5 @@
-import type { Db, SessionAgent, SessionStatus, WizardState } from "./db.js";
+import crypto from "node:crypto";
+import type { Db, SessionAgent, SessionStatus, UserLanguage, WizardState } from "./db.js";
 import { nowMs } from "./util.js";
 
 export interface WizardStateRow {
@@ -58,6 +59,52 @@ export async function clearWizardState(db: Db, platform: string, chatId: string,
     .execute();
 }
 
+export async function getUserLanguage(db: Db, platform: string, userId: string): Promise<UserLanguage> {
+  const row = await db
+    .selectFrom("user_preferences")
+    .select("language")
+    .where("platform", "=", platform)
+    .where("user_id", "=", userId)
+    .executeTakeFirst();
+  return (row?.language as UserLanguage) ?? "en";
+}
+
+export async function setUserLanguage(
+  db: Db,
+  platform: string,
+  userId: string,
+  language: UserLanguage,
+): Promise<void> {
+  const now = nowMs();
+  const existing = await db
+    .selectFrom("user_preferences")
+    .select("id")
+    .where("platform", "=", platform)
+    .where("user_id", "=", userId)
+    .executeTakeFirst();
+
+  if (existing) {
+    await db
+      .updateTable("user_preferences")
+      .set({ language, updated_at: now })
+      .where("id", "=", existing.id)
+      .execute();
+    return;
+  }
+
+  await db
+    .insertInto("user_preferences")
+    .values({
+      id: crypto.randomUUID(),
+      platform,
+      user_id: userId,
+      language,
+      created_at: now,
+      updated_at: now,
+    })
+    .execute();
+}
+
 export interface SessionRow {
   id: string;
   agent: SessionAgent;
@@ -81,6 +128,7 @@ export interface SessionRow {
   created_at: number;
   updated_at: number;
   last_user_message_at: number | null;
+  language: UserLanguage;
 }
 
 export async function getSessionBySpace(db: Db, platform: string, chatId: string, spaceId: string) {

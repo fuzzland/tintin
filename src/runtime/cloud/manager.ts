@@ -21,6 +21,8 @@ import { buildCloneUrl } from "./git.js";
 import { createGithubPullRequest, ensureGithubAppToken } from "./githubApp.js";
 import { findRemoteJsonlFiles, getRemoteFileSize, RemoteLogSync } from "./modalLogs.js";
 import { createProxyToken } from "./proxy.js";
+import { isUserLanguage, t, type UserLanguage } from "../../locales/index.js";
+import { buildLocalizedPrompt } from "../prompt.js";
 import { getAgentAdapter } from "../agents.js";
 import { getChatgptAccountForIdentity, persistChatgptProxyTokens } from "../chatgpt/oauth.js";
 import {
@@ -44,6 +46,7 @@ import {
 import {
   createSession,
   deleteSessionOffsets,
+  getUserLanguage,
   listPendingMessages,
   listSessionOffsets,
   consumePendingMessages,
@@ -118,6 +121,27 @@ type HyperbrowserSessionState = {
 };
 
 export class CloudManager {
+  private resolveSessionLanguage(session: { language?: string | null }): UserLanguage {
+    const language = session.language;
+    return typeof language === "string" && isUserLanguage(language) ? language : "en";
+  }
+
+  private applyLanguageEnv(env: Record<string, string>, lang: UserLanguage): Record<string, string> {
+    const out = { ...env };
+    const directive = t("prompt.language_directive", lang);
+    if (directive) {
+      out.CHATGPT_PROXY_LANGUAGE_PROMPT = directive;
+      out.CHATGPT_PROXY_LANGUAGE_PROMPT_B64 = Buffer.from(directive, "utf8").toString("base64");
+    }
+    out.CHATGPT_PROXY_LANGUAGE = lang;
+    if (!out.CHATGPT_PROXY_LANGUAGE_STRICT) out.CHATGPT_PROXY_LANGUAGE_STRICT = "1";
+    if (!out.CHATGPT_PROXY_LANGUAGE_CHECK) out.CHATGPT_PROXY_LANGUAGE_CHECK = "1";
+    out.TINTIN_USER_LANGUAGE = lang;
+    const locale = lang === "zh" ? "zh_CN.UTF-8" : "en_US.UTF-8";
+    if (!out.LANG) out.LANG = locale;
+    if (!out.LC_ALL) out.LC_ALL = locale;
+    return out;
+  }
   private readonly provider: CloudProvider;
   private sessionManager: SessionManager | null;
   private readonly workspaceTerminateTimers = new Map<string, NodeJS.Timeout>();
@@ -1926,6 +1950,8 @@ export class CloudManager {
 
     const sessionId = crypto.randomUUID();
     const now = nowMs();
+      const language = await getUserLanguage(this.db, opts.platform, opts.userId);
+      const agentPrompt = buildLocalizedPrompt(opts.prompt, language);
     await createSession(this.db, {
       id: sessionId,
       agent: opts.agent,
@@ -1949,6 +1975,7 @@ export class CloudManager {
       created_at: now,
       updated_at: now,
       last_user_message_at: now,
+      language,
     });
 
     try {
@@ -1959,6 +1986,7 @@ export class CloudManager {
         "debug",
       );
       envOverrides = this.applyProxyEnv(envOverrides, opts.identityId, opts.agent);
+      envOverrides = this.applyLanguageEnv(envOverrides, language);
       if (opts.agent === "codex") {
         envOverrides = this.normalizeChatgptProxyEnv(sessionId, envOverrides);
       }
@@ -2000,7 +2028,7 @@ export class CloudManager {
         () =>
           this.spawnRemoteAgent({
             sessionId,
-            prompt: opts.prompt,
+            prompt: agentPrompt,
             cwd: opts.projectPath,
             agent: opts.agent,
             workspace: opts.workspace,
@@ -2287,6 +2315,20 @@ export class CloudManager {
     lines.push('BOOTSTRAP_START=$(date +%s)');
     lines.push('BOOTSTRAP_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")');
     lines.push('printf \'{"type":"event_msg","payload":{"type":"background_event","message":"tintin bootstrap start ts=%s"}}\\n\' "$BOOTSTRAP_TS"');
+    lines.push('LANGUAGE_LABEL="${TINTIN_USER_LANGUAGE:-unknown}"');
+    lines.push('LANGUAGE_HINT="${CHATGPT_PROXY_LANGUAGE:-}"');
+    lines.push('LANGUAGE_STRICT="${CHATGPT_PROXY_LANGUAGE_STRICT:-0}"');
+    lines.push('LANGUAGE_CHECK="${CHATGPT_PROXY_LANGUAGE_CHECK:-0}"');
+    lines.push('LANG_PROMPT_LEN=${#CHATGPT_PROXY_LANGUAGE_PROMPT}');
+    lines.push('LANG_PROMPT_B64_LEN=${#CHATGPT_PROXY_LANGUAGE_PROMPT_B64}');
+    lines.push('LANG_REMINDER_LEN=${#CHATGPT_PROXY_LANGUAGE_REMINDER}');
+    lines.push('LANG_ENV="${LANG:-}"');
+    lines.push('CHATGPT_PROXY="${CHATGPT_PROXY_ENABLED:-0}"');
+    lines.push('OPENAI_BASE="${OPENAI_BASE_URL:-}"');
+    lines.push('if [ -z "$OPENAI_BASE" ]; then OPENAI_BASE="${OPENAI_API_BASE:-}"; fi');
+    lines.push(
+      "printf \"{\\\"type\\\":\\\"event_msg\\\",\\\"payload\\\":{\\\"type\\\":\\\"background_event\\\",\\\"message\\\":\\\"tintin lang_init lang=%s hint=%s strict=%s check=%s proxy=%s prompt_len=%s prompt_b64_len=%s reminder_len=%s lang_env=%s openai_base=%s\\\"}}\\n\" \"$LANGUAGE_LABEL\" \"$LANGUAGE_HINT\" \"$LANGUAGE_STRICT\" \"$LANGUAGE_CHECK\" \"$CHATGPT_PROXY\" \"$LANG_PROMPT_LEN\" \"$LANG_PROMPT_B64_LEN\" \"$LANG_REMINDER_LEN\" \"$LANG_ENV\" \"$OPENAI_BASE\"",
+    );
     const promptB64 = Buffer.from(opts.promptText, "utf8").toString("base64");
     lines.push(`PROMPT_PATH=${shellQuote(opts.promptFile)}`);
     lines.push(`PROMPT_B64=${shellQuote(promptB64)}`);
@@ -3040,7 +3082,7 @@ export class CloudManager {
     await updateCloudRun(this.db, run.id, { status: "running", finished_at: null, diff_patch: null, diff_summary: null });
 
     const workspace = this.workspaceFromId(run.workspace_id);
-    const envOverrides = this.applyProxyEnv(
+    const envOverridesBase = this.applyProxyEnv(
       await this.time(
         "env.build",
         () => this.buildAgentEnv(run.identity_id),
@@ -3050,7 +3092,9 @@ export class CloudManager {
       run.identity_id,
       session.agent,
     );
+    const envOverrides = this.applyLanguageEnv(envOverridesBase, this.resolveSessionLanguage(session));
     const normalizedEnv = session.agent === "codex" ? this.normalizeChatgptProxyEnv(session.id, envOverrides) : envOverrides;
+    const agentPrompt = buildLocalizedPrompt(prompt, session.language);
     let playwrightSetup: RemotePlaywrightSetup | null = null;
     if (this.isBrowserbaseEnabled()) {
       const existing = this.buildExistingBrowserbaseSetup(session.id);
@@ -3098,7 +3142,7 @@ export class CloudManager {
           this.spawnRemoteResume({
             sessionId: session.id,
             agentSessionId,
-            prompt,
+            prompt: agentPrompt,
             cwd: session.codex_cwd,
             agent: session.agent,
             workspace,
@@ -3145,6 +3189,7 @@ export class CloudManager {
     let setupSpec = primaryRepoId ? await getLatestSetupSpec(this.db, primaryRepoId) : null;
     let setupSnapshotId: string | null = setupSpec?.snapshot_id ?? run.snapshot_id ?? null;
     let usedSnapshot = false;
+    const agentPrompt = buildLocalizedPrompt(prompt, session.language);
     let workspace: CloudWorkspace;
     const snapshotId = setupSnapshotId;
     if (snapshotId && this.provider.id === "modal") {
@@ -3302,7 +3347,7 @@ export class CloudManager {
       });
       await deleteSessionOffsets(this.db, session.id);
 
-      const envOverrides = this.applyProxyEnv(
+      const envOverridesBase = this.applyProxyEnv(
         await this.time(
           "env.build",
           () => this.buildAgentEnv(run.identity_id),
@@ -3312,6 +3357,7 @@ export class CloudManager {
         run.identity_id,
         session.agent,
       );
+      const envOverrides = this.applyLanguageEnv(envOverridesBase, this.resolveSessionLanguage(session));
       let playwrightSetup: RemotePlaywrightSetup | null = null;
       if (this.isBrowserbaseEnabled()) {
         playwrightSetup = await this.time(
@@ -3347,7 +3393,7 @@ export class CloudManager {
         () =>
           this.spawnRemoteAgent({
             sessionId: session.id,
-            prompt,
+            prompt: agentPrompt,
             cwd: mainRepoPath,
             agent: session.agent,
             workspace,

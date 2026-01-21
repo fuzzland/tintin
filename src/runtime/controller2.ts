@@ -3,7 +3,7 @@ import path from "node:path";
 import type { AppConfig, ProjectEntry } from "./config.js";
 import type { Db, SessionAgent, SessionStatus } from "./db.js";
 import type { Logger } from "./log.js";
-import type { SessionManager } from "./sessionManager.js";
+import { SessionStartError, type SessionManager } from "./sessionManager.js";
 import type { CloudManager } from "./cloud/manager.js";
 import { getAgentAdapter } from "./agents.js";
 import {
@@ -61,9 +61,11 @@ import {
   clearWizardState,
   countPendingMessages,
   enqueuePendingMessage,
+  getUserLanguage,
   getSessionBySpace,
   getWizardState,
   listSessionsForChat,
+  setUserLanguage,
   setWizardState,
   updateSession,
 } from "./store.js";
@@ -76,6 +78,7 @@ import {
   revokeChatgptAccount,
   startChatgptOAuth,
 } from "./chatgpt/oauth.js";
+import { getLanguageLabel, getOtherLanguage, isUserLanguage, t, type UserLanguage } from "../locales/index.js";
 
 const REVIEW_PROMPT = "Run codex review";
 const COMMIT_PROMPT = "Stage all current changes and commit them with a clear, meaningful git commit message summarizing the diff.";
@@ -95,7 +98,6 @@ const buildCommitProposalPrompt = (branchRule: string | null): string => {
 };
 const SESSION_LIST_PAGE_SIZE = 20;
 const PLAYGROUND_REPO_ID = "__playground__";
-const PLAYGROUND_LABEL = "Playground (no repo)";
 type TelegramReplyContext = { replyToMessageId: number; messageThreadId?: number; chat: TelegramChat };
 type IdentityRepo = Awaited<ReturnType<typeof listReposForIdentity>>[number];
 
@@ -315,16 +317,19 @@ export class BotController {
         const replyToMessageId = update.callback_query.message?.message_id;
         if (chatId && typeof replyToMessageId === "number") {
           const msg = e instanceof Error ? e.message : String(e);
-	          try {
-	            await this.telegram.sendMessage({
-	              chatId,
-	              messageThreadId: this.telegramForumThreadIdFromMessage(update.callback_query.message ?? undefined),
-	              replyToMessageId,
-	              text: `Error: ${redactText(msg)}`,
-	              priority: "user",
-	            });
-	          } catch {}
-	        }
+          const actorId = update.callback_query.from?.id;
+          const lang = actorId ? await this.resolveUserLanguage("telegram", String(actorId)) : "en";
+          try {
+            await this.telegram.sendMessage({
+              chatId,
+              messageThreadId: this.telegramForumThreadIdFromMessage(update.callback_query.message ?? undefined),
+              replyToMessageId,
+              text: t("error.generic", lang, { message: redactText(msg) }),
+              replyMarkup: this.buildLanguageToggleTelegram(lang),
+              priority: "user",
+            });
+          } catch {}
+        }
       }
       return;
     }
@@ -354,16 +359,18 @@ export class BotController {
       this.logger.warn("telegram message handler error", e);
       const chatId = String(message.chat.id);
       const msg = e instanceof Error ? e.message : String(e);
-	      try {
-	        await this.telegram.sendMessage({
-	          chatId,
-	          messageThreadId: this.telegramForumThreadIdFromMessage(message),
-	          replyToMessageId: message.message_id,
-	          text: `Error: ${redactText(msg)}`,
-	          priority: "user",
-	        });
-	      } catch {}
-	    }
+      try {
+        const lang = await this.resolveUserLanguage("telegram", actorUserId);
+        await this.telegram.sendMessage({
+          chatId,
+          messageThreadId: this.telegramForumThreadIdFromMessage(message),
+          replyToMessageId: message.message_id,
+          text: t("error.generic", lang, { message: redactText(msg) }),
+          replyMarkup: this.buildLanguageToggleTelegram(lang),
+          priority: "user",
+        });
+      } catch {}
+    }
   }
 
   private async handleTelegramMessage(message: TelegramMessage, userId: string) {
@@ -378,6 +385,7 @@ export class BotController {
       )} reply_to=${String(message.reply_to_message?.message_id ?? "-")} text=${JSON.stringify(safeSnippet(text))}`,
     );
     if (!text) return;
+    const lang = await this.resolveUserLanguage("telegram", userId);
 
     try {
       await this.telegram.setMessageReaction({ chatId, messageId: message.message_id, emoji: "👍" });
@@ -405,15 +413,16 @@ export class BotController {
       const access = await this.telegramAccessDecision(chatId, userId);
       if (!access.allowed) {
         this.logger.warn(`[tg] rejected list sessions chat=${chatId} user=${userId} reason=${access.reason ?? "-"}`);
-	        await this.telegram.sendMessage({
-	          chatId,
-	          messageThreadId: forumThreadId,
-	          replyToMessageId: message.message_id,
-	          text: "Not authorized.",
-	          priority: "user",
-	        });
-	        return;
-	      }
+        await this.telegram.sendMessage({
+          chatId,
+          messageThreadId: forumThreadId,
+          replyToMessageId: message.message_id,
+          text: t("error.not_authorized", lang),
+          replyMarkup: this.buildLanguageToggleTelegram(lang),
+          priority: "user",
+        });
+        return;
+      }
       const sessionPage = await listSessionsForChat({
         db: this.db,
         platform: "telegram",
@@ -426,7 +435,8 @@ export class BotController {
         chatId,
         messageThreadId: forumThreadId,
         replyToMessageId: message.message_id,
-        text: formatSessionList("telegram", { ...sessionPage, filterLabel: formatSessionFilterLabel(listIntent.statuses) }),
+        text: formatSessionList("telegram", lang, { ...sessionPage, filterLabel: formatSessionFilterLabel(listIntent.statuses) }),
+        replyMarkup: this.buildLanguageToggleTelegram(lang),
         priority: "user",
       });
       return;
@@ -441,7 +451,8 @@ export class BotController {
           chatId,
           messageThreadId: forumThreadId,
           replyToMessageId: message.message_id,
-          text: "Not authorized.",
+          text: t("error.not_authorized", lang),
+          replyMarkup: this.buildLanguageToggleTelegram(lang),
           priority: "user",
         });
         return;
@@ -457,12 +468,13 @@ export class BotController {
             anthropic: names.has("ANTHROPIC_API_KEY"),
           };
         }
-        const result = formatSettingsSummary(this.config, settingsIntent.defaultAgent, "telegram", identity, cloudKeyStatus);
+        const result = formatSettingsSummary(this.config, settingsIntent.defaultAgent, "telegram", lang, identity, cloudKeyStatus);
         await this.telegram.sendMessage({
           chatId,
           messageThreadId: forumThreadId,
           replyToMessageId: message.message_id,
           text: result,
+          replyMarkup: this.buildLanguageToggleTelegram(lang),
           priority: "user",
         });
         return;
@@ -472,22 +484,25 @@ export class BotController {
         db: this.db,
         cmd: settingsIntent.cmd,
         identityId: identity.id,
+        lang,
       });
       const identityResult = await applyIdentitySettingsCommand({
         config: this.config,
         db: this.db,
         cmd: settingsIntent.cmd,
         identityId: identity.id,
+        lang,
       });
       const result =
         identityResult ??
         cloudResult ??
-        applySettingsCommand(this.config, settingsIntent.cmd, settingsIntent.defaultAgent, "telegram");
+        applySettingsCommand(this.config, settingsIntent.cmd, settingsIntent.defaultAgent, "telegram", lang);
       await this.telegram.sendMessage({
         chatId,
         messageThreadId: forumThreadId,
         replyToMessageId: message.message_id,
         text: result,
+        replyMarkup: this.buildLanguageToggleTelegram(lang),
         priority: "user",
       });
       return;
@@ -520,15 +535,16 @@ export class BotController {
         this.logger.warn(
           `[tg] rejected session message chat=${chatId} user=${userId} space=${spaceId} session=${session.id} reason=${access.reason ?? "-"}`,
         );
-	        await this.telegram.sendMessage({
-	          chatId,
-	          messageThreadId: forumThreadId,
-	          replyToMessageId: message.message_id,
-	          text: "Not authorized.",
-	          priority: "user",
-	        });
-	        return;
-	      }
+        await this.telegram.sendMessage({
+          chatId,
+          messageThreadId: forumThreadId,
+          replyToMessageId: message.message_id,
+          text: t("error.not_authorized", lang),
+          replyMarkup: this.buildLanguageToggleTelegram(lang),
+          priority: "user",
+        });
+        return;
+      }
       this.logger.debug(`[tg] routed to session id=${session.id} status=${session.status} space=${spaceId}`);
       await updateSession(this.db, session.id, { last_user_message_at: nowMs() });
       await this.handleSessionMessage(session, userId, text);
@@ -557,7 +573,8 @@ export class BotController {
               chatId,
               messageThreadId: forumThreadId,
               replyToMessageId: message.message_id,
-              text: "Not authorized.",
+              text: t("error.not_authorized", lang),
+              replyMarkup: this.buildLanguageToggleTelegram(lang),
               priority: "user",
             });
             return;
@@ -587,14 +604,15 @@ export class BotController {
       const access = await this.telegramAccessDecision(chatId, userId);
       if (!access.allowed) {
         this.logger.warn(`[tg] rejected wizard start chat=${chatId} user=${userId} reason=${access.reason ?? "-"}`);
-	        await this.telegram.sendMessage({
-	          chatId,
-	          messageThreadId: forumThreadId,
-	          replyToMessageId: message.message_id,
-	          text: "Not authorized.",
-	          priority: "user",
-	        });
-	        return;
+        await this.telegram.sendMessage({
+          chatId,
+          messageThreadId: forumThreadId,
+          replyToMessageId: message.message_id,
+          text: t("error.not_authorized", lang),
+          replyMarkup: this.buildLanguageToggleTelegram(lang),
+          priority: "user",
+        });
+        return;
       }
       this.logger.debug(`[tg] starting wizard chat=${chatId} user=${userId}`);
       const agent = detectAgentFromTelegramMessageText(text);
@@ -606,7 +624,8 @@ export class BotController {
           chatId,
           messageThreadId: forumThreadId,
           replyToMessageId: message.message_id,
-          text: `Error: ${redactText(msg)}`,
+          text: t("error.generic", lang, { message: redactText(msg) }),
+          replyMarkup: this.buildLanguageToggleTelegram(lang),
           priority: "user",
         });
         return;
@@ -624,15 +643,16 @@ export class BotController {
     const access = await this.telegramAccessDecision(chatId, userId);
     if (!access.allowed) {
       this.logger.warn(`[tg] rejected wizard continuation chat=${chatId} user=${userId} reason=${access.reason ?? "-"}`);
-	      await this.telegram.sendMessage({
-	        chatId,
-	        messageThreadId: forumThreadId,
-	        replyToMessageId: message.message_id,
-	        text: "Not authorized.",
-	        priority: "user",
-	      });
-	      return;
-	    }
+      await this.telegram.sendMessage({
+        chatId,
+        messageThreadId: forumThreadId,
+        replyToMessageId: message.message_id,
+        text: t("error.not_authorized", lang),
+        replyMarkup: this.buildLanguageToggleTelegram(lang),
+        priority: "user",
+      });
+      return;
+    }
     this.logger.debug(`[tg] wizard continuation state=${wizard.state} chat=${chatId} user=${userId}`);
     await this.continueTelegramWizard(wizard, text, {
       replyToMessageId: message.message_id,
@@ -668,7 +688,40 @@ export class BotController {
     return session.platform === "telegram" && typeof session.space_emoji === "string" && session.space_emoji.trim().length > 0;
   }
 
+  private resolveSessionLanguage(session: SessionRow): UserLanguage {
+    return isUserLanguage(session.language) ? session.language : "en";
+  }
+
+  private async resolveUserLanguage(platform: "telegram" | "slack", userId: string): Promise<UserLanguage> {
+    return await getUserLanguage(this.db, platform, userId);
+  }
+
+  private buildLanguageToggleTelegram(lang: UserLanguage) {
+    const nextLang = getOtherLanguage(lang);
+    return {
+      inline_keyboard: [[{ text: getLanguageLabel(nextLang), callback_data: `lang:${nextLang}` }]],
+    };
+  }
+
+  private buildLanguageToggleSlackBlocks(lang: UserLanguage) {
+    const nextLang = getOtherLanguage(lang);
+    return [
+      {
+        type: "actions",
+        elements: [
+          {
+            type: "button",
+            text: { type: "plain_text", text: getLanguageLabel(nextLang) },
+            action_id: "switch_language",
+            value: nextLang,
+          },
+        ],
+      },
+    ];
+  }
+
   private async sendSessionMessageMarkdown(session: SessionRow, text: string) {
+    const lang = this.resolveSessionLanguage(session);
     if (session.platform === "telegram") {
       if (!this.telegram) return;
       const chatId = Number(session.chat_id);
@@ -676,15 +729,21 @@ export class BotController {
       if (Number.isNaN(chatId) || Number.isNaN(space)) return;
       await this.telegram.sendMessage(
         this.isTelegramTopicSession(session)
-          ? { chatId, messageThreadId: space, text, priority: "user" }
-          : { chatId, replyToMessageId: space, text, priority: "user" },
+          ? { chatId, messageThreadId: space, text, priority: "user", replyMarkup: this.buildLanguageToggleTelegram(lang) }
+          : { chatId, replyToMessageId: space, text, priority: "user", replyMarkup: this.buildLanguageToggleTelegram(lang) },
       );
       return;
     }
     if (session.platform === "slack") {
       if (!this.slack) return;
       const threadTs = this.config.slack?.session_mode === "thread" ? session.space_id : undefined;
-      await this.slack.postMessageDetailed({ channel: session.chat_id, thread_ts: threadTs, text, blocksOnLastChunk: false });
+      await this.slack.postMessageDetailed({
+        channel: session.chat_id,
+        thread_ts: threadTs,
+        text,
+        blocks: this.buildLanguageToggleSlackBlocks(lang),
+        blocksOnLastChunk: false,
+      });
     }
   }
 
@@ -698,6 +757,7 @@ export class BotController {
     slackThreadTs?: string;
     ephemeral?: boolean;
   }) {
+    const lang = await this.resolveUserLanguage(opts.platform, opts.userId);
     if (opts.platform === "telegram") {
       if (!this.telegram) return;
       await this.telegram.sendMessage({
@@ -705,6 +765,7 @@ export class BotController {
         text: opts.text,
         replyToMessageId: opts.replyToMessageId,
         messageThreadId: opts.messageThreadId,
+        replyMarkup: this.buildLanguageToggleTelegram(lang),
         priority: "user",
       });
       return;
@@ -713,28 +774,50 @@ export class BotController {
     const isDm = opts.chatId.startsWith("D");
     const ephemeral = opts.ephemeral ?? !isDm;
     if (ephemeral && !isDm) {
-      await this.slack.postEphemeral({ channel: opts.chatId, user: opts.userId, text: opts.text });
+      await this.slack.postEphemeral({
+        channel: opts.chatId,
+        user: opts.userId,
+        text: opts.text,
+        blocks: this.buildLanguageToggleSlackBlocks(lang),
+      });
       return;
     }
     await this.slack.postMessageDetailed({
       channel: opts.chatId,
       thread_ts: opts.slackThreadTs,
       text: opts.text,
+      blocks: this.buildLanguageToggleSlackBlocks(lang),
     });
   }
 
-  private buildRunActionTelegramKeyboard(sessionId: string, runId: string, viewUrl?: string | null, vscodeUrl?: string | null) {
+  private buildRunActionTelegramKeyboard(
+    sessionId: string,
+    runId: string,
+    lang: UserLanguage,
+    viewUrl?: string | null,
+    vscodeUrl?: string | null,
+  ) {
     const rows: Array<Array<{ text: string; callback_data?: string; url?: string }>> = [
-      [{ text: "Stop", callback_data: `kill:${sessionId}` }, { text: "Status", callback_data: `run_status:${runId}` }],
+      [
+        { text: t("button.stop", lang), callback_data: `kill:${sessionId}` },
+        { text: t("button.status", lang), callback_data: `run_status:${runId}` },
+      ],
     ];
     const linkRow: Array<{ text: string; url: string }> = [];
-    if (viewUrl) linkRow.push({ text: "View", url: viewUrl });
-    if (vscodeUrl) linkRow.push({ text: "VSCode", url: vscodeUrl });
+    if (viewUrl) linkRow.push({ text: t("button.view", lang), url: viewUrl });
+    if (vscodeUrl) linkRow.push({ text: t("button.vscode", lang), url: vscodeUrl });
     if (linkRow.length > 0) rows.push(linkRow);
+    rows.push([{ text: getLanguageLabel(getOtherLanguage(lang)), callback_data: `lang:${getOtherLanguage(lang)}` }]);
     return { inline_keyboard: rows };
   }
 
-  private buildRunActionSlackBlocks(sessionId: string, runId: string, viewUrl?: string | null, vscodeUrl?: string | null) {
+  private buildRunActionSlackBlocks(
+    sessionId: string,
+    runId: string,
+    lang: UserLanguage,
+    viewUrl?: string | null,
+    vscodeUrl?: string | null,
+  ) {
     const elements: Array<{
       type: string;
       text: { type: string; text: string };
@@ -743,15 +826,27 @@ export class BotController {
       value?: string;
       url?: string;
     }> = [
-      { type: "button", text: { type: "plain_text", text: "Stop" }, style: "danger", action_id: "kill_session", value: sessionId },
-      { type: "button", text: { type: "plain_text", text: "Status" }, action_id: "run_status", value: runId },
+      {
+        type: "button",
+        text: { type: "plain_text", text: t("button.stop", lang) },
+        style: "danger",
+        action_id: "kill_session",
+        value: sessionId,
+      },
+      { type: "button", text: { type: "plain_text", text: t("button.status", lang) }, action_id: "run_status", value: runId },
     ];
     if (viewUrl) {
-      elements.push({ type: "button", text: { type: "plain_text", text: "View" }, action_id: "view_run", url: viewUrl });
+      elements.push({ type: "button", text: { type: "plain_text", text: t("button.view", lang) }, action_id: "view_run", url: viewUrl });
     }
     if (vscodeUrl) {
-      elements.push({ type: "button", text: { type: "plain_text", text: "VSCode" }, action_id: "open_vscode", url: vscodeUrl });
+      elements.push({ type: "button", text: { type: "plain_text", text: t("button.vscode", lang) }, action_id: "open_vscode", url: vscodeUrl });
     }
+    elements.push({
+      type: "button",
+      text: { type: "plain_text", text: getLanguageLabel(getOtherLanguage(lang)) },
+      action_id: "switch_language",
+      value: getOtherLanguage(lang),
+    });
     return [{ type: "actions", elements }];
   }
 
@@ -768,6 +863,7 @@ export class BotController {
     messageThreadId?: number;
     slackThreadTs?: string;
   }) {
+    const lang = await this.resolveUserLanguage(opts.platform, opts.userId);
     if (opts.platform === "telegram") {
       if (!this.telegram) return;
       await this.telegram.sendMessage({
@@ -775,7 +871,7 @@ export class BotController {
         text: opts.text,
         replyToMessageId: opts.replyToMessageId,
         messageThreadId: opts.messageThreadId,
-        replyMarkup: this.buildRunActionTelegramKeyboard(opts.sessionId, opts.runId, opts.viewUrl, opts.vscodeUrl),
+        replyMarkup: this.buildRunActionTelegramKeyboard(opts.sessionId, opts.runId, lang, opts.viewUrl, opts.vscodeUrl),
         priority: "user",
       });
       return;
@@ -785,7 +881,7 @@ export class BotController {
       channel: opts.chatId,
       thread_ts: opts.slackThreadTs,
       text: opts.text,
-      blocks: this.buildRunActionSlackBlocks(opts.sessionId, opts.runId, opts.viewUrl, opts.vscodeUrl),
+      blocks: this.buildRunActionSlackBlocks(opts.sessionId, opts.runId, lang, opts.viewUrl, opts.vscodeUrl),
       blocksOnLastChunk: false,
     });
   }
@@ -801,8 +897,9 @@ export class BotController {
     messageThreadId?: number;
     slackThreadTs?: string;
   }) {
+    const lang = await this.resolveUserLanguage(opts.platform, opts.userId);
     if (!this.cloudManager || !this.config.cloud?.enabled) {
-      await this.sendCloudMessage({ ...opts, text: "Cloud mode is disabled." });
+      await this.sendCloudMessage({ ...opts, text: t("cloud.disabled", lang) });
       return;
     }
     const identity = await getOrCreateIdentity(this.db, {
@@ -812,11 +909,13 @@ export class BotController {
     });
     const run = await getCloudRun(this.db, opts.runId);
     if (!run || run.identity_id !== identity.id) {
-      await this.sendCloudMessage({ ...opts, text: "Run not found." });
+      await this.sendCloudMessage({ ...opts, text: t("run.not_found", lang) });
       return;
     }
     const link = this.buildCloudUiLink(run.id, identity.id, opts.isDirect);
-    const text = link ? `Run ${run.id}: ${run.status}\nView: ${link}` : `Run ${run.id}: ${run.status}`;
+    const text = link
+      ? t("run.status_with_link", lang, { id: run.id, status: run.status, url: link })
+      : t("run.status_line", lang, { id: run.id, status: run.status });
     await this.sendCloudMessage({ ...opts, text });
   }
 
@@ -827,19 +926,20 @@ export class BotController {
   }): Promise<void> {
     if (!this.commitProposalStore) return;
     const isCloudSession = await this.isCloudSession(opts.session);
+    const lang = this.resolveSessionLanguage(opts.session);
     if (!this.cloudManager || !isCloudSession) {
-      await this.sendSessionMessageMarkdown(opts.session, "*Cloud commit not available for this session.*");
+      await this.sendSessionMessageMarkdown(opts.session, t("commit.cloud_unavailable", lang));
       return;
     }
 
     this.commitProposalStore.consumeProposal(opts.proposal.id);
 
     if (opts.action === "cancel") {
-      await this.sendSessionMessageMarkdown(opts.session, "*Commit proposal canceled.*");
+      await this.sendSessionMessageMarkdown(opts.session, t("commit.proposal.canceled", lang));
       return;
     }
 
-    await this.sendSessionMessageMarkdown(opts.session, "*Committing and pushing…*");
+    await this.sendSessionMessageMarkdown(opts.session, t("commit.committing", lang));
     try {
       await this.cloudManager.commitAndPushRun({
         sessionId: opts.session.id,
@@ -849,18 +949,17 @@ export class BotController {
         gitUserEmail: opts.proposal.gitUserEmail,
       });
     } catch (e) {
-      await this.sendSessionMessageMarkdown(
-        opts.session,
-        `*Commit failed:* ${redactText(e instanceof Error ? e.message : String(e))}`,
-      );
+      await this.sendSessionMessageMarkdown(opts.session, t("commit.failed", lang, {
+        error: redactText(e instanceof Error ? e.message : String(e)),
+      }));
       return;
     }
 
     if (opts.action === "push") {
       const lines = [
-        "*Commit pushed.*",
-        `- Branch: \`${opts.proposal.branchName}\``,
-        `- Commit: \`${opts.proposal.commitMessage}\``,
+        t("commit.pushed.title", lang),
+        t("commit.pushed.branch", lang, { branch: opts.proposal.branchName }),
+        t("commit.pushed.commit", lang, { message: opts.proposal.commitMessage }),
       ];
       await this.sendSessionMessageMarkdown(opts.session, lines.join("\n"));
       return;
@@ -874,17 +973,17 @@ export class BotController {
         body: opts.proposal.summary ? `Summary:\n${opts.proposal.summary}` : undefined,
       });
       const lines = [
-        "*Pull request created.*",
-        `- Branch: \`${opts.proposal.branchName}\``,
-        `- Base: \`${pr.base}\``,
-        pr.url ? `- PR: [View PR](${pr.url})` : "- PR created.",
+        t("commit.pr.created.title", lang),
+        t("commit.pr.created.branch", lang, { branch: opts.proposal.branchName }),
+        t("commit.pr.created.base", lang, { base: pr.base }),
+        pr.url ? t("commit.pr.created.link", lang, { url: pr.url }) : t("commit.pr.created.no_link", lang),
       ];
       await this.sendSessionMessageMarkdown(opts.session, lines.join("\n"));
     } catch (e) {
       const lines = [
-        "*Commit pushed, but PR creation failed.*",
-        `- Branch: \`${opts.proposal.branchName}\``,
-        `- Error: ${redactText(e instanceof Error ? e.message : String(e))}`,
+        t("commit.pr.failed.title", lang),
+        t("commit.pr.failed.branch", lang, { branch: opts.proposal.branchName }),
+        t("commit.pr.failed.error", lang, { error: redactText(e instanceof Error ? e.message : String(e)) }),
       ];
       await this.sendSessionMessageMarkdown(opts.session, lines.join("\n"));
     }
@@ -898,9 +997,10 @@ export class BotController {
     messageThreadId?: number;
     slackThreadTs?: string;
   }) {
+    const lang = await this.resolveUserLanguage(opts.platform, opts.userId);
     await this.sendCloudMessage({
       ...opts,
-      text: buildCloudHelpText(opts.platform),
+      text: buildCloudHelpText(opts.platform, lang),
     });
   }
 
@@ -936,12 +1036,13 @@ export class BotController {
     messageThreadId?: number;
     slackThreadTs?: string;
   }): Promise<boolean> {
+    const lang = await this.resolveUserLanguage(opts.platform, opts.userId);
     if (!this.cloudManager || !this.config.cloud?.enabled) {
       await this.sendCloudMessage({
         platform: opts.platform,
         chatId: opts.chatId,
         userId: opts.userId,
-        text: "Cloud mode is disabled.",
+        text: t("cloud.disabled", lang),
         replyToMessageId: opts.replyToMessageId,
         messageThreadId: opts.messageThreadId,
         slackThreadTs: opts.slackThreadTs,
@@ -960,7 +1061,7 @@ export class BotController {
         platform: opts.platform,
         chatId: opts.chatId,
         userId: opts.userId,
-        text: "Please complete setup in a 1:1 chat with the bot before using cloud mode in groups.",
+        text: t("cloud.setup_required", lang),
         replyToMessageId: opts.replyToMessageId,
         messageThreadId: opts.messageThreadId,
         slackThreadTs: opts.slackThreadTs,
@@ -980,19 +1081,22 @@ export class BotController {
         ephemeral,
       });
     };
+    const replyText = async (key: Parameters<typeof t>[0], params?: Record<string, string | number>, ephemeral?: boolean) => {
+      await reply(t(key, lang, params), ephemeral);
+    };
     const cmdPrefix = opts.platform === "telegram" ? "/" : "";
     const formatCmd = (value: string) => `\`${cmdPrefix}${value}\``;
 
     const cloud = this.config.cloud;
     if (!cloud) {
-      await reply("Cloud configuration is missing.");
+      await replyText("cloud.config_missing");
       return true;
     }
 
     switch (opts.command.kind) {
       case "connect": {
         if (!opts.isDirect) {
-          await reply(`Run ${formatCmd("connect")} in a 1:1 chat with the bot.`);
+          await replyText("connect.dm_only", { cmd: formatCmd("connect") });
           return true;
         }
         const cmd = opts.command as Extract<CloudCommand, { kind: "connect" }>;
@@ -1006,39 +1110,43 @@ export class BotController {
         try {
           if (provider === "chatgpt") {
             if (!this.config.chatgpt_oauth) {
-              await reply("ChatGPT OAuth is not configured.");
+              await replyText("connect.chatgpt.not_configured");
               return true;
             }
             if (cmd.subcommand === "status") {
               const account = await getChatgptAccountForIdentity({ db: this.db, config: this.config, identityId: identity.id });
               if (!account) {
-                await reply("No ChatGPT account linked.", true);
+                await replyText("connect.chatgpt.none", undefined, true);
                 return true;
               }
               const lines = [
-                "*ChatGPT account*",
-                `- Account ID: \`${account.chatgptUserId}\``,
-                account.email ? `- Email: \`${account.email}\`` : "- Email: (unknown)",
-                `- Expires at: \`${new Date(account.expiresAt).toISOString()}\``,
-                account.workspaceId ? `- Workspace: \`${account.workspaceId}\`` : "- Workspace: (none)",
+                t("connect.chatgpt.status.title", lang),
+                t("connect.chatgpt.status.account_id", lang, { id: account.chatgptUserId }),
+                account.email
+                  ? t("connect.chatgpt.status.email", lang, { email: account.email })
+                  : t("connect.chatgpt.status.email_unknown", lang),
+                t("connect.chatgpt.status.expires", lang, { ts: new Date(account.expiresAt).toISOString() }),
+                account.workspaceId
+                  ? t("connect.chatgpt.status.workspace", lang, { workspace: account.workspaceId })
+                  : t("connect.chatgpt.status.workspace_none", lang),
               ];
-            await reply(lines.join("\n"), true);
-            return true;
-          }
-          if (cmd.subcommand === "revoke") {
-            this.logger.info(
-              `[chatgpt][oauth] revoke requested platform=${opts.platform} chat=${opts.chatId} user=${opts.userId} identity=${identity.id}`,
-            );
-            await revokeChatgptAccount({ db: this.db, identityId: identity.id });
-            this.logger.info(`[chatgpt][oauth] revoked identity=${identity.id}`);
-            await reply("ChatGPT account unlinked.", true);
-            return true;
-          }
+              await reply(lines.join("\n"), true);
+              return true;
+            }
+            if (cmd.subcommand === "revoke") {
+              this.logger.info(
+                `[chatgpt][oauth] revoke requested platform=${opts.platform} chat=${opts.chatId} user=${opts.userId} identity=${identity.id}`,
+              );
+              await revokeChatgptAccount({ db: this.db, identityId: identity.id });
+              this.logger.info(`[chatgpt][oauth] revoked identity=${identity.id}`);
+              await replyText("connect.chatgpt.unlinked", undefined, true);
+              return true;
+            }
             // Manual paste flow: /connect chatgpt <redirect-url>
             if (cmd.payload) {
               const parsed = parseChatgptAuthInput(cmd.payload);
               if (!parsed.code || !parsed.state) {
-                await reply("Please paste the full redirect URL so I can read both code and state.");
+                await replyText("connect.chatgpt.paste_redirect");
                 return true;
               }
               try {
@@ -1056,9 +1164,9 @@ export class BotController {
                 this.logger.info(
                   `[chatgpt][oauth] linked account platform=${opts.platform} chat=${opts.chatId} identity=${identity.id} state=${parsed.state}`,
                 );
-                await reply("ChatGPT connected.", true);
+                await replyText("connect.chatgpt.connected", { cmd: formatCmd("connect chatgpt status") }, true);
               } catch (e) {
-                await reply(`ChatGPT connect failed: ${String(e)}`);
+                await replyText("connect.chatgpt.failed", { error: String(e) });
               }
               return true;
             }
@@ -1069,18 +1177,18 @@ export class BotController {
               metadataJson,
             });
             const lines = [
-              "*ChatGPT sign-in*",
-              "Open this link to sign in with ChatGPT.",
+              t("connect.chatgpt.signin.title", lang),
+              t("connect.chatgpt.signin.open_link", lang),
               authorizeUrl,
               "",
-              "*Important*: after login, copy the full redirect URL from your browser and send it with:",
+              t("connect.chatgpt.signin.instructions", lang),
               `- ${formatCmd("connect chatgpt <paste-full-redirect-url>")}`,
             ];
             await reply(lines.join("\n"), true);
             return true;
           }
           if (!cloud?.public_base_url) {
-            await reply("Missing [cloud].public_base_url configuration.");
+            await replyText("cloud.public_base_missing");
             return true;
           }
           if (provider === "github") {
@@ -1123,35 +1231,35 @@ export class BotController {
                 const existing = activeConnections[0]!;
                 const installationId = existing.connection.installation_id ?? null;
                 const connectedAt = existing.connection.updated_at ? new Date(existing.connection.updated_at).toISOString() : null;
-                const lines = ["*GitHub already connected*"];
+                const lines = [t("github.already_connected.title", lang)];
                 if (existing.installation?.account_login) {
                   const accountType = existing.installation.account_type ?? "unknown";
-                  lines.push(`- *Account:* \`${existing.installation.account_login}\` (${accountType})`);
+                  lines.push(t("github.already_connected.account", lang, { login: existing.installation.account_login, type: accountType }));
                 } else {
-                  lines.push("- *Account:* _(unknown; reconnect to refresh)_");
+                  lines.push(t("github.already_connected.account_unknown", lang));
                 }
                 if (existing.installation?.status && existing.installation.status !== "active") {
-                  lines.push(`- *Status:* \`${existing.installation.status}\``);
+                  lines.push(t("github.already_connected.status", lang, { status: existing.installation.status }));
                 }
-                if (installationId) lines.push(`- *Installation ID:* \`${installationId}\``);
-                if (connectedAt) lines.push(`- *Connected at:* \`${connectedAt}\``);
+                if (installationId) lines.push(t("github.already_connected.installation_id", lang, { id: installationId }));
+                if (connectedAt) lines.push(t("github.already_connected.connected_at", lang, { ts: connectedAt }));
                 await reply(lines.join("\n"), true);
                 return true;
               }
-              const lines = ["*GitHub already connected*", "Active installations:"];
+              const lines = [t("github.already_connected.title", lang), t("github.already_connected.active_installations", lang)];
               for (const item of activeConnections) {
                 const installationId = item.connection.installation_id ?? "unknown";
                 const login = item.installation?.account_login ?? "unknown";
                 const accountType = item.installation?.account_type ?? "unknown";
                 const status = item.installation?.status ?? "unknown";
-                lines.push(`- \`${installationId}\`: ${login} (${accountType}), status=${status}`);
+                lines.push(t("github.already_connected.installation_item", lang, { id: installationId, login, type: accountType, status }));
               }
-              lines.push("", `Use ${formatCmd("disconnect github --installation <id>")} to remove a specific installation.`);
+              lines.push("", t("github.already_connected.disconnect_hint", lang, { cmd: formatCmd("disconnect github --installation <id>") }));
               await reply(lines.join("\n"), true);
               return true;
             }
             if (!cloud.github_app) {
-              await reply("Missing [cloud].github_app configuration.");
+              await replyText("github.missing_config");
               return true;
             }
             const { authorizeUrl } = await startGithubAppFlow({
@@ -1161,7 +1269,7 @@ export class BotController {
               redirectBase: cloud.public_base_url,
               metadataJson,
             });
-            await reply(`Install the GitHub App here:\n${authorizeUrl}`, true);
+            await replyText("github.install_link", { url: authorizeUrl }, true);
             return true;
           }
           const { authorizeUrl } = await startOAuthFlow({
@@ -1172,25 +1280,25 @@ export class BotController {
             redirectBase: cloud.public_base_url,
             metadataJson,
           });
-          await reply(`Authorize ${provider} here:\n${authorizeUrl}`, true);
+          await replyText("oauth.authorize_link", { provider, url: authorizeUrl }, true);
         } catch (e) {
-          await reply(`Connect failed: ${String(e)}`);
+          await replyText("connect.failed", { error: String(e) });
         }
         return true;
       }
       case "disconnect": {
         if (!opts.isDirect) {
-          await reply(`Run ${formatCmd("disconnect github")} in a 1:1 chat with the bot.`);
+          await replyText("disconnect.dm_only", { cmd: formatCmd("disconnect github") });
           return true;
         }
         const cmd = opts.command as Extract<CloudCommand, { kind: "disconnect" }>;
         const provider = cmd.provider;
         if (provider !== "github") {
-          await reply(`Disconnect not supported for ${provider}.`);
+          await replyText("disconnect.not_supported", { provider });
           return true;
         }
         if (!cloud.github_app) {
-          await reply("Missing [cloud].github_app configuration.");
+          await replyText("github.missing_config");
           return true;
         }
         const confirmToken = (cmd.confirmToken ?? "").trim();
@@ -1202,21 +1310,21 @@ export class BotController {
             tokenHash,
           });
           if (!pending) {
-            await reply("Invalid or expired disconnect token. Run `disconnect github` again.");
+            await replyText("disconnect.token.invalid");
             return true;
           }
           let payload: { installationIds?: string[] } = {};
           try {
             payload = JSON.parse(pending.payload_json ?? "{}") as { installationIds?: string[] };
           } catch {
-            await reply("Disconnect token payload is invalid. Run `disconnect github` again.");
+            await replyText("disconnect.token.payload_invalid");
             return true;
           }
           const installationIds = Array.isArray(payload.installationIds)
             ? payload.installationIds.filter((id) => typeof id === "string" && id.trim().length > 0)
             : [];
           if (installationIds.length === 0) {
-            await reply("Disconnect token missing installation targets. Run `disconnect github` again.");
+            await replyText("disconnect.token.missing_targets");
             return true;
           }
           const results: string[] = [];
@@ -1231,21 +1339,27 @@ export class BotController {
                 cloudManager: this.cloudManager,
               });
               results.push(
-                `- \`${installationId}\`: removed repos=${impact.repos}, runs=${impact.runs}, sessions=${impact.sessions}, screenshots=${impact.screenshots}`,
+                t("disconnect.result_item", lang, {
+                  installationId,
+                  repos: impact.repos,
+                  runs: impact.runs,
+                  sessions: impact.sessions,
+                  screenshots: impact.screenshots,
+                }),
               );
             } catch (e) {
-              await reply(`Disconnect failed for ${installationId}: ${String(e)}`);
+              await replyText("disconnect.failed_for_installation", { installationId, error: String(e) });
               return true;
             }
           }
-          const lines = ["*GitHub App disconnected.*", ...results];
+          const lines = [t("disconnect.success_title", lang), ...results];
           await reply(lines.join("\n"), true);
           return true;
         }
 
         const installations = await listGithubInstallationsForIdentity(this.db, identity.id);
         if (installations.length === 0) {
-          await reply("No GitHub App installations connected.");
+          await replyText("disconnect.none_installed");
           return true;
         }
         let targetIds: string[] = [];
@@ -1254,17 +1368,17 @@ export class BotController {
         } else if (cmd.installationId) {
           const match = installations.find((row) => row.installation_id === cmd.installationId);
           if (!match) {
-            await reply(`Installation not found: ${cmd.installationId}`);
+            await replyText("disconnect.installation_not_found", { id: cmd.installationId });
             return true;
           }
           targetIds = [match.installation_id];
         } else if (installations.length === 1) {
           targetIds = [installations[0]!.installation_id];
         } else {
-          const lines = ["Multiple GitHub App installations found. Use one of:", ""];
+          const lines = [t("disconnect.multiple_found", lang), ""];
           for (const row of installations) {
             const login = row.account_login ?? "unknown";
-            lines.push(`- ${formatCmd(`disconnect github --installation ${row.installation_id}`)} (${login})`);
+            lines.push(t("disconnect.multiple_option", lang, { cmd: formatCmd(`disconnect github --installation ${row.installation_id}`), login }));
           }
           lines.push(`- ${formatCmd("disconnect github --all")}`);
           await reply(lines.join("\n"), true);
@@ -1285,15 +1399,21 @@ export class BotController {
           ttlMs: 10 * 60 * 1000,
         });
         const lines = [
-          "*Disconnect GitHub App*",
-          "Uninstall the GitHub App in GitHub settings before confirming.",
+          t("disconnect.confirm_title", lang),
+          t("disconnect.uninstall_notice", lang),
           "",
-          "Targets:",
+          t("disconnect.targets", lang),
           ...impacts.map((impact) => {
-            return `- \`${impact.installationId}\`: repos=${impact.repos}, runs=${impact.runs}, sessions=${impact.sessions}, screenshots=${impact.screenshots}`;
+            return t("disconnect.result_item", lang, {
+              installationId: impact.installationId,
+              repos: impact.repos,
+              runs: impact.runs,
+              sessions: impact.sessions,
+              screenshots: impact.screenshots,
+            });
           }),
           "",
-          `Confirm with: ${formatCmd(`disconnect github confirm ${token}`)}`,
+          t("disconnect.confirm_with", lang, { cmd: formatCmd(`disconnect github confirm ${token}`) }),
         ];
         await reply(lines.join("\n"), true);
         return true;
@@ -1301,10 +1421,10 @@ export class BotController {
       case "connections": {
         const conns = await listConnections(this.db, identity.id);
         if (conns.length === 0) {
-          await reply("No connections yet.");
+          await replyText("connections.none");
           return true;
         }
-        const lines = conns.map((c) => `- ${c.type} (connected)`);
+        const lines = conns.map((c) => t("connections.item", lang, { type: c.type }));
         await reply(lines.join("\n"));
         return true;
       }
@@ -1434,10 +1554,14 @@ export class BotController {
           const needle = cmd.search.toLowerCase();
           repos = repos.filter((r) => r.name.toLowerCase().includes(needle));
         }
-        const playgroundLine = "0. `Playground` (no repo)";
+        const playgroundLabel = t("repo.playground_label", lang);
+        const playgroundLine = t("repos.playground_line", lang, { label: playgroundLabel });
         this.lastRepoListByIdentity.set(identity.id, repos.map((r) => r.id));
-        const title = "*Repos*";
-        const selectHint = `Select with ${formatCmd("repo select <number>")} or ${formatCmd("repo select playground")}.`;
+        const title = t("repos.title", lang);
+        const selectHint = t("repos.select_hint", lang, {
+          select: formatCmd("repo select <number>"),
+          playground: formatCmd("repo select playground"),
+        });
         if (repos.length === 0) {
           const lines = [title, playgroundLine, "", selectHint];
           await reply(lines.join("\n"));
@@ -1451,48 +1575,53 @@ export class BotController {
         const repos = await listReposForIdentity(this.db, identity.id);
         const cmd = opts.command as Extract<CloudCommand, { kind: "repo_select" }>;
         const target = cmd.target.trim();
+        const playgroundLabel = t("repo.playground_label", lang);
         if (isPlaygroundTarget(target)) {
           await setIdentityActiveRepo(this.db, identity.id, PLAYGROUND_REPO_ID);
-          await reply(`Active repo set to ${PLAYGROUND_LABEL}.`);
+          await replyText("repo.active_set_playground", { label: playgroundLabel });
           return true;
         }
         const repo = this.resolveRepoTarget(identity.id, repos, target);
         if (!repo) {
-          await reply(`Repo not found. Use ${formatCmd("repos")} to list.`);
+          await replyText("repo.not_found_use_repos", { cmd: formatCmd("repos") });
           return true;
         }
         await setIdentityActiveRepo(this.db, identity.id, repo.id);
-        await reply(`Active repo set to ${repo.name} (id=${repo.id}).`);
+        await replyText("repo.active_set", { name: repo.name, id: repo.id });
         return true;
       }
       case "repo_current": {
+        const playgroundLabel = t("repo.playground_label", lang);
         if (isPlaygroundRepoId(identity.active_repo_id)) {
-          await reply(`Active repo: ${PLAYGROUND_LABEL}.`);
+          await replyText("repo.active_label", { label: playgroundLabel });
           return true;
         }
         if (!identity.active_repo_id) {
-          await reply(`No active repo. Use ${formatCmd("repo select <number>")} or ${formatCmd("repo select playground")}.`);
+          await replyText("repo.none_active", {
+            select: formatCmd("repo select <number>"),
+            playground: formatCmd("repo select playground"),
+          });
           return true;
         }
         const repos = await listReposForIdentity(this.db, identity.id);
         const repo = repos.find((r) => r.id === identity.active_repo_id);
         if (!repo) {
-          await reply(`Active repo not found. Use ${formatCmd("repo select <number>")} again.`);
+          await replyText("repo.active_not_found", { cmd: formatCmd("repo select <number>") });
           return true;
         }
-        await reply(`Active repo: ${repo.name} (id=${repo.id}).`);
+        await replyText("repo.active_detail", { name: repo.name, id: repo.id });
         return true;
       }
       case "repo_share": {
         if (opts.isDirect) {
-          await reply(`Use ${formatCmd("repo share <number>")} in a group chat.`);
+          await replyText("repo.share_dm_only", { cmd: formatCmd("repo share <number>") });
           return true;
         }
         const repos = await listReposForIdentity(this.db, identity.id);
         const cmd = opts.command as Extract<CloudCommand, { kind: "repo_share" }>;
         const repo = this.resolveRepoTarget(identity.id, repos, cmd.target);
         if (!repo) {
-          await reply(`Repo not found. Use ${formatCmd("repos")} to list.`);
+          await replyText("repo.not_found_use_repos", { cmd: formatCmd("repos") });
           return true;
         }
         const result = await shareRepo(this.db, {
@@ -1503,22 +1632,22 @@ export class BotController {
           sharedByIdentityId: identity.id,
         });
         if (result.alreadyShared) {
-          await reply("Repo already shared in this chat.");
+          await replyText("repo.already_shared");
           return true;
         }
-        await reply(`Shared ${repo.name} into this chat.`);
+        await replyText("repo.shared", { name: repo.name });
         return true;
       }
       case "repo_unshare": {
         if (opts.isDirect) {
-          await reply(`Use ${formatCmd("repo unshare <number>")} in a group chat.`);
+          await replyText("repo.unshare_dm_only", { cmd: formatCmd("repo unshare <number>") });
           return true;
         }
         const repos = await listReposForIdentity(this.db, identity.id);
         const cmd = opts.command as Extract<CloudCommand, { kind: "repo_unshare" }>;
         const repo = this.resolveRepoTarget(identity.id, repos, cmd.target);
         if (!repo) {
-          await reply("Repo not found.");
+          await replyText("repo.not_found");
           return true;
         }
         const shared = await getSharedRepo(this.db, {
@@ -1528,11 +1657,11 @@ export class BotController {
           repoId: repo.id,
         });
         if (!shared) {
-          await reply("Repo is not shared in this chat.");
+          await replyText("repo.not_shared");
           return true;
         }
         if (shared.shared_by_identity_id !== identity.id) {
-          await reply("Only the sharer can unshare this repo.");
+          await replyText("repo.unshare_not_owner");
           return true;
         }
         await unshareRepo(this.db, {
@@ -1541,14 +1670,14 @@ export class BotController {
           chatId: opts.chatId,
           repoId: repo.id,
         });
-        await reply(`Unshared ${repo.name}.`);
+        await replyText("repo.unshared", { name: repo.name });
         return true;
       }
       case "actions_list": {
         if (isPlaygroundRepoId(identity.active_repo_id)) {
           const runs = await listCloudRunsForPlayground(this.db, identity.id, 10);
           if (runs.length === 0) {
-            await reply("No runs yet.");
+            await replyText("actions.none_runs");
             return true;
           }
           const lines = runs.map((r) => `- ${r.id} (${r.status})`);
@@ -1556,12 +1685,15 @@ export class BotController {
           return true;
         }
         if (!identity.active_repo_id) {
-          await reply(`No active repo. Use ${formatCmd("repo select <number>")} or ${formatCmd("repo select playground")}.`);
+          await replyText("repo.none_active", {
+            select: formatCmd("repo select <number>"),
+            playground: formatCmd("repo select playground"),
+          });
           return true;
         }
         const runs = await listCloudRunsForRepo(this.db, identity.active_repo_id, 10);
         if (runs.length === 0) {
-          await reply("No runs yet.");
+          await replyText("actions.none_runs");
           return true;
         }
         const lines = runs.map((r) => `- ${r.id} (${r.status})`);
@@ -1572,24 +1704,35 @@ export class BotController {
         const cmd = opts.command as Extract<CloudCommand, { kind: "action_status" }>;
         const run = await getCloudRun(this.db, cmd.runId);
         if (!run || run.identity_id !== identity.id) {
-          await reply("Run not found.");
+          await replyText("run.not_found");
           return true;
         }
         const link = this.buildCloudUiLink(run.id, identity.id, opts.isDirect);
-        await reply(link ? `Run ${run.id}: ${run.status}\nView: ${link}` : `Run ${run.id}: ${run.status}`);
+        await reply(
+          link
+            ? t("run.status_with_link", lang, { id: run.id, status: run.status, url: link })
+            : t("run.status_line", lang, { id: run.id, status: run.status }),
+        );
         return true;
       }
       case "action_pull": {
         const cmd = opts.command as Extract<CloudCommand, { kind: "action_pull" }>;
         const run = await getCloudRun(this.db, cmd.runId);
         if (!run || run.identity_id !== identity.id) {
-          await reply("Run not found.");
+          await replyText("run.not_found");
           return true;
         }
-        const summary = run.diff_summary ?? "No diff available.";
+        const summary = run.diff_summary ?? t("run.diff_none", lang);
         const link = this.buildCloudUiLink(run.id, identity.id, opts.isDirect);
         const tail = link ? `\nView: ${link}` : "";
-        await reply(`Diff summary for ${run.id}:\n${summary}\n\nUse \`tinc pull --run ${run.id}\` for full diff.${tail}`);
+        await reply(
+          t("run.diff_summary", lang, {
+            id: run.id,
+            summary,
+            cmd: `tinc pull --run ${run.id}`,
+            view: tail,
+          }),
+        );
         return true;
       }
       case "snapshot_save": {
@@ -1600,9 +1743,9 @@ export class BotController {
             note: cmd.note,
             sourceStatus: "manual",
           });
-          await reply(`Saved snapshot ${snapshotId} (run ${runId}).`);
+          await replyText("snapshot.saved", { snapshotId, runId });
         } catch (e) {
-          await reply(`Snapshot save failed: ${String(e)}`);
+          await replyText("snapshot.save_failed", { error: String(e) });
         }
         return true;
       }
@@ -1610,7 +1753,7 @@ export class BotController {
         const cmd = opts.command as Extract<CloudCommand, { kind: "snapshot_list" }>;
         const snapshots = await this.cloudManager.listSnapshots(identity.id, cmd.limit);
         if (snapshots.length === 0) {
-          await reply("No snapshots found.");
+          await replyText("snapshot.none");
           return true;
         }
         this.lastSnapshotListByIdentity.set(
@@ -1620,32 +1763,32 @@ export class BotController {
         const formatSnapshot = (s: (typeof snapshots)[number], idx: number) => {
           const noteText = (s.note ?? "").split("\n")[0] ?? "";
           const noteClean = noteText.toLowerCase().startsWith("status:") ? "" : noteText.trim();
-          const noteShort = noteClean.length > 0 ? truncateText(noteClean, 200) : "(none)";
-          const title = s.title?.trim().length ? truncateText(s.title.trim(), 120) : "(none)";
-          const status = humanStatus(s.source_status);
+          const noteShort = noteClean.length > 0 ? truncateText(noteClean, 200) : t("snapshot.none_label", lang);
+          const title = s.title?.trim().length ? truncateText(s.title.trim(), 120) : t("snapshot.none_label", lang);
+          const status = humanStatus(s.source_status, lang);
           return [
             `${idx + 1}.`,
-            `*id:* ${s.id}`,
-            `*title:* ${title}`,
-            `*status:* ${status}`,
-            `*note:* ${noteShort}`,
+            `${t("snapshot.field_id", lang)} ${s.id}`,
+            `${t("snapshot.field_title", lang)} ${title}`,
+            `${t("snapshot.field_status", lang)} ${status}`,
+            `${t("snapshot.field_note", lang)} ${noteShort}`,
             "---",
           ].join("\n");
         };
         const lines = snapshots.map(formatSnapshot);
-        lines.push(`Restore with ${formatCmd("snapshot restore <index|snapshotId>")}.`);
+        lines.push(t("snapshot.restore_hint", lang, { cmd: formatCmd("snapshot restore <index|snapshotId>") }));
         await reply(lines.join("\n"));
         return true;
       }
       case "snapshot_search": {
         const cmd = opts.command as Extract<CloudCommand, { kind: "snapshot_search" }>;
         if (!cmd.query.trim()) {
-          await reply("Provide a search query.");
+          await replyText("snapshot.search_query_required");
           return true;
         }
         const snapshots = await this.cloudManager.searchSnapshots(identity.id, cmd.query, 10);
         if (snapshots.length === 0) {
-          await reply("No matching snapshots.");
+          await replyText("snapshot.search_none");
           return true;
         }
         this.lastSnapshotListByIdentity.set(
@@ -1655,20 +1798,20 @@ export class BotController {
         const formatSnapshot = (s: (typeof snapshots)[number], idx: number) => {
           const noteText = (s.note ?? "").split("\n")[0] ?? "";
           const noteClean = noteText.toLowerCase().startsWith("status:") ? "" : noteText.trim();
-          const noteShort = noteClean.length > 0 ? truncateText(noteClean, 200) : "(none)";
-          const title = s.title?.trim().length ? truncateText(s.title.trim(), 120) : "(none)";
-          const status = humanStatus(s.source_status);
+          const noteShort = noteClean.length > 0 ? truncateText(noteClean, 200) : t("snapshot.none_label", lang);
+          const title = s.title?.trim().length ? truncateText(s.title.trim(), 120) : t("snapshot.none_label", lang);
+          const status = humanStatus(s.source_status, lang);
           return [
             `${idx + 1}.`,
-            `*id:* ${s.id}`,
-            `*title:* ${title}`,
-            `*status:* ${status}`,
-            `*note:* ${noteShort}`,
+            `${t("snapshot.field_id", lang)} ${s.id}`,
+            `${t("snapshot.field_title", lang)} ${title}`,
+            `${t("snapshot.field_status", lang)} ${status}`,
+            `${t("snapshot.field_note", lang)} ${noteShort}`,
             "---",
           ].join("\n");
         };
         const lines = snapshots.map(formatSnapshot);
-        lines.push(`Restore with ${formatCmd("snapshot restore <index|snapshotId>")}.`);
+        lines.push(t("snapshot.restore_hint", lang, { cmd: formatCmd("snapshot restore <index|snapshotId>") }));
         await reply(lines.join("\n"));
         return true;
       }
@@ -1679,14 +1822,14 @@ export class BotController {
         if (Number.isInteger(idx)) {
           const last = this.lastSnapshotListByIdentity.get(identity.id);
           if (!last || idx < 1 || idx > last.length) {
-            await reply("Invalid snapshot index. List or search snapshots first.");
+            await replyText("snapshot.invalid_index");
             return true;
           }
           snapshotId = last[idx - 1]!;
         }
         const agent = cloud.default_agent === "claude_code" ? "claude_code" : "codex";
         if (agent === "claude_code" && !this.config.claude_code) {
-          await reply("Claude Code not configured. Use codex or configure [claude_code].");
+          await replyText("agent.claude_code.not_configured");
           return true;
         }
         try {
@@ -1702,7 +1845,7 @@ export class BotController {
           });
           const link = this.buildCloudUiLink(result.runId, identity.id, opts.isDirect);
           const vscodeUrl = await this.cloudManager.getVscodeUrl(result.sessionId);
-          const text = `Restored snapshot ${snapshotId} -> run ${result.runId}.`;
+          const text = t("snapshot.restored", lang, { snapshotId, runId: result.runId });
           await this.sendCloudRunStartedMessage({
             platform: opts.platform,
             chatId: opts.chatId,
@@ -1717,16 +1860,16 @@ export class BotController {
             slackThreadTs: opts.slackThreadTs,
           });
         } catch (e) {
-          await reply(`Snapshot restore failed: ${String(e)}`);
+          await replyText("snapshot.restore_failed", { error: String(e) });
         }
         return true;
       }
       case "snapshot_clear": {
         try {
           const count = await this.cloudManager.clearSnapshots(identity.id);
-          await reply(`Cleared ${count} snapshots for this identity.`);
+          await replyText("snapshot.clear_success", { count });
         } catch (e) {
-          await reply(`Snapshot clear failed: ${String(e)}`);
+          await replyText("snapshot.clear_failed", { error: String(e) });
         }
         return true;
       }
@@ -1745,9 +1888,10 @@ export class BotController {
             if (!hasGithub) {
               playground = true;
             } else {
-              await reply(
-                `No active repo. Use ${formatCmd("repo select <number>")} or ${formatCmd("repo select playground")}, or pass --repos.`,
-              );
+              await replyText("run.no_active_repo_or_repos", {
+                select: formatCmd("repo select <number>"),
+                playground: formatCmd("repo select playground"),
+              });
               return true;
             }
           }
@@ -1757,7 +1901,7 @@ export class BotController {
           const repoIdSet = new Set(repos.map((r) => r.id));
           for (const id of repoIds) {
             if (!repoIdSet.has(id)) {
-              await reply(`Repo not found or not accessible: ${id}`);
+              await replyText("repo.not_found_or_accessible", { id });
               return true;
             }
           }
@@ -1766,7 +1910,7 @@ export class BotController {
             const sharedIds = new Set(shared.map((s) => s.repo_id));
             for (const id of repoIds) {
               if (!sharedIds.has(id)) {
-                await reply(`Repo not shared in this chat: ${id}`);
+                await replyText("repo.not_shared_in_chat", { id });
                 return true;
               }
             }
@@ -1774,12 +1918,12 @@ export class BotController {
         }
         const agent = cloud.default_agent === "claude_code" ? "claude_code" : "codex";
         if (agent === "claude_code" && !this.config.claude_code) {
-          await reply("Claude Code not configured. Use codex or configure [claude_code].");
+          await replyText("agent.claude_code.not_configured");
           return true;
         }
         const prompt = cmd.prompt.trim();
         if (!prompt) {
-          await reply("Provide a prompt for the run.");
+          await replyText("run.prompt_required");
           return true;
         }
         try {
@@ -1797,7 +1941,7 @@ export class BotController {
           });
           const link = this.buildCloudUiLink(result.runId, identity.id, opts.isDirect);
           const vscodeUrl = await this.cloudManager.getVscodeUrl(result.sessionId);
-          const text = `Started run ${result.runId}.`;
+          const text = t("run.started", lang, { id: result.runId });
           await this.sendCloudRunStartedMessage({
             platform: opts.platform,
             chatId: opts.chatId,
@@ -1814,37 +1958,37 @@ export class BotController {
         } catch (e) {
           const msg = String(e);
           if (/ChatGPT auth missing or expired/i.test(msg) || /ChatGPT token unavailable/i.test(msg) || msg.includes("CHATGPT_AUTH_ERROR_PREFIX")) {
-            await reply(`Run failed: ChatGPT auth missing or expired. Please run ${formatCmd("connect chatgpt")} to re-auth.`);
+            await replyText("run.failed_auth", { cmd: formatCmd("connect chatgpt") });
           } else {
-            await reply(`Run failed: ${msg}`);
+            await replyText("run.failed", { error: msg });
           }
         }
         return true;
       }
       case "setup_status": {
         if (isPlaygroundRepoId(identity.active_repo_id)) {
-          await reply("Playground has no repo. Select a repo to manage setup specs.");
+          await replyText("setup.playground_no_repo_manage");
           return true;
         }
         if (!identity.active_repo_id) {
-          await reply("No active repo.");
+          await replyText("repo.none_active_simple");
           return true;
         }
         const spec = await getLatestSetupSpec(this.db, identity.active_repo_id);
         if (!spec) {
-          await reply(`No setup spec yet. Use ${formatCmd("setup lift")}.`);
+          await replyText("setup.no_spec", { cmd: formatCmd("setup lift") });
           return true;
         }
-        await reply("Setup spec is configured.");
+        await replyText("setup.configured");
         return true;
       }
       case "setup_lift": {
         if (isPlaygroundRepoId(identity.active_repo_id)) {
-          await reply("Playground has no repo. Select a repo to run setup lift.");
+          await replyText("setup.playground_no_repo_lift");
           return true;
         }
         if (!identity.active_repo_id) {
-          await reply("No active repo.");
+          await replyText("repo.none_active_simple");
           return true;
         }
         try {
@@ -1871,20 +2015,20 @@ export class BotController {
           const hash = hashSetupSpec(yml);
           await putSetupSpec(this.db, { repoId: repo.id, ymlBlob: yml, hash });
           await provider.terminateWorkspace(workspace);
-          await reply("Setup spec generated and saved.");
+          await replyText("setup.lift_saved");
         } catch (e) {
-          await reply(`Setup lift failed: ${String(e)}`);
+          await replyText("setup.lift_failed", { error: String(e) });
         }
         return true;
       }
       case "tinc_token": {
         if (!opts.isDirect) {
-          await reply(`Use ${formatCmd("tinc token")} in a 1:1 chat.`);
+          await replyText("command.dm_only", { cmd: formatCmd("tinc token") });
           return true;
         }
         const ui = cloud.ui;
         if (!ui || !ui.token_secret) {
-          await reply("Missing [cloud].ui.token_secret configuration.");
+          await replyText("cloud.ui_token_missing");
           return true;
         }
         const token = createUiToken(ui, { scope: "identity", identity_id: identity.id });
@@ -1901,91 +2045,91 @@ export class BotController {
               : `${Math.max(1, Math.round(ttlMs / (60 * 1000)))}m`
             : null;
         const lines = [
-          "Here is your tinc API token (keep it secret):",
+          t("tinc.token.title", lang),
           "`" + token + "`",
           "",
-          "Set env vars:",
+          t("tinc.token.env_vars", lang),
           "`TINC_URL=" + baseUrl + "`",
           "`TINC_TOKEN=<token>`",
           "",
-          "Example:",
+          t("tinc.token.example", lang),
           "`TINC_URL=" + baseUrl + " TINC_TOKEN=<token> tinc pull --run <id>`",
-          ttl ? `Token TTL: ${ttl}` : null,
+          ttl ? t("tinc.token.ttl", lang, { ttl }) : null,
         ].filter((line): line is string => Boolean(line));
         await reply(lines.join("\n"), true);
         return true;
       }
       case "secrets_set": {
         if (!opts.isDirect) {
-          await reply(`Use ${formatCmd("secrets set")} in a 1:1 chat.`);
+          await replyText("command.dm_only", { cmd: formatCmd("secrets set") });
           return true;
         }
         const cmd = opts.command as Extract<CloudCommand, { kind: "secrets_set" }>;
         if (!cmd.value) {
-          await reply(`Usage: ${formatCmd("secrets set NAME VALUE")} (or use \`tinc secrets set NAME --from-stdin\`).`);
+          await replyText("secrets.usage_set", { cmd: formatCmd("secrets set NAME VALUE") });
           return true;
         }
         try {
           const encrypted = encryptSecret(cmd.value, cloud.secrets_key);
           await setSecret(this.db, { identityId: identity.id, name: cmd.name, encryptedValue: encrypted });
-          await reply(`Secret ${cmd.name} saved.`);
+          await replyText("secrets.saved", { name: cmd.name });
         } catch (e) {
-          await reply(`Failed to save secret: ${String(e)}`);
+          await replyText("secrets.save_failed", { error: String(e) });
         }
         return true;
       }
       case "secrets_create": {
         if (!opts.isDirect) {
-          await reply(`Use ${formatCmd("secrets create")} in a 1:1 chat.`);
+          await replyText("command.dm_only", { cmd: formatCmd("secrets create") });
           return true;
         }
         const cmd = opts.command as Extract<CloudCommand, { kind: "secrets_create" }>;
         if (!cmd.value) {
-          await reply(`Usage: ${formatCmd("secrets create NAME VALUE")}`);
+          await replyText("secrets.usage_create", { cmd: formatCmd("secrets create NAME VALUE") });
           return true;
         }
         const existing = await listSecrets(this.db, identity.id);
         if (this.findSecretMetaByName(existing, cmd.name)) {
-          await reply(`Secret ${cmd.name} already exists. Use ${formatCmd("secrets update")}.`);
+          await replyText("secrets.exists", { name: cmd.name, cmd: formatCmd("secrets update") });
           return true;
         }
         try {
           const encrypted = encryptSecret(cmd.value, cloud.secrets_key);
           await setSecret(this.db, { identityId: identity.id, name: cmd.name, encryptedValue: encrypted });
-          await reply(`Secret ${cmd.name} created.`);
+          await replyText("secrets.created", { name: cmd.name });
         } catch (e) {
-          await reply(`Failed to create secret: ${String(e)}`);
+          await replyText("secrets.create_failed", { error: String(e) });
         }
         return true;
       }
       case "secrets_update": {
         if (!opts.isDirect) {
-          await reply(`Use ${formatCmd("secrets update")} in a 1:1 chat.`);
+          await replyText("command.dm_only", { cmd: formatCmd("secrets update") });
           return true;
         }
         const cmd = opts.command as Extract<CloudCommand, { kind: "secrets_update" }>;
         if (!cmd.value) {
-          await reply(`Usage: ${formatCmd("secrets update NAME VALUE")}`);
+          await replyText("secrets.usage_update", { cmd: formatCmd("secrets update NAME VALUE") });
           return true;
         }
         const existing = await listSecrets(this.db, identity.id);
         if (!this.findSecretMetaByName(existing, cmd.name)) {
-          await reply(`Secret ${cmd.name} not found. Use ${formatCmd("secrets create")}.`);
+          await replyText("secrets.not_found_use_create", { name: cmd.name, cmd: formatCmd("secrets create") });
           return true;
         }
         try {
           const encrypted = encryptSecret(cmd.value, cloud.secrets_key);
           await setSecret(this.db, { identityId: identity.id, name: cmd.name, encryptedValue: encrypted });
-          await reply(`Secret ${cmd.name} updated.`);
+          await replyText("secrets.updated", { name: cmd.name });
         } catch (e) {
-          await reply(`Failed to update secret: ${String(e)}`);
+          await replyText("secrets.update_failed", { error: String(e) });
         }
         return true;
       }
       case "secrets_list": {
         const secrets = await listSecrets(this.db, identity.id);
         if (secrets.length === 0) {
-          await reply("No secrets.");
+          await replyText("secrets.none");
           return true;
         }
         await reply(secrets.map((s) => `- \`${s.name}\``).join("\n"));
@@ -1994,7 +2138,7 @@ export class BotController {
       case "secrets_delete": {
         const cmd = opts.command as Extract<CloudCommand, { kind: "secrets_delete" }>;
         const ok = await deleteSecret(this.db, identity.id, cmd.name);
-        await reply(ok ? `Deleted ${cmd.name}.` : "Secret not found.");
+        await reply(ok ? t("secrets.deleted", lang, { name: cmd.name }) : t("secrets.delete_not_found", lang));
         return true;
       }
     }
@@ -2021,13 +2165,16 @@ export class BotController {
       updated_at: nowMs(),
     });
 
-    const menuText = buildMenuText("telegram", agent);
+    const lang = await this.resolveUserLanguage("telegram", userId);
+    const menuText = buildMenuText("telegram", agent, lang);
+    const keyboard = this.telegram.projectKeyboard(this.config.projects);
+    keyboard.inline_keyboard.push([{ text: getLanguageLabel(getOtherLanguage(lang)), callback_data: `lang:${getOtherLanguage(lang)}` }]);
     await this.telegram.sendMessage({
       chatId,
       text: menuText,
       messageThreadId,
       replyToMessageId,
-      replyMarkup: this.telegram.projectKeyboard(this.config.projects),
+      replyMarkup: keyboard,
       priority: "user",
     });
   }
@@ -2040,13 +2187,33 @@ export class BotController {
         safeSnippet(data),
       )}`,
     );
+    if (data.startsWith("lang:")) {
+      const next = data.slice("lang:".length);
+      if (!isUserLanguage(next)) {
+        await this.telegram.answerCallbackQuery(cb.id);
+        return;
+      }
+      const userId = String(cb.from.id);
+      await setUserLanguage(this.db, "telegram", userId, next);
+      await this.db
+        .updateTable("sessions")
+        .set({ language: next, updated_at: nowMs() })
+        .where("platform", "=", "telegram")
+        .where("created_by_user_id", "=", userId)
+        .where("status", "in", ["starting", "running"])
+        .execute();
+      const confirmKey = next === "zh" ? "lang.switched_zh" : "lang.switched_en";
+      await this.telegram.answerCallbackQuery(cb.id, t(confirmKey, next));
+      return;
+    }
+    const actorLang = await this.resolveUserLanguage("telegram", String(cb.from.id));
     if (data.startsWith("kill:")) {
       const sessionId = data.slice("kill:".length);
       const chat = cb.message?.chat;
       const chatId = chat ? String(chat.id) : null;
       const userId = chat && chat.type === "channel" ? String(chat.id) : String(cb.from.id);
       if (!chatId || !sessionId) {
-        await this.telegram.answerCallbackQuery(cb.id, "Session not found.");
+        await this.telegram.answerCallbackQuery(cb.id, t("session.not_found", actorLang));
         return;
       }
       const access = await this.telegramAccessDecision(chatId, userId);
@@ -2054,37 +2221,40 @@ export class BotController {
         this.logger.warn(
           `[tg] rejected kill callback chat=${chatId} user=${userId} session=${sessionId} reason=${access.reason ?? "-"}`,
         );
-        await this.telegram.answerCallbackQuery(cb.id, "Not authorized.");
+        await this.telegram.answerCallbackQuery(cb.id, t("error.not_authorized", actorLang));
         return;
       }
       const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
       if (!session || session.platform !== "telegram" || session.chat_id !== chatId) {
-        await this.telegram.answerCallbackQuery(cb.id, "Session not found.");
+        await this.telegram.answerCallbackQuery(cb.id, t("session.not_found", actorLang));
         return;
       }
       if (session.status !== "starting" && session.status !== "running") {
-        await this.telegram.answerCallbackQuery(cb.id, "Session already finished.");
+        await this.telegram.answerCallbackQuery(cb.id, t("session.already_finished", actorLang));
         return;
       }
 
       const isCloudSession = await this.isCloudSession(session as SessionRow);
       if (isCloudSession && this.cloudManager) {
-        await this.telegram.answerCallbackQuery(cb.id, "Stopping run…");
+        await this.telegram.answerCallbackQuery(cb.id, t("run.stopping", actorLang));
         try {
           await this.cloudManager.stopSandboxForSession(sessionId);
-          await this.sendSessionMessageMarkdown(session as SessionRow, "*Run stopped.*");
+          await this.sendSessionMessageMarkdown(session as SessionRow, t("run.stopped", this.resolveSessionLanguage(session as SessionRow)));
         } catch (e) {
           this.logger.warn(`[tg] stop run failed chat=${chatId} user=${userId} session=${sessionId}: ${String(e)}`);
+          const lang = this.resolveSessionLanguage(session as SessionRow);
           await this.sendSessionMessageMarkdown(
             session as SessionRow,
-            `*Stop failed:* ${redactText(e instanceof Error ? e.message : String(e))}`,
+            t("run.stop_failed", lang, {
+              error: redactText(e instanceof Error ? e.message : String(e)),
+            }),
           );
         }
         return;
       }
 
-      await this.telegram.answerCallbackQuery(cb.id, "Stopping session…");
-      await this.sessionManager.killSession(sessionId, "Stopping session at user request.");
+      await this.telegram.answerCallbackQuery(cb.id, t("session.stopping", actorLang));
+      await this.sessionManager.killSession(sessionId, t("session.stop_requested", this.resolveSessionLanguage(session as SessionRow)));
       return;
     }
 
@@ -2097,7 +2267,7 @@ export class BotController {
       // @ts-ignore
       const messageText = cb.message?.text ?? cb.message?.caption ?? undefined;
       if (!chatId || !sessionId) {
-        await this.telegram.answerCallbackQuery(cb.id, "Session not found.");
+        await this.telegram.answerCallbackQuery(cb.id, t("session.not_found", actorLang));
         return;
       }
       const access = await this.telegramAccessDecision(chatId, userId);
@@ -2105,12 +2275,12 @@ export class BotController {
         this.logger.warn(
           `[tg] rejected review callback chat=${chatId} user=${userId} session=${sessionId} reason=${access.reason ?? "-"}`,
         );
-        await this.telegram.answerCallbackQuery(cb.id, "Not authorized.");
+        await this.telegram.answerCallbackQuery(cb.id, t("error.not_authorized", actorLang));
         return;
       }
       const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
       if (!session || session.platform !== "telegram" || session.chat_id !== chatId) {
-        await this.telegram.answerCallbackQuery(cb.id, "Session not found.");
+        await this.telegram.answerCallbackQuery(cb.id, t("session.not_found", actorLang));
         return;
       }
 
@@ -2120,11 +2290,11 @@ export class BotController {
           chatId,
           messageId,
           text: messageText,
-          note: "[Clock] Started Review",
+          note: t("review.started_note", this.resolveSessionLanguage(session as SessionRow)),
         });
       }
 
-      await this.telegram.answerCallbackQuery(cb.id, "Starting review…");
+      await this.telegram.answerCallbackQuery(cb.id, t("session.starting_review", actorLang));
       try {
         await this.handleSessionMessage(session as SessionRow, userId, REVIEW_PROMPT);
       } catch (e) {
@@ -2132,11 +2302,13 @@ export class BotController {
           `[tg] review callback failed chat=${chatId} user=${userId} session=${sessionId}: ${String(e)}`,
         );
         try {
+          const lang = this.resolveSessionLanguage(session as SessionRow);
           await this.telegram.sendMessage({
             chatId,
             messageThreadId: this.telegramForumThreadIdFromMessage(cb.message),
             replyToMessageId: cb.message?.message_id,
-            text: `Error: ${redactText(e instanceof Error ? e.message : String(e))}`,
+            text: t("error.generic", lang, { message: redactText(e instanceof Error ? e.message : String(e)) }),
+            replyMarkup: this.buildLanguageToggleTelegram(lang),
             priority: "user",
           });
         } catch {}
@@ -2153,7 +2325,7 @@ export class BotController {
       // @ts-ignore
       const messageText = cb.message?.text ?? cb.message?.caption ?? undefined;
       if (!chatId || !sessionId) {
-        await this.telegram.answerCallbackQuery(cb.id, "Session not found.");
+        await this.telegram.answerCallbackQuery(cb.id, t("session.not_found", actorLang));
         return;
       }
       const access = await this.telegramAccessDecision(chatId, userId);
@@ -2161,12 +2333,12 @@ export class BotController {
         this.logger.warn(
           `[tg] rejected commit callback chat=${chatId} user=${userId} session=${sessionId} reason=${access.reason ?? "-"}`,
         );
-        await this.telegram.answerCallbackQuery(cb.id, "Not authorized.");
+        await this.telegram.answerCallbackQuery(cb.id, t("error.not_authorized", actorLang));
         return;
       }
       const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
       if (!session || session.platform !== "telegram" || session.chat_id !== chatId) {
-        await this.telegram.answerCallbackQuery(cb.id, "Session not found.");
+        await this.telegram.answerCallbackQuery(cb.id, t("session.not_found", actorLang));
         return;
       }
 
@@ -2192,7 +2364,7 @@ export class BotController {
           gitUserName: identity.git_user_name,
           gitUserEmail: identity.git_user_email,
         });
-        await this.telegram.answerCallbackQuery(cb.id, "Preparing commit proposal…");
+        await this.telegram.answerCallbackQuery(cb.id, t("commit.proposal.preparing", actorLang));
         try {
           await this.handleSessionMessage(session as SessionRow, userId, buildCommitProposalPrompt(identity.branch_name_rule));
         } catch (e) {
@@ -2200,11 +2372,13 @@ export class BotController {
             `[tg] commit proposal failed chat=${chatId} user=${userId} session=${sessionId}: ${String(e)}`,
           );
           try {
+            const lang = this.resolveSessionLanguage(session as SessionRow);
             await this.telegram.sendMessage({
               chatId,
               messageThreadId: this.telegramForumThreadIdFromMessage(cb.message),
               replyToMessageId: cb.message?.message_id,
-              text: `Error: ${redactText(e instanceof Error ? e.message : String(e))}`,
+              text: t("error.generic", lang, { message: redactText(e instanceof Error ? e.message : String(e)) }),
+              replyMarkup: this.buildLanguageToggleTelegram(lang),
               priority: "user",
             });
           } catch {}
@@ -2212,7 +2386,7 @@ export class BotController {
         return;
       }
 
-      await this.telegram.answerCallbackQuery(cb.id, "Committing changes…");
+      await this.telegram.answerCallbackQuery(cb.id, t("session.committing", actorLang));
       try {
         await this.handleSessionMessage(session as SessionRow, userId, COMMIT_PROMPT);
       } catch (e) {
@@ -2220,11 +2394,13 @@ export class BotController {
           `[tg] commit callback failed chat=${chatId} user=${userId} session=${sessionId}: ${String(e)}`,
         );
         try {
+          const lang = this.resolveSessionLanguage(session as SessionRow);
           await this.telegram.sendMessage({
             chatId,
             messageThreadId: this.telegramForumThreadIdFromMessage(cb.message),
             replyToMessageId: cb.message?.message_id,
-            text: `Error: ${redactText(e instanceof Error ? e.message : String(e))}`,
+            text: t("error.generic", lang, { message: redactText(e instanceof Error ? e.message : String(e)) }),
+            replyMarkup: this.buildLanguageToggleTelegram(lang),
             priority: "user",
           });
         } catch {}
@@ -2238,7 +2414,7 @@ export class BotController {
       const chatId = chat ? String(chat.id) : null;
       const userId = chat && chat.type === "channel" ? String(chat.id) : String(cb.from.id);
       if (!chatId || !runId) {
-        await this.telegram.answerCallbackQuery(cb.id, "Run not found.");
+        await this.telegram.answerCallbackQuery(cb.id, t("run.not_found", actorLang));
         return;
       }
       const access = await this.telegramAccessDecision(chatId, userId);
@@ -2246,10 +2422,10 @@ export class BotController {
         this.logger.warn(
           `[tg] rejected run status callback chat=${chatId} user=${userId} run=${runId} reason=${access.reason ?? "-"}`,
         );
-        await this.telegram.answerCallbackQuery(cb.id, "Not authorized.");
+        await this.telegram.answerCallbackQuery(cb.id, t("error.not_authorized", actorLang));
         return;
       }
-      await this.telegram.answerCallbackQuery(cb.id, "Fetching status…");
+      await this.telegram.answerCallbackQuery(cb.id, t("run.status_fetching", actorLang));
       await this.sendCloudRunStatus({
         platform: "telegram",
         chatId,
@@ -2269,7 +2445,7 @@ export class BotController {
       const chatId = chat ? String(chat.id) : null;
       const userId = chat && chat.type === "channel" ? String(chat.id) : String(cb.from.id);
       if (!chatId || !sessionId) {
-        await this.telegram.answerCallbackQuery(cb.id, "Session not found.");
+        await this.telegram.answerCallbackQuery(cb.id, t("session.not_found", actorLang));
         return;
       }
       const access = await this.telegramAccessDecision(chatId, userId);
@@ -2277,28 +2453,31 @@ export class BotController {
         this.logger.warn(
           `[tg] rejected stop sandbox callback chat=${chatId} user=${userId} session=${sessionId} reason=${access.reason ?? "-"}`,
         );
-        await this.telegram.answerCallbackQuery(cb.id, "Not authorized.");
+        await this.telegram.answerCallbackQuery(cb.id, t("error.not_authorized", actorLang));
         return;
       }
       const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
       if (!session || session.platform !== "telegram" || session.chat_id !== chatId) {
-        await this.telegram.answerCallbackQuery(cb.id, "Session not found.");
+        await this.telegram.answerCallbackQuery(cb.id, t("session.not_found", actorLang));
         return;
       }
       const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
       if (!this.cloudManager || !isCloudSession) {
-        await this.telegram.answerCallbackQuery(cb.id, "Sandbox stop not available.");
+        await this.telegram.answerCallbackQuery(cb.id, t("sandbox.stop_unavailable", actorLang));
         return;
       }
-      await this.telegram.answerCallbackQuery(cb.id, "Stopping sandbox…");
+      await this.telegram.answerCallbackQuery(cb.id, t("sandbox.stopping", actorLang));
       try {
         await this.cloudManager.stopSandboxForSession(sessionId);
-        await this.sendSessionMessageMarkdown(session as SessionRow, "*Sandbox stopped.*");
+        await this.sendSessionMessageMarkdown(session as SessionRow, t("sandbox.stopped", this.resolveSessionLanguage(session as SessionRow)));
       } catch (e) {
         this.logger.warn(`[tg] stop sandbox failed chat=${chatId} user=${userId} session=${sessionId}: ${String(e)}`);
+        const lang = this.resolveSessionLanguage(session as SessionRow);
         await this.sendSessionMessageMarkdown(
           session as SessionRow,
-          `*Sandbox stop failed:* ${redactText(e instanceof Error ? e.message : String(e))}`,
+          t("sandbox.stop_failed", lang, {
+            error: redactText(e instanceof Error ? e.message : String(e)),
+          }),
         );
       }
       return;
@@ -2312,7 +2491,7 @@ export class BotController {
       const chatId = chat ? String(chat.id) : null;
       const userId = chat && chat.type === "channel" ? String(chat.id) : String(cb.from.id);
       if (!chatId || !proposalId) {
-        await this.telegram.answerCallbackQuery(cb.id, "Commit proposal not found.");
+        await this.telegram.answerCallbackQuery(cb.id, t("commit.proposal.not_found", actorLang));
         return;
       }
       const access = await this.telegramAccessDecision(chatId, userId);
@@ -2320,28 +2499,28 @@ export class BotController {
         this.logger.warn(
           `[tg] rejected commit proposal callback chat=${chatId} user=${userId} proposal=${proposalId} reason=${access.reason ?? "-"}`,
         );
-        await this.telegram.answerCallbackQuery(cb.id, "Not authorized.");
+        await this.telegram.answerCallbackQuery(cb.id, t("error.not_authorized", actorLang));
         return;
       }
       if (action !== "cancel" && action !== "push" && action !== "pr") {
-        await this.telegram.answerCallbackQuery(cb.id, "Unsupported action.");
+        await this.telegram.answerCallbackQuery(cb.id, t("action.unsupported", actorLang));
         return;
       }
       const proposal = this.commitProposalStore?.getProposal(proposalId) ?? null;
       if (!proposal) {
-        await this.telegram.answerCallbackQuery(cb.id, "Commit proposal expired.");
+        await this.telegram.answerCallbackQuery(cb.id, t("commit.proposal.expired", actorLang));
         return;
       }
       if (proposal.platform !== "telegram" || proposal.chatId !== chatId || proposal.userId !== userId) {
-        await this.telegram.answerCallbackQuery(cb.id, "Not authorized.");
+        await this.telegram.answerCallbackQuery(cb.id, t("error.not_authorized", actorLang));
         return;
       }
       const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", proposal.sessionId).executeTakeFirst();
       if (!session || session.platform !== "telegram" || session.chat_id !== chatId) {
-        await this.telegram.answerCallbackQuery(cb.id, "Session not found.");
+        await this.telegram.answerCallbackQuery(cb.id, t("session.not_found", actorLang));
         return;
       }
-      await this.telegram.answerCallbackQuery(cb.id, "Processing…");
+      await this.telegram.answerCallbackQuery(cb.id, t("action.processing", actorLang));
       await this.handleCommitProposalAction({ proposal, session: session as SessionRow, action });
       return;
     }
@@ -2357,7 +2536,7 @@ export class BotController {
     const chatId = chat ? String(chat.id) : null;
     const userId = chat && chat.type === "channel" ? String(chat.id) : String(cb.from.id);
     if (!chatId) {
-      await this.telegram.answerCallbackQuery(cb.id, "Unsupported callback context.");
+      await this.telegram.answerCallbackQuery(cb.id, t("callback.unsupported_context", actorLang));
       return;
     }
     const access = await this.telegramAccessDecision(chatId, userId);
@@ -2365,7 +2544,7 @@ export class BotController {
       this.logger.warn(
         `[tg] rejected callback chat=${chatId} user=${userId} project=${projectId} reason=${access.reason ?? "-"}`,
       );
-      await this.telegram.answerCallbackQuery(cb.id, "Not authorized.");
+      await this.telegram.answerCallbackQuery(cb.id, t("error.not_authorized", actorLang));
       return;
     }
 
@@ -2388,24 +2567,31 @@ export class BotController {
     await this.telegram.answerCallbackQuery(cb.id);
 
     const forumThreadId = this.telegramForumThreadIdFromMessage(cb.message);
-	    await this.telegram.sendMessage({
-	      chatId,
-	      messageThreadId: forumThreadId,
-	      replyToMessageId: cb.message?.message_id,
-	      text: project.path === "*" ? "Send a custom project path." : "Send the initial prompt for this session.",
-	      priority: "user",
-	    });
-	  }
+    const lang = await this.resolveUserLanguage("telegram", userId);
+    await this.telegram.sendMessage({
+      chatId,
+      messageThreadId: forumThreadId,
+      replyToMessageId: cb.message?.message_id,
+      text:
+        project.path === "*"
+          ? t("wizard.send_custom_path", lang)
+          : t("wizard.send_prompt", lang),
+      replyMarkup: this.buildLanguageToggleTelegram(lang),
+      priority: "user",
+    });
+  }
 
   private async continueTelegramWizard(wizard: WizardStateRow, text: string, ctx: TelegramReplyContext) {
     if (!this.telegram) return;
+    const lang = await this.resolveUserLanguage("telegram", wizard.user_id);
 
 	    if (wizard.state === "await_project") {
 	      await this.telegram.sendMessage({
 	        chatId: wizard.chat_id,
 	        messageThreadId: ctx.messageThreadId,
 	        replyToMessageId: ctx.replyToMessageId,
-	        text: "Please choose a project using the buttons.",
+          text: t("wizard.choose_project_buttons", lang),
+          replyMarkup: this.buildLanguageToggleTelegram(lang),
 	        priority: "user",
 	      });
 	      return;
@@ -2417,7 +2603,8 @@ export class BotController {
 	        chatId: wizard.chat_id,
 	        messageThreadId: ctx.messageThreadId,
 	        replyToMessageId: ctx.replyToMessageId,
-	        text: "Wizard state expired. Mention me again to restart.",
+          text: t("wizard.expired", lang),
+          replyMarkup: this.buildLanguageToggleTelegram(lang),
 	        priority: "user",
 	      });
 	      return;
@@ -2438,7 +2625,8 @@ export class BotController {
 	        chatId: wizard.chat_id,
 	        messageThreadId: ctx.messageThreadId,
 	        replyToMessageId: ctx.replyToMessageId,
-	        text: "Path accepted. Now send the initial prompt.",
+          text: t("wizard.path_accepted", lang),
+          replyMarkup: this.buildLanguageToggleTelegram(lang),
 	        priority: "user",
 	      });
 	      return;
@@ -2450,19 +2638,29 @@ export class BotController {
       try {
         await this.sessionManager.assertCanStartNewSession({ platform: "telegram", chatId: wizard.chat_id });
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        const hint = msg.includes("max concurrent sessions")
-          ? "\n\nTip: try /sessions active to see running sessions."
-          : "";
-	        await this.telegram.sendMessage({
-	          chatId: wizard.chat_id,
-	          messageThreadId: ctx.messageThreadId,
-	          replyToMessageId: ctx.replyToMessageId,
-	          text: `Error: ${redactText(msg)}${hint}`,
-	          priority: "user",
-	        });
-	        return;
-	      }
+        let hint = "";
+        let text: string;
+        if (e instanceof SessionStartError) {
+          if (e.code === "max_concurrent") {
+            text = t("session.limit_concurrent", lang, { limit: e.limit });
+            hint = `\n\n${t("session.max_concurrent_hint", lang, { cmd: "/sessions active" })}`;
+          } else {
+            text = t("session.limit_total", lang, { limit: e.limit });
+          }
+        } else {
+          const msg = e instanceof Error ? e.message : String(e);
+          text = t("error.generic", lang, { message: redactText(msg) });
+        }
+        await this.telegram.sendMessage({
+          chatId: wizard.chat_id,
+          messageThreadId: ctx.messageThreadId,
+          replyToMessageId: ctx.replyToMessageId,
+          text: `${text}${hint}`,
+          replyMarkup: this.buildLanguageToggleTelegram(lang),
+          priority: "user",
+        });
+        return;
+      }
 
       const { spaceId, announce, topicId, topicEmoji, topicCustomEmojiId } = await this.createTelegramSessionSpace({
         chat: ctx.chat,
@@ -2470,6 +2668,7 @@ export class BotController {
         anchorMessageId: ctx.replyToMessageId,
         anchorMessageThreadId: ctx.messageThreadId,
         agent: wizard.agent,
+        lang,
       });
 
       let sessionId: string;
@@ -2488,28 +2687,39 @@ export class BotController {
         });
       } catch (e) {
         await clearWizardState(this.db, "telegram", wizard.chat_id, wizard.user_id);
-        const msg = e instanceof Error ? e.message : String(e);
-        const hint = msg.includes("max concurrent sessions")
-          ? "\n\nTip: try /sessions active to see running sessions."
-          : "";
-	        if (topicId) {
-	          await this.telegram.sendMessage({
-	            chatId: wizard.chat_id,
-	            messageThreadId: topicId,
-	            text: `Error: ${redactText(msg)}${hint}`,
-	            priority: "user",
-	          });
-	        } else {
-	          await this.telegram.sendMessage({
-	            chatId: wizard.chat_id,
-	            messageThreadId: ctx.messageThreadId,
-	            replyToMessageId: Number(spaceId),
-	            text: `Error: ${redactText(msg)}${hint}`,
-	            priority: "user",
-	          });
-	        }
-	        return;
-	      }
+        let hint = "";
+        let text: string;
+        if (e instanceof SessionStartError) {
+          if (e.code === "max_concurrent") {
+            text = t("session.limit_concurrent", lang, { limit: e.limit });
+            hint = `\n\n${t("session.max_concurrent_hint", lang, { cmd: "/sessions active" })}`;
+          } else {
+            text = t("session.limit_total", lang, { limit: e.limit });
+          }
+        } else {
+          const msg = e instanceof Error ? e.message : String(e);
+          text = t("error.generic", lang, { message: redactText(msg) });
+        }
+        if (topicId) {
+          await this.telegram.sendMessage({
+            chatId: wizard.chat_id,
+            messageThreadId: topicId,
+            text: `${text}${hint}`,
+            replyMarkup: this.buildLanguageToggleTelegram(lang),
+            priority: "user",
+          });
+        } else {
+          await this.telegram.sendMessage({
+            chatId: wizard.chat_id,
+            messageThreadId: ctx.messageThreadId,
+            replyToMessageId: Number(spaceId),
+            text: `${text}${hint}`,
+            replyMarkup: this.buildLanguageToggleTelegram(lang),
+            priority: "user",
+          });
+        }
+        return;
+      }
 
       await clearWizardState(this.db, "telegram", wizard.chat_id, wizard.user_id);
 
@@ -2519,13 +2729,14 @@ export class BotController {
           topicId,
           initialPrompt: text,
           sessionId,
+          lang,
         });
       }
 
       if (announce) {
         // Best-effort nudge for users who aren't in the topic view.
         const emoji = topicEmoji ?? "🧠";
-        const announceText = `Session started. Check the new topic starting with ${emoji}.`;
+        const announceText = t("session.started_topic_hint", lang, { emoji });
         const entity =
           topicCustomEmojiId && topicEmoji
             ? buildTelegramCustomEmojiEntity(announceText, topicEmoji, topicCustomEmojiId)
@@ -2545,6 +2756,7 @@ export class BotController {
 	            messageThreadId: ctx.messageThreadId,
 	            replyToMessageId: ctx.replyToMessageId,
 	            text: announceText,
+              replyMarkup: this.buildLanguageToggleTelegram(lang),
 	            priority: "user",
 	          });
 	        }
@@ -2570,20 +2782,22 @@ export class BotController {
     anchorMessageId: number;
     anchorMessageThreadId?: number;
     agent: SessionAgent;
+    lang: UserLanguage;
   }): Promise<{ spaceId: string; announce: boolean; topicId?: number; topicEmoji?: string; topicCustomEmojiId?: string }> {
     if (!this.telegram) throw new Error("Telegram not configured");
     const chatId = String(opts.chat.id);
 
     // Channels (and anonymous-admin posts) don't support forum topics; keep everything as replies.
-	    if (opts.chat.type === "channel") {
-	      await this.telegram.sendMessageSingle({
-	        chatId,
-	        replyToMessageId: opts.anchorMessageId,
-	        text: "Session created. I’ll reply here with output…",
-	        priority: "user",
-	      });
-	      return { spaceId: String(opts.anchorMessageId), announce: false };
-	    }
+    if (opts.chat.type === "channel") {
+      await this.telegram.sendMessageSingle({
+        chatId,
+        replyToMessageId: opts.anchorMessageId,
+        text: t("session.created", opts.lang),
+        replyMarkup: this.buildLanguageToggleTelegram(opts.lang),
+        priority: "user",
+      });
+      return { spaceId: String(opts.anchorMessageId), announce: false };
+    }
 
     if (this.config.telegram?.use_topics && opts.chat.type === "supergroup" && opts.chat.is_forum) {
       const picked = await this.pickTelegramTopicEmoji();
@@ -2603,31 +2817,38 @@ export class BotController {
       }
     }
 
-	    const root = await this.telegram.sendMessageSingle({
-	      chatId,
-	      messageThreadId: opts.anchorMessageThreadId,
-	      replyToMessageId: opts.anchorMessageId,
-	      text: "Session created. Reply to this message to continue.",
-	      priority: "user",
-	    });
-	    return { spaceId: String(root.message_id), announce: false };
-	  }
+    const root = await this.telegram.sendMessageSingle({
+      chatId,
+      messageThreadId: opts.anchorMessageThreadId,
+      replyToMessageId: opts.anchorMessageId,
+      text: t("session.created_reply", opts.lang),
+      replyMarkup: this.buildLanguageToggleTelegram(opts.lang),
+      priority: "user",
+    });
+    return { spaceId: String(root.message_id), announce: false };
+  }
 
   private async pinTelegramTopicHeader(opts: {
     chatId: string;
     topicId: number;
     initialPrompt: string;
     sessionId: string;
+    lang: UserLanguage;
   }) {
     if (!this.telegram) return;
-    const message = this.formatTelegramTopicHeaderMessage(opts.initialPrompt, opts.sessionId);
+    const message = this.formatTelegramTopicHeaderMessage(opts.initialPrompt, opts.sessionId, opts.lang);
     try {
       const msg = await this.telegram.sendMessageSingleStrict({
         chatId: opts.chatId,
         messageThreadId: opts.topicId,
         text: message.text,
         parseMode: message.parseMode,
-        replyMarkup: { inline_keyboard: [[{ text: "Stop", callback_data: `kill:${opts.sessionId}` }]] },
+        replyMarkup: {
+          inline_keyboard: [
+            [{ text: t("button.stop", opts.lang), callback_data: `kill:${opts.sessionId}` }],
+            [{ text: getLanguageLabel(getOtherLanguage(opts.lang)), callback_data: `lang:${getOtherLanguage(opts.lang)}` }],
+          ],
+        },
         priority: "user",
       });
       await this.telegram.pinChatMessage(opts.chatId, msg.message_id);
@@ -2638,14 +2859,18 @@ export class BotController {
     }
   }
 
-  private formatTelegramTopicHeaderMessage(initialPrompt: string, sessionId: string): { text: string; parseMode: "HTML" } {
+  private formatTelegramTopicHeaderMessage(
+    initialPrompt: string,
+    sessionId: string,
+    lang: UserLanguage,
+  ): { text: string; parseMode: "HTML" } {
     const maxChars = this.config.telegram?.max_chars ?? 4096;
-    const promptLabel = "<b>Prompt:</b>\n";
-    const sessionBlock = `\n\n<b>Session id:</b>\n<pre>${escapeHtml(sessionId)}</pre>`;
+    const promptLabel = `<b>${t("session.prompt_label", lang)}</b>\n`;
+    const sessionBlock = `\n\n<b>${t("session.id_label", lang)}</b>\n<pre>${escapeHtml(sessionId)}</pre>`;
     const baseOverhead = promptLabel.length + "<pre></pre>".length + sessionBlock.length;
     const promptBudget = Math.max(0, maxChars - baseOverhead);
 
-    const normalizedPrompt = initialPrompt.trim() || "(empty prompt)";
+    const normalizedPrompt = initialPrompt.trim() || t("session.empty_prompt", lang);
     const escapedPromptFull = escapeHtml(normalizedPrompt);
     const clippedEscaped = truncateHtmlEscapedWithEllipsis(escapedPromptFull, promptBudget);
     let text = `${promptLabel}<pre>${clippedEscaped}</pre>${sessionBlock}`;
@@ -2658,7 +2883,7 @@ export class BotController {
     }
 
     if (text.length > maxChars) {
-      text = `<b>Session id:</b>\n<pre>${escapeHtml(sessionId)}</pre>`;
+      text = `<b>${t("session.id_label", lang)}</b>\n<pre>${escapeHtml(sessionId)}</pre>`;
     }
 
     return { text, parseMode: "HTML" };
@@ -2744,6 +2969,7 @@ export class BotController {
         this.logger.warn(`[slack] rejected app_mention channel=${channelId} user=${userId} reason=${access.reason ?? "-"}`);
         return;
       }
+      const lang = await this.resolveUserLanguage("slack", userId);
 
       const text = typeof ev.text === "string" ? ev.text : "";
       this.logger.debug(
@@ -2765,7 +2991,8 @@ export class BotController {
         await this.slack.postEphemeral({
           channel: channelId,
           user: userId,
-          text: formatSessionList("slack", { ...sessionPage, filterLabel: formatSessionFilterLabel(listIntent.statuses) }),
+          text: formatSessionList("slack", lang, { ...sessionPage, filterLabel: formatSessionFilterLabel(listIntent.statuses) }),
+          blocks: this.buildLanguageToggleSlackBlocks(lang),
         });
         return;
       }
@@ -2783,32 +3010,38 @@ export class BotController {
               anthropic: names.has("ANTHROPIC_API_KEY"),
             };
           }
-            const result = formatSettingsSummary(this.config, settingsIntent.defaultAgent, "slack", identity, cloudKeyStatus);
+          const result = formatSettingsSummary(this.config, settingsIntent.defaultAgent, "slack", lang, identity, cloudKeyStatus);
           await this.slack.postEphemeral({
             channel: channelId,
             user: userId,
             text: result,
+            blocks: this.buildLanguageToggleSlackBlocks(lang),
           });
           return;
         }
-      const cloudResult = await applyCloudSettingsCommand({
-        config: this.config,
-        db: this.db,
-        cmd: settingsIntent.cmd,
-        identityId: identity.id,
-      });
-      const identityResult = await applyIdentitySettingsCommand({
-        config: this.config,
-        db: this.db,
-        cmd: settingsIntent.cmd,
-        identityId: identity.id,
-      });
-      const result =
-        identityResult ?? cloudResult ?? applySettingsCommand(this.config, settingsIntent.cmd, settingsIntent.defaultAgent, "slack");
+        const cloudResult = await applyCloudSettingsCommand({
+          config: this.config,
+          db: this.db,
+          cmd: settingsIntent.cmd,
+          identityId: identity.id,
+          lang,
+        });
+        const identityResult = await applyIdentitySettingsCommand({
+          config: this.config,
+          db: this.db,
+          cmd: settingsIntent.cmd,
+          identityId: identity.id,
+          lang,
+        });
+        const result =
+          identityResult ??
+          cloudResult ??
+          applySettingsCommand(this.config, settingsIntent.cmd, settingsIntent.defaultAgent, "slack", lang);
         await this.slack.postEphemeral({
           channel: channelId,
           user: userId,
           text: result,
+          blocks: this.buildLanguageToggleSlackBlocks(lang),
         });
         return;
       }
@@ -2924,13 +3157,20 @@ export class BotController {
         (payload?.user?.id as string | undefined) ??
         (payload?.view?.private_metadata ? (safeParseMeta(payload.view.private_metadata)?.userId as string | undefined) : undefined);
       if (channel && user) {
-        await this.slack.postEphemeral({ channel, user, text: `Error: ${String(e)}` });
+        const lang = await this.resolveUserLanguage("slack", user);
+        await this.slack.postEphemeral({
+          channel,
+          user,
+          text: t("error.generic", lang, { message: String(e) }),
+          blocks: this.buildLanguageToggleSlackBlocks(lang),
+        });
       }
     }
   }
 
   private async startSlackWizard(teamId: string | null, channelId: string, userId: string) {
     if (!this.slack) return;
+    const lang = await this.resolveUserLanguage("slack", userId);
     await setWizardState(this.db, {
       id: crypto.randomUUID(),
       agent: "codex",
@@ -2949,8 +3189,8 @@ export class BotController {
       value: p.id,
     }));
 
-    const menuText = buildMenuText("slack", "codex");
-    const commandExamples = buildCommandExamples("slack");
+    const menuText = buildMenuText("slack", "codex", lang);
+    const commandExamples = buildCommandExamples("slack", lang);
 
     await this.slack.postEphemeral({
       channel: channelId,
@@ -2959,11 +3199,11 @@ export class BotController {
       blocks: [
         {
           type: "section",
-          text: { type: "mrkdwn", text: "Choose a project to start a Codex session:" },
+          text: { type: "mrkdwn", text: `${t("wizard.choose_project", lang, { agent: "Codex" })}:` },
           accessory: {
             type: "static_select",
             action_id: "project_select",
-            placeholder: { type: "plain_text", text: "Select a project" },
+            placeholder: { type: "plain_text", text: t("wizard.select_project", lang) },
             options,
           },
         },
@@ -2971,6 +3211,7 @@ export class BotController {
           type: "section",
           text: { type: "mrkdwn", text: commandExamples },
         },
+        ...this.buildLanguageToggleSlackBlocks(lang),
       ],
     });
   }
@@ -2980,6 +3221,24 @@ export class BotController {
     const action = payload.actions?.[0];
     if (!action) return;
 
+    if (action.action_id === "switch_language") {
+      const next = typeof action.value === "string" ? action.value : "";
+      const channelId = payload.channel?.id as string | undefined;
+      const userId = payload.user?.id as string | undefined;
+      if (!channelId || !userId || !isUserLanguage(next)) return;
+      await setUserLanguage(this.db, "slack", userId, next);
+      await this.db
+        .updateTable("sessions")
+        .set({ language: next, updated_at: nowMs() })
+        .where("platform", "=", "slack")
+        .where("created_by_user_id", "=", userId)
+        .where("status", "in", ["starting", "running"])
+        .execute();
+      const confirmKey = next === "zh" ? "lang.switched_zh" : "lang.switched_en";
+      await this.slack.postEphemeral({ channel: channelId, user: userId, text: t(confirmKey, next) });
+      return;
+    }
+
     if (action.action_id === "kill_session") {
       const sessionId = typeof action.value === "string" ? action.value : null;
       const channelId = payload.channel?.id as string | undefined;
@@ -2987,6 +3246,7 @@ export class BotController {
       const teamId = payload.team?.id as string | undefined;
       if (!sessionId || !channelId || !userId) return;
 
+      const lang = await this.resolveUserLanguage("slack", userId);
       const access = this.slackAccessDecision(teamId ?? null, channelId, userId);
       if (!access.allowed) {
         this.logger.warn(
@@ -2997,34 +3257,36 @@ export class BotController {
 
       const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
       if (!session || session.platform !== "slack" || session.chat_id !== channelId) {
-        await this.slack.postEphemeral({ channel: channelId, user: userId, text: "Session not found." });
+        await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("session.not_found", lang) });
         return;
       }
       if (session.status !== "starting" && session.status !== "running") {
-        await this.slack.postEphemeral({ channel: channelId, user: userId, text: "Session already finished." });
+        await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("session.already_finished", lang) });
         return;
       }
 
       const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
       if (isCloudSession && this.cloudManager) {
-        await this.slack.postEphemeral({ channel: channelId, user: userId, text: "Stopping run…" });
+        await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("run.stopping", lang) });
         try {
           await this.cloudManager.stopSandboxForSession(sessionId);
-          await this.sendSessionMessageMarkdown(session as SessionRow, "*Run stopped.*");
+          await this.sendSessionMessageMarkdown(session as SessionRow, t("run.stopped", this.resolveSessionLanguage(session as SessionRow)));
         } catch (e) {
           this.logger.warn(
             `[slack] stop run failed channel=${channelId} user=${userId} session=${sessionId}: ${String(e)}`,
           );
           await this.sendSessionMessageMarkdown(
             session as SessionRow,
-            `*Stop failed:* ${redactText(e instanceof Error ? e.message : String(e))}`,
+            t("run.stop_failed", this.resolveSessionLanguage(session as SessionRow), {
+              error: redactText(e instanceof Error ? e.message : String(e)),
+            }),
           );
         }
         return;
       }
 
-      await this.slack.postEphemeral({ channel: channelId, user: userId, text: "Stopping session…" });
-      await this.sessionManager.killSession(sessionId, "Stopping session at user request.");
+      await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("session.stopping", lang) });
+      await this.sessionManager.killSession(sessionId, t("session.stop_requested", this.resolveSessionLanguage(session as SessionRow)));
       return;
     }
 
@@ -3035,6 +3297,7 @@ export class BotController {
       const teamId = payload.team?.id as string | undefined;
       if (!sessionId || !channelId || !userId) return;
 
+      const lang = await this.resolveUserLanguage("slack", userId);
       const access = this.slackAccessDecision(teamId ?? null, channelId, userId);
       if (!access.allowed) {
         this.logger.warn(
@@ -3045,26 +3308,28 @@ export class BotController {
 
       const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
       if (!session || session.platform !== "slack" || session.chat_id !== channelId) {
-        await this.slack.postEphemeral({ channel: channelId, user: userId, text: "Session not found." });
+        await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("session.not_found", lang) });
         return;
       }
       const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
       if (!this.cloudManager || !isCloudSession) {
-        await this.slack.postEphemeral({ channel: channelId, user: userId, text: "Sandbox stop not available." });
+        await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("sandbox.stop_unavailable", lang) });
         return;
       }
 
-      await this.slack.postEphemeral({ channel: channelId, user: userId, text: "Stopping sandbox…" });
+      await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("sandbox.stopping", lang) });
       try {
         await this.cloudManager.stopSandboxForSession(sessionId);
-        await this.sendSessionMessageMarkdown(session as SessionRow, "*Sandbox stopped.*");
+        await this.sendSessionMessageMarkdown(session as SessionRow, t("sandbox.stopped", this.resolveSessionLanguage(session as SessionRow)));
       } catch (e) {
         this.logger.warn(
           `[slack] stop sandbox action failed channel=${channelId} user=${userId} session=${sessionId}: ${String(e)}`,
         );
         await this.sendSessionMessageMarkdown(
           session as SessionRow,
-          `*Sandbox stop failed:* ${redactText(e instanceof Error ? e.message : String(e))}`,
+          t("sandbox.stop_failed", this.resolveSessionLanguage(session as SessionRow), {
+            error: redactText(e instanceof Error ? e.message : String(e)),
+          }),
         );
       }
       return;
@@ -3107,6 +3372,7 @@ export class BotController {
       const messageText = typeof payload.message?.text === "string" ? payload.message.text : undefined;
       if (!sessionId || !channelId || !userId) return;
 
+      const lang = await this.resolveUserLanguage("slack", userId);
       const access = this.slackAccessDecision(teamId ?? null, channelId, userId);
       if (!access.allowed) {
         this.logger.warn(
@@ -3117,15 +3383,27 @@ export class BotController {
 
       const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
       if (!session || session.platform !== "slack" || session.chat_id !== channelId) {
-        await this.slack.postEphemeral({ channel: channelId, user: userId, text: "Session not found." });
+        await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("session.not_found", lang) });
         return;
       }
 
       this.markReviewCommitDisabled(sessionId);
-      if (ts) await this.disableReviewCommitButtonsSlack({ channelId, ts, text: messageText, note: "[Clock] Started Review" });
+      if (ts) {
+        await this.disableReviewCommitButtonsSlack({
+          channelId,
+          ts,
+          text: messageText,
+          note: t("review.started_note", this.resolveSessionLanguage(session as SessionRow)),
+        });
+      }
 
       const threadTs = this.config.slack?.session_mode === "thread" ? session.space_id : undefined;
-      await this.slack.postEphemeral({ channel: channelId, user: userId, thread_ts: threadTs, text: "Starting review…" });
+      await this.slack.postEphemeral({
+        channel: channelId,
+        user: userId,
+        thread_ts: threadTs,
+        text: t("session.starting_review", lang),
+      });
       try {
         await this.handleSessionMessage(session as SessionRow, userId, REVIEW_PROMPT);
       } catch (e) {
@@ -3136,7 +3414,7 @@ export class BotController {
           channel: channelId,
           user: userId,
           thread_ts: threadTs,
-          text: `Error: ${String(e)}`,
+          text: t("error.generic", lang, { message: String(e) }),
         });
       }
       return;
@@ -3151,6 +3429,7 @@ export class BotController {
       const messageText = typeof payload.message?.text === "string" ? payload.message.text : undefined;
       if (!sessionId || !channelId || !userId) return;
 
+      const lang = await this.resolveUserLanguage("slack", userId);
       const access = this.slackAccessDecision(teamId ?? null, channelId, userId);
       if (!access.allowed) {
         this.logger.warn(
@@ -3161,7 +3440,7 @@ export class BotController {
 
       const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
       if (!session || session.platform !== "slack" || session.chat_id !== channelId) {
-        await this.slack.postEphemeral({ channel: channelId, user: userId, text: "Session not found." });
+        await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("session.not_found", lang) });
         return;
       }
 
@@ -3190,7 +3469,7 @@ export class BotController {
           channel: channelId,
           user: userId,
           thread_ts: threadTs,
-          text: "Preparing commit proposal…",
+          text: t("commit.proposal.preparing", lang),
         });
         try {
           await this.handleSessionMessage(session as SessionRow, userId, buildCommitProposalPrompt(identity.branch_name_rule));
@@ -3202,7 +3481,7 @@ export class BotController {
             channel: channelId,
             user: userId,
             thread_ts: threadTs,
-            text: `Error: ${String(e)}`,
+            text: t("error.generic", lang, { message: String(e) }),
           });
         }
         return;
@@ -3212,7 +3491,7 @@ export class BotController {
         channel: channelId,
         user: userId,
         thread_ts: threadTs,
-        text: "Committing changes…",
+        text: t("session.committing", lang),
       });
       try {
         await this.handleSessionMessage(session as SessionRow, userId, COMMIT_PROMPT);
@@ -3224,7 +3503,7 @@ export class BotController {
           channel: channelId,
           user: userId,
           thread_ts: threadTs,
-          text: `Error: ${String(e)}`,
+          text: t("error.generic", lang, { message: String(e) }),
         });
       }
       return;
@@ -3237,6 +3516,7 @@ export class BotController {
       const teamId = payload.team?.id as string | undefined;
       if (!proposalId || !channelId || !userId) return;
 
+      const lang = await this.resolveUserLanguage("slack", userId);
       const access = this.slackAccessDecision(teamId ?? null, channelId, userId);
       if (!access.allowed) {
         this.logger.warn(
@@ -3247,16 +3527,16 @@ export class BotController {
 
       const proposal = this.commitProposalStore?.getProposal(proposalId) ?? null;
       if (!proposal) {
-        await this.slack.postEphemeral({ channel: channelId, user: userId, text: "Commit proposal expired." });
+        await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("commit.proposal.expired", lang) });
         return;
       }
       if (proposal.platform !== "slack" || proposal.chatId !== channelId || proposal.userId !== userId) {
-        await this.slack.postEphemeral({ channel: channelId, user: userId, text: "Not authorized." });
+        await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("error.not_authorized", lang) });
         return;
       }
       const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", proposal.sessionId).executeTakeFirst();
       if (!session || session.platform !== "slack" || session.chat_id !== channelId) {
-        await this.slack.postEphemeral({ channel: channelId, user: userId, text: "Session not found." });
+        await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("session.not_found", lang) });
         return;
       }
       const actionKind: CommitProposalAction =
@@ -3273,6 +3553,7 @@ export class BotController {
     const userId = payload.user?.id as string | undefined;
     const teamId = payload.team?.id as string | undefined;
     if (!projectId || !triggerId || !channelId || !userId) return;
+    const lang = await this.resolveUserLanguage("slack", userId);
     const access = this.slackAccessDecision(teamId ?? null, channelId, userId);
     if (!access.allowed) {
       this.logger.warn(
@@ -3296,26 +3577,32 @@ export class BotController {
       updated_at: nowMs(),
     });
 
-    await this.slack.openModal(triggerId, this.buildSlackWizardModal({ project, channelId, userId, teamId: teamId ?? null }));
+    await this.slack.openModal(triggerId, this.buildSlackWizardModal({ project, channelId, userId, teamId: teamId ?? null, lang }));
   }
 
-  private buildSlackWizardModal(opts: { project: ProjectEntry; channelId: string; userId: string; teamId: string | null }) {
+  private buildSlackWizardModal(opts: {
+    project: ProjectEntry;
+    channelId: string;
+    userId: string;
+    teamId: string | null;
+    lang: UserLanguage;
+  }) {
     const blocks: any[] = [];
 
     if (opts.project.path === "*") {
       blocks.push({
         type: "input",
         block_id: "custom_path",
-        label: { type: "plain_text", text: "Project path" },
+        label: { type: "plain_text", text: t("wizard.project_path_label", opts.lang) },
         element: { type: "plain_text_input", action_id: "input" },
-        hint: { type: "plain_text", text: "Must be within allowed roots if restrict_paths=true." },
+        hint: { type: "plain_text", text: t("wizard.project_path_hint", opts.lang) },
       });
     }
 
     blocks.push({
       type: "input",
       block_id: "prompt",
-      label: { type: "plain_text", text: "Initial prompt" },
+      label: { type: "plain_text", text: t("wizard.prompt_label", opts.lang) },
       element: { type: "plain_text_input", action_id: "input", multiline: true },
     });
 
@@ -3328,9 +3615,9 @@ export class BotController {
         userId: opts.userId,
         teamId: opts.teamId,
       }),
-      title: { type: "plain_text", text: "Codex Session" },
-      submit: { type: "plain_text", text: "Start" },
-      close: { type: "plain_text", text: "Cancel" },
+      title: { type: "plain_text", text: t("wizard.modal_title", opts.lang) },
+      submit: { type: "plain_text", text: t("wizard.modal_submit", opts.lang) },
+      close: { type: "plain_text", text: t("wizard.modal_cancel", opts.lang) },
       blocks,
     };
   }
@@ -3357,7 +3644,12 @@ export class BotController {
     const resolved = await validateAndResolveProjectPath(this.config, project, project.path === "*" ? customPath ?? null : null);
 
     // Create session thread root.
-    const rootTs = await this.slack.postMessage({ channel: meta.channelId, text: "Session starting…" });
+    const lang = await this.resolveUserLanguage("slack", meta.userId);
+    const rootTs = await this.slack.postMessage({
+      channel: meta.channelId,
+      text: t("session.starting", lang),
+      blocks: this.buildLanguageToggleSlackBlocks(lang),
+    });
     if (!rootTs) throw new Error("Failed to create Slack thread");
 
     await clearWizardState(this.db, "slack", meta.channelId, meta.userId);
@@ -3388,7 +3680,8 @@ export class BotController {
       });
       const n = await countPendingMessages(this.db, session.id);
       this.logger.debug(`[session] queued message session=${session.id} from=${userId} pending=${n}`);
-      await this.sendToSession(session.id, { text: `Queued (${n}). I’ll run this when the current turn finishes.`, priority: "user" });
+      const lang = this.resolveSessionLanguage(session);
+      await this.sendToSession(session.id, { text: t("session.queued", lang, { n }), priority: "user" });
       return;
     }
     this.logger.debug(`[session] resuming session=${session.id} from=${userId}`);
@@ -3396,15 +3689,25 @@ export class BotController {
       const resumed = await this.cloudManager.resumeCloudSession(session, text);
       if (resumed === "resumed") return;
       if (resumed === "expired") {
-        await this.sendToSession(session.id, { text: "Sandbox expired. Starting a new session…", priority: "user" });
+        await this.sendToSession(session.id, {
+          text: t("sandbox.expired_new_session", this.resolveSessionLanguage(session)),
+          priority: "user",
+        });
         try {
           const restarted = await this.cloudManager.restartCloudSession(session, text);
           if (restarted === "restarted") return;
         } catch (e) {
-          await this.sendToSession(session.id, { text: `Failed to restart session: ${String(e)}`, priority: "user" });
+          const lang = this.resolveSessionLanguage(session);
+          await this.sendToSession(session.id, {
+            text: t("session.restart_failed", lang, { error: redactText(String(e)) }),
+            priority: "user",
+          });
           return;
         }
-        await this.sendToSession(session.id, { text: "Sandbox expired. Please start a new session.", priority: "user" });
+        await this.sendToSession(session.id, {
+          text: t("sandbox.expired_prompt", this.resolveSessionLanguage(session)),
+          priority: "user",
+        });
         return;
       }
     }
@@ -3602,14 +3905,14 @@ function truncateText(value: string, max: number): string {
   return `${value.slice(0, Math.max(0, max - 1))}…`;
 }
 
-function humanStatus(status?: string | null): string {
+function humanStatus(status: string | null | undefined, lang: UserLanguage): string {
   const s = (status ?? "").toLowerCase();
-  if (s === "finished") return "run completed";
-  if (s === "killed") return "stopped by user";
-  if (s === "error") return "run failed";
-  if (s === "termination") return "terminated (lease expired/cleanup)";
-  if (s === "manual") return "manual snapshot";
-  return s || "(unknown)";
+  if (s === "finished") return t("status.run_completed", lang);
+  if (s === "killed") return t("status.stopped_by_user", lang);
+  if (s === "error") return t("status.run_failed", lang);
+  if (s === "termination") return t("status.termination", lang);
+  if (s === "manual") return t("status.manual_snapshot", lang);
+  return s || t("status.unknown", lang);
 }
 
 function parseCloudCommand(text: string): CloudCommand | null {
@@ -3830,68 +4133,94 @@ function applySettingsCommand(
   cmd: SettingsCommand,
   defaultAgent: SessionAgent,
   platform: "telegram" | "slack",
+  lang: UserLanguage,
 ): string {
-  if (cmd.kind === "list") return formatSettingsSummary(config, defaultAgent, platform, null, null);
+  if (cmd.kind === "list") return formatSettingsSummary(config, defaultAgent, platform, lang, null, null);
 
   const parsed = resolveSettingTarget(cmd.target, defaultAgent);
-  if (!parsed) return `Unknown setting "${cmd.target}".\nSupported: ${formatSupportedSettingKeys()}`;
+  if (!parsed) {
+    return `${t("settings.unknown", lang, { key: cmd.target })}\n${t("settings.supported", lang, {
+      keys: formatSupportedSettingKeys(),
+    })}`;
+  }
 
   const adapter = getAgentAdapter(parsed.agent);
   let agentConfig;
   try {
     agentConfig = adapter.requireConfig(config);
   } catch (e) {
-    return `Error: ${String(e)}`;
+    return t("error.generic", lang, { message: String(e) });
   }
 
   const prefix = AGENT_PREFIX[parsed.agent];
 
   if (parsed.type === "bool") {
-    if (cmd.kind !== "set") return `Use "settings set ${parsed.label} <on|off>" to change it.`;
+    if (cmd.kind !== "set") return t("settings.use_set", lang, { cmd: `settings set ${parsed.label} <on|off>` });
     const value = parseBool(cmd.value);
-    if (value === null) return `Expected true/false value for ${parsed.label}.`;
+    if (value === null) return t("settings.expected_bool", lang, { key: parsed.label });
     const prev = agentConfig[parsed.key];
     (agentConfig as any)[parsed.key] = value;
-    return `${parsed.label} updated (${String(prev)} -> ${String(value)}). Runtime-only; affects new ${adapter.displayName} runs. Use "settings" to view current values.`;
+    return t("settings.updated", lang, {
+      key: parsed.label,
+      prev: String(prev),
+      next: String(value),
+      agent: adapter.displayName,
+    });
   }
 
   if (parsed.type === "number") {
-    if (cmd.kind !== "set") return `Use "settings set ${parsed.label} <number>" to change it.`;
+    if (cmd.kind !== "set") return t("settings.use_set", lang, { cmd: `settings set ${parsed.label} <number>` });
     const n = Number(cmd.value);
-    if (!Number.isFinite(n)) return `Expected a number for ${parsed.label}.`;
+    if (!Number.isFinite(n)) return t("settings.expected_number", lang, { key: parsed.label });
     const next = Math.floor(n);
-    if (next < parsed.min) return `${parsed.label} must be >= ${parsed.min}.`;
+    if (next < parsed.min) return t("settings.min_value", lang, { key: parsed.label, min: parsed.min });
     const prev = agentConfig[parsed.key];
     (agentConfig as any)[parsed.key] = next;
-    return `${parsed.label} updated (${String(prev)} -> ${String(next)}). Runtime-only; affects new ${adapter.displayName} runs. Use "settings" to view current values.`;
+    return t("settings.updated", lang, {
+      key: parsed.label,
+      prev: String(prev),
+      next: String(next),
+      agent: adapter.displayName,
+    });
   }
 
   if (parsed.type === "string") {
-    if (cmd.kind !== "set") return `Use "settings set ${parsed.label} <value>" to change it.`;
+    if (cmd.kind !== "set") return t("settings.use_set", lang, { cmd: `settings set ${parsed.label} <value>` });
     const next = cmd.value.trim();
-    if (!next) return `${parsed.label} cannot be empty.`;
+    if (!next) return t("settings.empty_value", lang, { key: parsed.label });
     const prev = agentConfig[parsed.key];
     (agentConfig as any)[parsed.key] = next;
-    return `${parsed.label} updated (${prev ?? "(empty)"} -> ${next}). Runtime-only; affects new ${adapter.displayName} runs. Use "settings" to view current values.`;
+    const prevLabel = prev ?? t("settings.empty", lang);
+    return t("settings.updated", lang, {
+      key: parsed.label,
+      prev: String(prevLabel),
+      next: String(next),
+      agent: adapter.displayName,
+    });
   }
 
   if (parsed.type === "env") {
     const key = parsed.envKey;
     if (cmd.kind === "unset") {
-      if (!(key in agentConfig.env)) return `Env \`${key}\` is already unset for ${prefix}.`;
+      if (!(key in agentConfig.env)) return t("settings.env_already_unset", lang, { key, prefix });
       delete agentConfig.env[key];
-      return `${parsed.label} removed. Runtime-only; affects new ${adapter.displayName} runs. Use "settings" to view current values.`;
+      return t("settings.env_unset", lang, { key });
     }
     const value = cmd.value.trim();
-    if (!value) return `${parsed.label} cannot be empty.`;
+    if (!value) return t("settings.empty_value", lang, { key: parsed.label });
     const prev = agentConfig.env[key];
     agentConfig.env[key] = value;
-    const current = formatEnvValue(value);
-    const suffix = prev ? ` (was ${formatEnvValue(prev)})` : "";
-    return `${parsed.label} set to ${current}${suffix}. Runtime-only; affects new ${adapter.displayName} runs. Use "settings" to view current values.`;
+    const current = formatEnvValue(value, lang);
+    const suffix = prev ? t("settings.env_set_prev", lang, { value: formatEnvValue(prev, lang) }) : "";
+    return t("settings.env_set", lang, {
+      key: parsed.label,
+      value: current,
+      suffix,
+      agent: adapter.displayName,
+    });
   }
 
-  return "Unsupported settings command.";
+  return t("settings.unsupported", lang);
 }
 
 function parseSessionStatusFilter(text: string): SessionStatus[] | undefined {
@@ -3928,87 +4257,97 @@ function detectAgentFromTelegramMessageText(text: string): SessionAgent {
   return mapped ?? "codex";
 }
 
-function buildMenuText(platform: "telegram" | "slack", agent: SessionAgent): string {
+function buildMenuText(platform: "telegram" | "slack", agent: SessionAgent, lang: UserLanguage): string {
   const commands =
     platform === "telegram"
       ? [
-          "- /sessions - list recent sessions (add 'active' to filter, 'page 2' for older ones)",
-          "- /settings - list/tweak runtime settings (agent + MCP)",
+          t("menu.sessions_hint_tg", lang),
+          t("menu.settings_hint_tg", lang),
         ]
       : [
-          '- Mention me with "sessions" to list recent sessions (add "active" or "page 2")',
-          '- Mention me with "settings" to list/tweak runtime settings (agent + MCP)',
+          t("menu.sessions_hint_slack", lang),
+          t("menu.settings_hint_slack", lang),
         ];
-  const examples = buildCommandExamples(platform);
-  const lines = [`Choose a project to start a ${agentDisplayName(agent)} session.`, ...commands, "", examples];
+  const examples = buildCommandExamples(platform, lang);
+  const lines = [t("menu.intro", lang, { agent: agentDisplayName(agent) }), ...commands, "", examples];
   return lines.join("\n");
 }
 
-function buildCloudHelpText(platform: "telegram" | "slack"): string {
-  const title = platform === "slack" ? "*Cloud mode help*" : "Cloud mode help";
+function buildCloudHelpText(platform: "telegram" | "slack", lang: UserLanguage): string {
+  const title = platform === "slack" ? `*${t("cloud.help.title", lang)}*` : t("cloud.help.title", lang);
   const cmdPrefix = platform === "telegram" ? "/" : "";
   const cmd = (value: string) => `${cmdPrefix}${value}`;
   const repoShareCmd = `\`${cmd("repo share <number>")}\``;
   const notes = [
-    `- In group chats, finish connect + repo select in DM first, then use ${repoShareCmd}.`,
+    t("cloud.help.note_group", lang, { cmd: repoShareCmd }),
   ];
-  notes.push(`- To disconnect a GitHub App, use \`${cmd("disconnect github")}\` in a 1:1 chat.`);
+  notes.push(t("cloud.help.note_disconnect", lang, { cmd: `\`${cmd("disconnect github")}\`` }));
   if (platform === "slack") {
-    notes.push("- In Slack channels, mention the bot before the command (for example, `@bot connect github`).");
+    notes.push(t("cloud.help.note_slack_mention", lang));
   }
   const lines = [
     title,
-    "Cloud mode is enabled. Project selection is disabled.",
+    t("cloud.help.enabled", lang),
     "",
-    "Quick start",
-    "1) Connect (do this in a 1:1 chat with the bot)",
-    `- \`${cmd("connect chatgpt")}\` (opens ChatGPT login)`,
-    `- \`${cmd("connect chatgpt status")}\` (view linked account)`,
-    `- \`${cmd("connect chatgpt revoke")}\` (unlink account)`,
-    `- \`${cmd("connect github")}\` (or \`${cmd("connect gitlab")}\`, \`${cmd("connect local")}\`)`,
+    t("cloud.help.quick_start", lang),
+    t("cloud.help.step_connect", lang),
+    t("cloud.help.cmd.connect_chatgpt", lang, { cmd: `\`${cmd("connect chatgpt")}\`` }),
+    t("cloud.help.cmd.connect_chatgpt_status", lang, { cmd: `\`${cmd("connect chatgpt status")}\`` }),
+    t("cloud.help.cmd.connect_chatgpt_revoke", lang, { cmd: `\`${cmd("connect chatgpt revoke")}\`` }),
+    t("cloud.help.cmd.connect_github", lang, {
+      cmd: `\`${cmd("connect github")}\``,
+      cmd2: `\`${cmd("connect gitlab")}\``,
+      cmd3: `\`${cmd("connect local")}\``,
+    }),
     "",
-    "2) Pick repos (or Playground)",
-    `- \`${cmd("repos")}\` (optional: \`${cmd("repos --provider github --search <term>")}\`)`,
-    `- \`${cmd("repo select <number>")}\` (or \`${cmd("repo select playground")}\`)`,
+    t("cloud.help.step_pick_repos", lang),
+    t("cloud.help.cmd.repos", lang, {
+      cmd: `\`${cmd("repos")}\``,
+      cmd2: `\`${cmd("repos --provider github --search <term>")}\``,
+    }),
+    t("cloud.help.cmd.repo_select", lang, {
+      cmd: `\`${cmd("repo select <number>")}\``,
+      cmd2: `\`${cmd("repo select playground")}\``,
+    }),
     "",
-    "3) Share to a group (optional)",
+    t("cloud.help.step_share_group", lang),
     `- ${repoShareCmd}`,
     "",
-    "4) Run an action",
-    `- \`${cmd("run <prompt>")}\` (multi-repo: \`--repos id1,id2\`)`,
+    t("cloud.help.step_run_action", lang),
+    t("cloud.help.cmd.run", lang, { cmd: `\`${cmd("run <prompt>")}\``, arg: "`--repos id1,id2`" }),
     "",
-    "5) Check results",
+    t("cloud.help.step_check_results", lang),
     `- \`${cmd("status <runId>")}\``,
     `- \`${cmd("pull <runId>")}\``,
     "",
-    "6) Secrets (optional)",
+    t("cloud.help.step_secrets", lang),
     `- \`${cmd("secrets create NAME VALUE")}\``,
     `- \`${cmd("secrets update NAME VALUE")}\``,
     `- \`${cmd("secrets list")}\``,
     `- \`${cmd("secrets delete NAME")}\``,
     "",
-    "7) CLI (optional)",
-    `- \`${cmd("tinc token")}\` (get a token for the tinc CLI)`,
+    t("cloud.help.step_cli", lang),
+    t("cloud.help.cmd.tinc_token", lang, { cmd: `\`${cmd("tinc token")}\`` }),
     "",
-    "8) Snapshots (restore cloud workspaces)",
+    t("cloud.help.step_snapshots", lang),
     `- \`${cmd("snapshot save [note]")}\``,
     `- \`${cmd("snapshot list [limit]")}\``,
     `- \`${cmd("snapshot search <query>")}\``,
     `- \`${cmd("snapshot restore <index|snapshotId>")}\``,
     "",
-    "9) Disconnect",
+    t("cloud.help.step_disconnect", lang),
     `- \`${cmd("disconnect github")}\``,
     `- \`${cmd("disconnect github --installation <id>")}\``,
     `- \`${cmd("disconnect github --all")}\``,
     `- \`${cmd("disconnect github confirm <token>")}\``,
     "",
-    "Notes",
+    t("cloud.help.notes", lang),
     ...notes,
   ];
   return lines.join("\n");
 }
 
-function buildCommandExamples(platform: "telegram" | "slack"): string {
+function buildCommandExamples(platform: "telegram" | "slack", lang: UserLanguage): string {
   const sessions = platform === "telegram" ? "/sessions active" : "@bot sessions active";
   const sessionsPage = platform === "telegram" ? "/sessions page 2" : "@bot sessions page 2";
   const settings = platform === "telegram" ? "/settings" : "@bot settings";
@@ -4016,7 +4355,7 @@ function buildCommandExamples(platform: "telegram" | "slack"): string {
   const envSet = `${prefix}settings set mcp.SEARCH http://localhost:3000`;
   const envUnset = `${prefix}settings unset mcp.SEARCH`;
   return [
-    "Examples:",
+    t("menu.examples", lang),
     `- \`${sessions}\``,
     `- \`${sessionsPage}\``,
     `- \`${settings}\``,
@@ -4124,6 +4463,7 @@ function formatSettingsSummary(
   config: AppConfig,
   agent: SessionAgent,
   platform: "telegram" | "slack",
+  lang: UserLanguage,
   identity: {
     keepalive_minutes: number | null;
     message_verbosity: number | null;
@@ -4138,7 +4478,7 @@ function formatSettingsSummary(
   try {
     section = adapter.requireConfig(config);
   } catch (e) {
-    return `Error: ${String(e)}`;
+    return t("error.generic", lang, { message: String(e) });
   }
   const cmdPrefix = platform === "telegram" ? "/" : "@bot ";
   const prefix = AGENT_PREFIX[agent];
@@ -4149,12 +4489,16 @@ function formatSettingsSummary(
       ? identityVerbosity
       : config.bot.message_verbosity;
   const verbositySuffix =
-    typeof identityVerbosity === "number" && Number.isFinite(identityVerbosity) ? " (per-user)" : " (default)";
+    typeof identityVerbosity === "number" && Number.isFinite(identityVerbosity)
+      ? t("settings.suffix_per_user", lang)
+      : t("settings.suffix_default", lang);
   const identityBranchRule = identity?.branch_name_rule?.trim() || "";
-  const branchRuleLabel = identityBranchRule ? `${identityBranchRule} (per-user)` : "default";
+  const branchRuleLabel = identityBranchRule
+    ? t("settings.branch_rule_custom", lang, { rule: identityBranchRule })
+    : t("settings.branch_rule_default", lang);
 
   const lines = [
-    `Settings for ${adapter.displayName} (runtime only; not saved to config.toml):`,
+    t("settings.title", lang, { agent: adapter.displayName }),
     `- \`${prefix}.binary\`: ${section.binary}`,
     `- \`${prefix}.sessions_dir\`: ${section.sessions_dir}`,
     `- \`${prefix}.timeout_seconds\`: ${String(section.timeout_seconds)}`,
@@ -4164,23 +4508,23 @@ function formatSettingsSummary(
     `- \`${prefix}.dangerously_bypass_approvals_and_sandbox\`: ${String(section.dangerously_bypass_approvals_and_sandbox)}`,
     `- \`${prefix}.skip_git_repo_check\`: ${String(section.skip_git_repo_check)}`,
     "",
-    "User settings:",
+    t("settings.user_section", lang),
     `- \`message_verbosity\`: ${String(effectiveVerbosity)}${verbositySuffix}`,
     `- \`branch_name_rule\`: ${branchRuleLabel}`,
   ];
 
   const envEntries = Object.entries(section.env);
-  if (envEntries.length === 0) lines.push("- env overrides: (none)");
+  if (envEntries.length === 0) lines.push(t("settings.env_overrides_none", lang));
   else {
-    lines.push("- env overrides:");
-    for (const [k, v] of envEntries) lines.push(`  - \`${k}\` = ${formatEnvValue(v)}`);
+    lines.push(t("settings.env_overrides", lang));
+    for (const [k, v] of envEntries) lines.push(`  - \`${k}\` = ${formatEnvValue(v, lang)}`);
   }
 
   const mcpEntries = envEntries.filter(([k]) => k.toUpperCase().startsWith("MCP_"));
-  if (mcpEntries.length === 0) lines.push("- MCP env: (none)");
+  if (mcpEntries.length === 0) lines.push(t("settings.mcp_env_none", lang));
   else {
-    lines.push("- MCP env:");
-    for (const [k, v] of mcpEntries) lines.push(`  - \`${k}\` = ${formatEnvValue(v)}`);
+    lines.push(t("settings.mcp_env", lang));
+    for (const [k, v] of mcpEntries) lines.push(`  - \`${k}\` = ${formatEnvValue(v, lang)}`);
   }
 
   if (config.cloud?.enabled) {
@@ -4190,16 +4534,22 @@ function formatSettingsSummary(
         ? identityKeepaliveMinutes
         : config.cloud.keepalive_minutes;
     const suffix =
-      typeof identityKeepaliveMinutes === "number" && Number.isFinite(identityKeepaliveMinutes) ? " (per-user)" : " (default)";
-    const openaiStatus = cloudKeyStatus?.openai ? "set (per-user)" : "not set";
-    const anthropicStatus = cloudKeyStatus?.anthropic ? "set (per-user)" : "not set";
+      typeof identityKeepaliveMinutes === "number" && Number.isFinite(identityKeepaliveMinutes)
+        ? t("settings.suffix_per_user", lang)
+        : t("settings.suffix_default", lang);
+    const openaiStatus = cloudKeyStatus?.openai ? t("settings.key_set", lang) : t("settings.key_unset", lang);
+    const anthropicStatus = cloudKeyStatus?.anthropic ? t("settings.key_set", lang) : t("settings.key_unset", lang);
     const gitName = identity?.git_user_name?.trim() || null;
     const gitEmail = identity?.git_user_email?.trim() || null;
-    const gitNameLabel = gitName ? `${gitName} (per-user)` : "tintin[bot] (default)";
-    const gitEmailLabel = gitEmail ? `${gitEmail} (per-user)` : "tintin@fuzz.land (default)";
+    const gitNameLabel = gitName
+      ? t("settings.value_per_user", lang, { value: gitName })
+      : t("settings.value_default", lang, { value: "tintin[bot]" });
+    const gitEmailLabel = gitEmail
+      ? t("settings.value_per_user", lang, { value: gitEmail })
+      : t("settings.value_default", lang, { value: "tintin@fuzz.land" });
     lines.push(
       "",
-      "Cloud settings:",
+      t("settings.cloud_section", lang),
       `- \`cloud.keepalive_minutes\`: ${String(effective)}${suffix}`,
       `- \`cloud.git_user_name\`: ${gitNameLabel}`,
       `- \`cloud.git_user_email\`: ${gitEmailLabel}`,
@@ -4210,7 +4560,7 @@ function formatSettingsSummary(
 
   lines.push(
     "",
-    "Examples:",
+    t("settings.examples", lang),
     `- ${cmdPrefix}settings set ${prefix}.timeout_seconds 1800`,
     `- ${cmdPrefix}settings set message_verbosity 2`,
     `- ${cmdPrefix}settings set branch_name_rule \"feature/{date}-{slug}\"`,
@@ -4235,6 +4585,7 @@ async function applyIdentitySettingsCommand(opts: {
   db: Db;
   cmd: SettingsCommand;
   identityId: string;
+  lang: UserLanguage;
 }): Promise<string | null> {
   if (opts.cmd.kind === "list") return null;
   const target = opts.cmd.target.trim().toLowerCase();
@@ -4250,26 +4601,26 @@ async function applyIdentitySettingsCommand(opts: {
   if (opts.cmd.kind === "unset") {
     if (target === "message_verbosity" || target === "bot.message_verbosity") {
       await setIdentityMessageVerbosity(opts.db, opts.identityId, null);
-      return "`message_verbosity` reset to default.";
+      return t("settings.message_verbosity.reset", opts.lang);
     }
     await setIdentityBranchNameRule(opts.db, opts.identityId, null);
-    return "`branch_name_rule` reset to default.";
+    return t("settings.branch_rule.reset", opts.lang);
   }
 
   if (target === "message_verbosity" || target === "bot.message_verbosity") {
     const raw = opts.cmd.value.trim();
     const next = Number(raw);
-    if (!Number.isFinite(next)) return "Expected a number for `message_verbosity`.";
+    if (!Number.isFinite(next)) return t("settings.message_verbosity.expected_number", opts.lang);
     const value = Math.floor(next);
-    if (value < 1 || value > 3) return "`message_verbosity` must be 1 (response only), 2 (response + reasoning + events), or 3 (all).";
+    if (value < 1 || value > 3) return t("settings.message_verbosity.range", opts.lang);
     await setIdentityMessageVerbosity(opts.db, opts.identityId, value);
-    return `message_verbosity updated (per-user) -> ${value}.`;
+    return t("settings.message_verbosity.updated", opts.lang, { value });
   }
 
   const rule = opts.cmd.value.trim();
-  if (!rule) return "`branch_name_rule` cannot be empty.";
+  if (!rule) return t("settings.branch_rule.empty", opts.lang);
   await setIdentityBranchNameRule(opts.db, opts.identityId, rule);
-  return "branch_name_rule updated (per-user).";
+  return t("settings.branch_rule.updated", opts.lang);
 }
 
 async function applyCloudSettingsCommand(opts: {
@@ -4277,6 +4628,7 @@ async function applyCloudSettingsCommand(opts: {
   db: Db;
   cmd: SettingsCommand;
   identityId: string;
+  lang: UserLanguage;
 }): Promise<string | null> {
   if (opts.cmd.kind === "list") return null;
   const target = opts.cmd.target.trim().toLowerCase();
@@ -4288,74 +4640,76 @@ async function applyCloudSettingsCommand(opts: {
     target !== "cloud.anthropic_api_key"
   )
     return null;
-  if (!opts.config.cloud) return "Cloud configuration is missing.";
+  if (!opts.config.cloud) return t("cloud.config_missing", opts.lang);
 
   if (opts.cmd.kind === "unset") {
     if (target === "cloud.keepalive_minutes") {
       await setIdentityKeepaliveMinutes(opts.db, opts.identityId, null);
-      return "`cloud.keepalive_minutes` reset to default.";
+      return t("settings.cloud_keepalive.reset", opts.lang);
     }
     if (target === "cloud.git_user_name") {
       await setIdentityGitUserName(opts.db, opts.identityId, null);
-      return "`cloud.git_user_name` reset to default.";
+      return t("settings.cloud_git_user_name.reset", opts.lang);
     }
     if (target === "cloud.git_user_email") {
       await setIdentityGitUserEmail(opts.db, opts.identityId, null);
-      return "`cloud.git_user_email` reset to default.";
+      return t("settings.cloud_git_user_email.reset", opts.lang);
     }
     const name = target === "cloud.openai_api_key" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY";
     const ok = await deleteSecret(opts.db, opts.identityId, name);
-    return ok ? `\`${target}\` cleared (per-user).` : `\`${target}\` was already unset.`;
+    return ok ? t("settings.cloud_key.cleared", opts.lang, { target }) : t("settings.cloud_key.already_unset", opts.lang, { target });
   }
 
   if (target === "cloud.git_user_name") {
     if (opts.cmd.kind !== "set") {
-      return `Use "settings set cloud.git_user_name <name>" to change it.`;
+      return t("settings.use_set", opts.lang, { cmd: "settings set cloud.git_user_name <name>" });
     }
     const value = opts.cmd.value.trim();
-    if (!value) return "`cloud.git_user_name` cannot be empty.";
+    if (!value) return t("settings.cloud_git_user_name.empty", opts.lang);
     await setIdentityGitUserName(opts.db, opts.identityId, value);
-    return `cloud.git_user_name updated (per-user) -> ${value}.`;
+    return t("settings.cloud_git_user_name.updated", opts.lang, { value });
   }
 
   if (target === "cloud.git_user_email") {
     if (opts.cmd.kind !== "set") {
-      return `Use "settings set cloud.git_user_email <email>" to change it.`;
+      return t("settings.use_set", opts.lang, { cmd: "settings set cloud.git_user_email <email>" });
     }
     const value = opts.cmd.value.trim();
-    if (!value) return "`cloud.git_user_email` cannot be empty.";
+    if (!value) return t("settings.cloud_git_user_email.empty", opts.lang);
     await setIdentityGitUserEmail(opts.db, opts.identityId, value);
-    return `cloud.git_user_email updated (per-user) -> ${value}.`;
+    return t("settings.cloud_git_user_email.updated", opts.lang, { value });
   }
 
   if (target === "cloud.keepalive_minutes") {
     if (opts.cmd.kind !== "set") {
-      return `Use "settings set cloud.keepalive_minutes <number>" to change it.`;
+      return t("settings.use_set", opts.lang, { cmd: "settings set cloud.keepalive_minutes <number>" });
     }
     const n = Number(opts.cmd.value);
-    if (!Number.isFinite(n)) return "Expected a number for `cloud.keepalive_minutes`.";
+    if (!Number.isFinite(n)) return t("settings.cloud_keepalive.expected_number", opts.lang);
     const next = Math.floor(n);
-    if (next < 0) return "`cloud.keepalive_minutes` must be >= 0.";
+    if (next < 0) return t("settings.cloud_keepalive.min", opts.lang);
     await setIdentityKeepaliveMinutes(opts.db, opts.identityId, next);
-    return `cloud.keepalive_minutes updated (per-user) -> ${String(next)}.`;
+    return t("settings.cloud_keepalive.updated", opts.lang, { value: next });
   }
 
   if (opts.cmd.kind !== "set") {
-    return `Use "settings set ${target} <key>" to change it.`;
+    return t("settings.use_set", opts.lang, { cmd: `settings set ${target} <key>` });
   }
   const value = opts.cmd.value.trim();
-  if (!value) return `\`${target}\` cannot be empty.`;
-  if (!opts.config.cloud.secrets_key) return "Cloud secrets are not configured (cloud.secrets_key is empty).";
+  if (!value) return t("settings.cloud_key.empty", opts.lang, { target });
+  if (!opts.config.cloud.secrets_key) return t("cloud.secrets_missing", opts.lang);
   const encrypted = encryptSecret(value, opts.config.cloud.secrets_key);
   const name = target === "cloud.openai_api_key" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY";
   await setSecret(opts.db, { identityId: opts.identityId, name, encryptedValue: encrypted });
-  return `\`${target}\` updated (per-user).`;
+  return t("settings.cloud_key.updated", opts.lang, { target });
 }
 
-function formatEnvValue(value: string): string {
+function formatEnvValue(value: string, lang: UserLanguage): string {
   const redacted = redactText(value);
-  if (!redacted) return "(empty)";
-  if (redacted.length > 80) return `${redacted.slice(0, 60)}… (${redacted.length} chars)`;
+  if (!redacted) return t("settings.value_empty", lang);
+  if (redacted.length > 80) {
+    return t("settings.value_truncated", lang, { value: redacted.slice(0, 60), count: redacted.length });
+  }
   return redacted;
 }
 
@@ -4489,31 +4843,53 @@ function buildSessionsCommand(platform: "telegram" | "slack", filterLabel: strin
 
 function formatSessionList(
   platform: "telegram" | "slack",
+  lang: UserLanguage,
   opts: SessionListPage & { filterLabel?: string },
 ): string {
   const filterSuffix = opts.filterLabel ? ` (${opts.filterLabel})` : "";
   if (opts.sessions.length === 0) {
-    if (opts.page <= 1) return "No sessions in this chat yet.";
+    if (opts.page <= 1) return t("sessions.empty", lang);
     const prev = opts.page > 1 ? buildSessionsCommand(platform, opts.filterLabel, opts.page - 1) : null;
-    const hint = prev ? ` Try ${prev}.` : "";
-    return `No sessions${filterSuffix} on page ${opts.page}.${hint}`;
+    const hint = prev ? t("sessions.empty_page_hint", lang, { cmd: prev }) : "";
+    return `${t("sessions.empty_page", lang, { filter: filterSuffix, page: opts.page })}${hint}`;
   }
 
-  const header = `Sessions${filterSuffix} (page ${opts.page}, ${opts.limit} per page, newest first):`;
-  const lines = opts.sessions.map((s) => formatSessionLine(platform, s));
+  const header = t("sessions.title", lang, { filter: filterSuffix, page: opts.page, limit: opts.limit });
+  const lines = opts.sessions.map((s) => formatSessionLine(platform, lang, s));
   const nav: string[] = [];
   if (opts.page > 1) nav.push(buildSessionsCommand(platform, opts.filterLabel, opts.page - 1));
   if (opts.hasMore) nav.push(buildSessionsCommand(platform, opts.filterLabel, opts.page + 1));
-  const navText = nav.length > 0 ? `\n\nNavigation: \`${nav.join("` | `")}\`` : "";
+  const navText =
+    nav.length > 0 ? `\n\n${t("sessions.navigation", lang)} \`${nav.join("` | `")}\`` : "";
   return `${header}\n${lines.map((l) => `- ${l}`).join("\n")}${navText}`;
 }
 
-function formatSessionLine(platform: "telegram" | "slack", s: SessionRow): string {
+function formatSessionLine(platform: "telegram" | "slack", lang: UserLanguage, s: SessionRow): string {
   const emoji = formatSessionEmoji(platform, s);
   const url = formatSessionLink(platform, s);
   const emojiLabel = url ? formatEmojiLink(platform, emoji, url) : emoji;
-  const age = formatRelativeAge(s.created_at);
-  return `${emojiLabel} ${s.status} ${agentShortName(s.agent)} ${s.project_id} ${age}`;
+  const age = formatRelativeAge(s.created_at, lang);
+  const status = formatSessionStatus(s.status, lang);
+  return `${emojiLabel} ${status} ${agentShortName(s.agent)} ${s.project_id} ${age}`;
+}
+
+function formatSessionStatus(status: SessionStatus, lang: UserLanguage): string {
+  switch (status) {
+    case "wizard":
+      return t("session.status.wizard", lang);
+    case "starting":
+      return t("session.status.starting", lang);
+    case "running":
+      return t("session.status.running", lang);
+    case "finished":
+      return t("session.status.finished", lang);
+    case "error":
+      return t("session.status.error", lang);
+    case "killed":
+      return t("session.status.killed", lang);
+    default:
+      return String(status);
+  }
 }
 
 function formatSessionEmoji(platform: "telegram" | "slack", s: SessionRow): string {
@@ -4557,31 +4933,31 @@ function buildSlackPermalink(workspaceId: string | null, channelId: string, spac
   return `${base}/thread/${encodeURIComponent(channelId)}-${encodeURIComponent(threadTs)}`;
 }
 
-function formatRelativeAge(createdAt: unknown): string {
+function formatRelativeAge(createdAt: unknown, lang: UserLanguage): string {
   const ts = toNumber(createdAt);
   if (!Number.isFinite(ts) || ts <= 0) return "-";
   const diffMs = Math.max(0, Date.now() - ts);
   const seconds = Math.floor(diffMs / 1000);
-  if (seconds < 5) return "just now";
-  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 5) return t("time.just_now", lang);
+  if (seconds < 60) return t("time.seconds_ago", lang, { n: seconds });
 
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return t("time.minutes_ago", lang, { n: minutes });
 
   const hours = Math.floor(minutes / 60);
-  if (hours < 48) return `${hours}hr${hours === 1 ? "" : "s"} ago`;
+  if (hours < 48) return t("time.hours_ago", lang, { n: hours });
 
   const days = Math.floor(hours / 24);
-  if (days < 14) return `${days}d ago`;
+  if (days < 14) return t("time.days_ago", lang, { n: days });
 
   const weeks = Math.floor(days / 7);
-  if (weeks < 9) return `${weeks}w ago`;
+  if (weeks < 9) return t("time.weeks_ago", lang, { n: weeks });
 
   const months = Math.floor(days / 30);
-  if (months < 18) return `${months}mo ago`;
+  if (months < 18) return t("time.months_ago", lang, { n: months });
 
   const years = Math.floor(days / 365);
-  return `${years}y ago`;
+  return t("time.years_ago", lang, { n: years });
 }
 
 function toNumber(value: unknown): number {

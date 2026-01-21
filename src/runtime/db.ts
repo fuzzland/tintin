@@ -6,6 +6,8 @@ import path from "node:path";
 import { mkdir } from "node:fs/promises";
 import type { Logger } from "./log.js";
 import type { AppConfig } from "./config.js";
+import type { UserLanguage } from "../locales/index.js";
+export type { UserLanguage } from "../locales/index.js";
 
 export type SessionStatus = "wizard" | "starting" | "running" | "finished" | "error" | "killed";
 export type SessionAgent = "codex" | "claude_code";
@@ -33,6 +35,7 @@ export interface SessionsTable {
   created_at: number;
   updated_at: number;
   last_user_message_at: number | null;
+  language: UserLanguage;
 }
 
 export interface SessionStreamOffsetsTable {
@@ -76,6 +79,15 @@ export interface SessionPendingMessagesTable {
   message_text: string;
   created_at: number;
   consumed_at: number | null;
+}
+
+export interface UserPreferencesTable {
+  id: string;
+  platform: string;
+  user_id: string;
+  language: UserLanguage;
+  created_at: number;
+  updated_at: number;
 }
 
 export interface IdentitiesTable {
@@ -319,6 +331,7 @@ export interface DatabaseSchema {
   wizard_states: WizardStatesTable;
   audit_events: AuditEventsTable;
   session_pending_messages: SessionPendingMessagesTable;
+  user_preferences: UserPreferencesTable;
   identities: IdentitiesTable;
   connections: ConnectionsTable;
   repos: ReposTable;
