@@ -47,6 +47,9 @@ import { PlaywrightMcpManager } from "./playwrightMcp.js";
 import { appendFile, open, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { isUserLanguage, t, type UserLanguage } from "../locales/index.js";
+import { WebSocketManager } from "./websocket/manager.js";
+import { WebSocketHandler } from "./websocket/handler.js";
+import type { ServerMessage } from "./websocket/types.js";
 
 export interface BotServiceDeps {
   config: AppConfig;
@@ -318,6 +321,11 @@ export async function createBotService(deps: BotServiceDeps) {
   const telegram = config.telegram ? new TelegramClient(config.telegram, logger) : null;
   const slack = config.slack ? new SlackClient(config.slack, logger) : null;
   const playwrightMcp = config.playwright_mcp?.enabled ? new PlaywrightMcpManager(config.playwright_mcp, logger) : null;
+
+  // WebSocket manager - initialized here so it's accessible in sendToSession closure
+  // The actual setup happens after sessionManager is created
+  let wsManager: WebSocketManager | null = null;
+
   if (config.chatgpt_oauth) {
     const sweep = async () => {
       try {
@@ -1117,6 +1125,45 @@ export async function createBotService(deps: BotServiceDeps) {
     const session = await db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
     if (!session) return;
     const lang = resolveSessionLanguage(session);
+
+    // WebSocket push: broadcast to all subscribers of this session
+    if (wsManager?.hasSubscribers(sessionId)) {
+      let wsMessage: ServerMessage | null = null;
+      if (message.type === "finalize") {
+        wsMessage = { type: 'done', sessionId };
+      } else if (message.type === "plan_update") {
+        wsMessage = {
+          type: 'plan_update',
+          sessionId,
+          plan: message.plan.map(p => ({ step: p.step, status: p.status as any })),
+          explanation: message.explanation,
+        };
+      } else if (message.type === "image") {
+        // For images, we send a tool_output with the path (can't send binary over text WS)
+        wsMessage = {
+          type: 'tool_output',
+          sessionId,
+          name: 'screenshot',
+          output: message.caption ?? message.filename,
+        };
+      } else if (typeof message.text === "string") {
+        wsMessage = { type: 'chunk', sessionId, content: message.text };
+        if (message.final) {
+          // Send chunk first, then done
+          wsManager.broadcastToSession(sessionId, wsMessage);
+          wsMessage = { type: 'done', sessionId };
+        }
+      }
+      if (wsMessage) {
+        wsManager.broadcastToSession(sessionId, wsMessage);
+      }
+    }
+
+    // Skip platform delivery for WebSocket-only sessions
+    if (session.platform === "websocket") {
+      return;
+    }
+
     const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
     const handledCommitProposal = await maybeHandleCommitProposalMessage(sessionId, message);
     if (handledCommitProposal) return;
@@ -1345,6 +1392,16 @@ export async function createBotService(deps: BotServiceDeps) {
       ? (chatId, messageId) => telegramMessageToSession.get(telegramMessageKey(chatId, messageId)) ?? null
       : null,
   );
+
+  // WebSocket manager initialization
+  let wsHandler: WebSocketHandler | null = null;
+  if (config.websocket?.enabled) {
+    wsManager = new WebSocketManager(config.websocket, logger);
+    wsHandler = new WebSocketHandler(wsManager, sessionManager, config, config.websocket, db, logger);
+    wsManager.setHandler((connId, message) => wsHandler!.handleMessage(connId, message));
+    wsManager.startHeartbeat();
+    logger.info(`[ws] WebSocket enabled on path=${config.websocket.path}`);
+  }
 
   const extractUiToken = (req: http.IncomingMessage, url: URL): string | null => {
     const header = readHeader(req, "authorization");
@@ -2088,6 +2145,19 @@ export async function createBotService(deps: BotServiceDeps) {
       sendText(res, 500, "internal error");
     }
   });
+
+  // WebSocket upgrade handler
+  if (wsManager && config.websocket?.enabled) {
+    server.on('upgrade', (req, socket, head) => {
+      const reqUrl = req.url ?? '';
+      const pathOnly = reqUrl.split('?')[0];
+      if (pathOnly === config.websocket!.path) {
+        wsManager!.handleUpgrade(req, socket, head);
+      } else {
+        socket.destroy();
+      }
+    });
+  }
 
   let chatgptCallbackServer: http.Server | null = null;
 

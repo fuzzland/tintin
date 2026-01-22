@@ -198,3 +198,17 @@ enabled = true
 ttl_days = 30
 keep_per_identity = 50
 sweep_minutes = 360
+
+# WebSocket server configuration for real-time web client connections
+[websocket]
+enabled = true
+path = "/api/ws/chat"
+auth_enabled = false                    # Phase 1: disable token authentication
+# auth_secret = "env:TINTIN_WS_AUTH_SECRET" # Required when auth_enabled = true
+ping_interval_ms = 30000                # Server ping interval
+connection_timeout_ms = 60000           # Close inactive connections after this time
+auth_timeout_ms = 5000                  # Time allowed for authentication after connect
+max_connections = 1000                  # Maximum total WebSocket connections
+max_connections_per_identity = 5        # Maximum connections per authenticated identity
+max_message_size = 65536                # Maximum message size in bytes (64KB)
+rate_limit_messages_per_sec = 10        # Maximum messages per second per connection

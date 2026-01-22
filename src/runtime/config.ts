@@ -160,6 +160,20 @@ export interface SnapshotCleanupSection {
   sweep_minutes?: number;
 }
 
+export interface WebSocketSection {
+  enabled: boolean;
+  path: string;
+  auth_enabled: boolean;
+  auth_secret?: string;
+  ping_interval_ms: number;
+  connection_timeout_ms: number;
+  auth_timeout_ms: number;
+  max_connections: number;
+  max_connections_per_identity: number;
+  max_message_size: number;
+  rate_limit_messages_per_sec: number;
+}
+
 export interface TelegramSection {
   token: string;
   additional_bot_tokens: string[];
@@ -244,6 +258,7 @@ export interface AppConfig {
   cloud?: CloudSection | null;
   pinecone?: PineconeSection | null;
   chatgpt_oauth?: ChatgptOAuthSection | null;
+  websocket?: WebSocketSection | null;
   config_dir: string;
 }
 
@@ -864,6 +879,66 @@ function normalizeSnapshotCleanupSection(value: unknown): SnapshotCleanupSection
   return { enabled, ttl_days, keep_per_identity, sweep_minutes };
 }
 
+function normalizeWebSocketSection(value: unknown): WebSocketSection | null {
+  if (value === undefined || value === null) return null;
+  assert(isRecord(value), "[websocket] must be a table");
+
+  const enabled = typeof value.enabled === "boolean" ? value.enabled : true;
+  const pathRaw = typeof value.path === "string" ? value.path : "/api/ws/chat";
+  const pathVal = pathRaw.startsWith("/") ? pathRaw : `/${pathRaw}`;
+  const auth_enabled = typeof value.auth_enabled === "boolean" ? value.auth_enabled : false;
+  const auth_secret = typeof value.auth_secret === "string" ? value.auth_secret : undefined;
+
+  const ping_interval_ms =
+    typeof value.ping_interval_ms === "number" && Number.isFinite(value.ping_interval_ms) && value.ping_interval_ms > 0
+      ? Math.floor(value.ping_interval_ms)
+      : 30000;
+
+  const connection_timeout_ms =
+    typeof value.connection_timeout_ms === "number" && Number.isFinite(value.connection_timeout_ms) && value.connection_timeout_ms > 0
+      ? Math.floor(value.connection_timeout_ms)
+      : 60000;
+
+  const auth_timeout_ms =
+    typeof value.auth_timeout_ms === "number" && Number.isFinite(value.auth_timeout_ms) && value.auth_timeout_ms > 0
+      ? Math.floor(value.auth_timeout_ms)
+      : 5000;
+
+  const max_connections =
+    typeof value.max_connections === "number" && Number.isFinite(value.max_connections) && value.max_connections > 0
+      ? Math.floor(value.max_connections)
+      : 1000;
+
+  const max_connections_per_identity =
+    typeof value.max_connections_per_identity === "number" && Number.isFinite(value.max_connections_per_identity) && value.max_connections_per_identity > 0
+      ? Math.floor(value.max_connections_per_identity)
+      : 5;
+
+  const max_message_size =
+    typeof value.max_message_size === "number" && Number.isFinite(value.max_message_size) && value.max_message_size > 0
+      ? Math.floor(value.max_message_size)
+      : 65536; // 64KB
+
+  const rate_limit_messages_per_sec =
+    typeof value.rate_limit_messages_per_sec === "number" && Number.isFinite(value.rate_limit_messages_per_sec) && value.rate_limit_messages_per_sec > 0
+      ? value.rate_limit_messages_per_sec
+      : 10;
+
+  return {
+    enabled,
+    path: pathVal,
+    auth_enabled,
+    auth_secret,
+    ping_interval_ms,
+    connection_timeout_ms,
+    auth_timeout_ms,
+    max_connections,
+    max_connections_per_identity,
+    max_message_size,
+    rate_limit_messages_per_sec,
+  };
+}
+
 export async function loadConfig(configPath: string): Promise<AppConfig> {
   const absPath = path.resolve(configPath);
   const configDir = path.dirname(absPath);
@@ -1061,6 +1136,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
   const cloud = normalizeCloudSection((resolved as any).cloud, { configDir, dataDir: botSection.data_dir });
   const pinecone = normalizePineconeSection((resolved as any).pinecone);
   const chatgpt_oauth = normalizeChatgptOAuthSection(cloud);
+  const websocket = normalizeWebSocketSection((resolved as any).websocket);
   if (cloud?.enabled && cloud.public_base_url.length > 0) {
     cloud.public_base_url = normalizeUrl(cloud.public_base_url, "[cloud].public_base_url");
   }
@@ -1087,6 +1163,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     cloud,
     pinecone,
     chatgpt_oauth,
+    websocket,
     config_dir: configDir,
   };
 }
