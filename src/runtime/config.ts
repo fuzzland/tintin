@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import * as toml from "@iarna/toml";
@@ -284,6 +285,34 @@ function toStringIdArray(value: unknown): string[] {
   return out;
 }
 
+let dotenvCache: Record<string, string> | null = null;
+
+function loadDotenv(): Record<string, string> {
+  if (dotenvCache !== null) return dotenvCache;
+  dotenvCache = {};
+  try {
+    const envPath = path.resolve(process.cwd(), ".env");
+    const content = readFileSync(envPath, "utf-8");
+    for (const line of content.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eqIdx = trimmed.indexOf("=");
+      if (eqIdx === -1) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      let value = trimmed.slice(eqIdx + 1).trim();
+      // Remove quotes
+      if ((value.startsWith('"') && value.endsWith('"')) ||
+          (value.startsWith("'") && value.endsWith("'"))) {
+        value = value.slice(1, -1);
+      }
+      dotenvCache[key] = value;
+    }
+  } catch {
+    // .env file does not exist or cannot be read, ignore
+  }
+  return dotenvCache;
+}
+
 function resolveEnvSecrets(
   value: unknown,
   opts: { allowMissing?: (path: string[]) => boolean } = {},
@@ -292,7 +321,11 @@ function resolveEnvSecrets(
   if (typeof value === "string") {
     if (value.startsWith("env:")) {
       const key = value.slice("env:".length);
-      const resolved = process.env[key];
+      let resolved = process.env[key];
+      if (!resolved) {
+        const dotenv = loadDotenv();
+        resolved = dotenv[key];
+      }
       if (!resolved) {
         if (opts.allowMissing?.(path)) return value;
         throw new Error(`Missing required environment variable ${key}`);
