@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import * as toml from "@iarna/toml";
 
 export type Platform = "telegram" | "slack";
@@ -176,6 +177,7 @@ export interface WebSocketSection {
 }
 
 export interface TelegramSection {
+  enabled: boolean;
   token: string;
   additional_bot_tokens: string[];
   mode: "webhook" | "poll";
@@ -192,6 +194,7 @@ export interface TelegramSection {
 export type SlackSessionMode = "thread" | "channel";
 
 export interface SlackSection {
+  enabled: boolean;
   bot_token: string;
   signing_secret: string;
   events_path: string;
@@ -286,12 +289,50 @@ function toStringIdArray(value: unknown): string[] {
 }
 
 let dotenvCache: Record<string, string> | null = null;
+let dotenvConfigDir: string | undefined = undefined;
 
-function loadDotenv(): Record<string, string> {
-  if (dotenvCache !== null) return dotenvCache;
-  dotenvCache = {};
+function findEnvFile(configDir?: string): string | null {
+  // Search paths in order of priority
+  const searchPaths: string[] = [];
+
+  // Priority 1: config.toml directory (if provided)
+  if (configDir) {
+    searchPaths.push(path.resolve(configDir, ".env"));
+  }
+
+  // Priority 2: current working directory
+  searchPaths.push(path.resolve(process.cwd(), ".env"));
+
+  // Priority 3: project root (relative to this module)
   try {
-    const envPath = path.resolve(process.cwd(), ".env");
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = path.dirname(__filename);
+    // Go up from src/runtime to project root
+    const projectRoot = path.resolve(__dirname, "..", "..");
+    searchPaths.push(path.resolve(projectRoot, ".env"));
+  } catch {
+    // import.meta.url not available, skip
+  }
+
+  for (const envPath of searchPaths) {
+    if (existsSync(envPath)) {
+      return envPath;
+    }
+  }
+  return null;
+}
+
+function loadDotenv(configDir?: string): Record<string, string> {
+  // If configDir changes, reset the cache
+  if (dotenvCache !== null && dotenvConfigDir === configDir) {
+    return dotenvCache;
+  }
+
+  dotenvCache = {};
+  dotenvConfigDir = configDir;
+  try {
+    const envPath = findEnvFile(configDir);
+    if (!envPath) return dotenvCache;
     const content = readFileSync(envPath, "utf-8");
     for (const line of content.split("\n")) {
       const trimmed = line.trim();
@@ -315,29 +356,29 @@ function loadDotenv(): Record<string, string> {
 
 function resolveEnvSecrets(
   value: unknown,
-  opts: { allowMissing?: (path: string[]) => boolean } = {},
-  path: string[] = [],
+  opts: { allowMissing?: (path: string[]) => boolean; configDir?: string } = {},
+  currentPath: string[] = [],
 ): unknown {
   if (typeof value === "string") {
     if (value.startsWith("env:")) {
       const key = value.slice("env:".length);
       let resolved = process.env[key];
       if (!resolved) {
-        const dotenv = loadDotenv();
+        const dotenv = loadDotenv(opts.configDir);
         resolved = dotenv[key];
       }
       if (!resolved) {
-        if (opts.allowMissing?.(path)) return value;
+        if (opts.allowMissing?.(currentPath)) return value;
         throw new Error(`Missing required environment variable ${key}`);
       }
       return resolved;
     }
     return value;
   }
-  if (Array.isArray(value)) return value.map((v, i) => resolveEnvSecrets(v, opts, [...path, String(i)]));
+  if (Array.isArray(value)) return value.map((v, i) => resolveEnvSecrets(v, opts, [...currentPath, String(i)]));
   if (isRecord(value)) {
     const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) out[k] = resolveEnvSecrets(v, opts, [...path, k]);
+    for (const [k, v] of Object.entries(value)) out[k] = resolveEnvSecrets(v, opts, [...currentPath, k]);
     return out;
   }
   return value;
@@ -986,6 +1027,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
   })();
   const resolved = resolveEnvSecrets(parsed, {
     allowMissing: (path) => !cloudEnabled && path[0] === "cloud",
+    configDir,
   }) as unknown;
   assert(isRecord(resolved), "config.toml must parse to a table");
 
@@ -1092,6 +1134,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
   if (resolved.telegram !== undefined) {
     const tg = resolved.telegram;
     assert(isRecord(tg), "[telegram] must be a table");
+    const enabled = typeof tg.enabled === "boolean" ? tg.enabled : true;
     const additionalTokensRaw = Array.isArray((tg as any).additional_bot_tokens) ? (tg as any).additional_bot_tokens : [];
     const additionalTokens: string[] = [];
     for (const t of additionalTokensRaw) {
@@ -1100,6 +1143,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     const mode: TelegramSection["mode"] =
       tg.mode === "poll" || tg.mode === "webhook" ? tg.mode : "webhook";
     telegramSection = {
+      enabled,
       token: typeof tg.token === "string" ? tg.token : "",
       additional_bot_tokens: additionalTokens,
       mode,
@@ -1115,27 +1159,30 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
           : 3000,
       rate_limit_msgs_per_sec: typeof tg.rate_limit_msgs_per_sec === "number" ? tg.rate_limit_msgs_per_sec : 1.0,
     };
-    assert(telegramSection.token.length > 0, "[telegram].token is required");
-    assert(telegramSection.message_queue_interval_ms >= 0, "[telegram].message_queue_interval_ms must be >= 0");
-    if (telegramSection.mode === "webhook") {
-      assert(
-        telegramSection.webhook_secret_token.length > 0,
-        "[telegram].webhook_secret_token is required in webhook mode",
-      );
-      if (telegramSection.public_base_url.length > 0) {
-        telegramSection.public_base_url = normalizeUrl(
-          telegramSection.public_base_url,
-          "[telegram].public_base_url",
+    // Only validate required fields when enabled
+    if (telegramSection.enabled) {
+      assert(telegramSection.token.length > 0, "[telegram].token is required when enabled");
+      assert(telegramSection.message_queue_interval_ms >= 0, "[telegram].message_queue_interval_ms must be >= 0");
+      if (telegramSection.mode === "webhook") {
+        assert(
+          telegramSection.webhook_secret_token.length > 0,
+          "[telegram].webhook_secret_token is required in webhook mode",
+        );
+        if (telegramSection.public_base_url.length > 0) {
+          telegramSection.public_base_url = normalizeUrl(
+            telegramSection.public_base_url,
+            "[telegram].public_base_url",
+          );
+        }
+      } else {
+        assert(
+          telegramSection.poll_timeout_seconds >= 0 && telegramSection.poll_timeout_seconds <= 50,
+          "[telegram].poll_timeout_seconds must be between 0 and 50",
         );
       }
-    } else {
-      assert(
-        telegramSection.poll_timeout_seconds >= 0 && telegramSection.poll_timeout_seconds <= 50,
-        "[telegram].poll_timeout_seconds must be between 0 and 50",
-      );
-    }
-    if (telegramSection.public_base_url.length > 0 && telegramSection.mode === "poll") {
-      telegramSection.public_base_url = normalizeUrl(telegramSection.public_base_url, "[telegram].public_base_url");
+      if (telegramSection.public_base_url.length > 0 && telegramSection.mode === "poll") {
+        telegramSection.public_base_url = normalizeUrl(telegramSection.public_base_url, "[telegram].public_base_url");
+      }
     }
   }
 
@@ -1143,9 +1190,11 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
   if (resolved.slack !== undefined) {
     const s = resolved.slack;
     assert(isRecord(s), "[slack] must be a table");
+    const enabled = typeof s.enabled === "boolean" ? s.enabled : true;
     const mode = typeof s.session_mode === "string" ? s.session_mode : "thread";
     assert(mode === "thread" || mode === "channel", "[slack].session_mode must be 'thread' or 'channel'");
     slackSection = {
+      enabled,
       bot_token: typeof s.bot_token === "string" ? s.bot_token : "",
       signing_secret: typeof s.signing_secret === "string" ? s.signing_secret : "",
       events_path: normalizeHttpPath(typeof s.events_path === "string" ? s.events_path : "/slack/events", "[slack].events_path"),
@@ -1157,8 +1206,11 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
       max_chars: typeof s.max_chars === "number" ? s.max_chars : 3000,
       rate_limit_msgs_per_sec: typeof s.rate_limit_msgs_per_sec === "number" ? s.rate_limit_msgs_per_sec : 1.0,
     };
-    assert(slackSection.bot_token.length > 0, "[slack].bot_token is required");
-    assert(slackSection.signing_secret.length > 0, "[slack].signing_secret is required");
+    // Only validate required fields when enabled
+    if (slackSection.enabled) {
+      assert(slackSection.bot_token.length > 0, "[slack].bot_token is required when enabled");
+      assert(slackSection.signing_secret.length > 0, "[slack].signing_secret is required when enabled");
+    }
   }
 
   const playwrightMcp = normalizePlaywrightMcpSection((resolved as any).playwright_mcp, {
@@ -1169,7 +1221,8 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
   const cloud = normalizeCloudSection((resolved as any).cloud, { configDir, dataDir: botSection.data_dir });
   const pinecone = normalizePineconeSection((resolved as any).pinecone);
   const chatgpt_oauth = normalizeChatgptOAuthSection(cloud);
-  const websocket = normalizeWebSocketSection((resolved as any).websocket);
+  // WebSocket is enabled by default even without [websocket] section
+  const websocket = normalizeWebSocketSection((resolved as any).websocket ?? {});
   if (cloud?.enabled && cloud.public_base_url.length > 0) {
     cloud.public_base_url = normalizeUrl(cloud.public_base_url, "[cloud].public_base_url");
   }
@@ -1181,7 +1234,14 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     cloud.proxy.anthropic_base_url = normalizeUrl(cloud.proxy.anthropic_base_url, "[cloud].proxy.anthropic_base_url");
   }
 
-  assert(telegramSection || slackSection, "At least one of [telegram] or [slack] must be configured");
+  // At least one platform/interface must be enabled
+  const telegramEnabled = telegramSection?.enabled ?? false;
+  const slackEnabled = slackSection?.enabled ?? false;
+  const websocketEnabled = websocket?.enabled ?? false;
+  assert(
+    telegramEnabled || slackEnabled || websocketEnabled,
+    "At least one of [telegram], [slack], or [websocket] must be enabled",
+  );
 
   return {
     bot: botSection,

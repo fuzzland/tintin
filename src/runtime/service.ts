@@ -318,8 +318,8 @@ export async function createBotService(deps: BotServiceDeps) {
   const suppressFinalizeForSession = new Set<string>();
   const commitProposals = new Map<string, CommitProposal>();
 
-  const telegram = config.telegram ? new TelegramClient(config.telegram, logger) : null;
-  const slack = config.slack ? new SlackClient(config.slack, logger) : null;
+  const telegram = config.telegram?.enabled ? new TelegramClient(config.telegram, logger) : null;
+  const slack = config.slack?.enabled ? new SlackClient(config.slack, logger) : null;
   const playwrightMcp = config.playwright_mcp?.enabled ? new PlaywrightMcpManager(config.playwright_mcp, logger) : null;
 
   // WebSocket manager - initialized here so it's accessible in sendToSession closure

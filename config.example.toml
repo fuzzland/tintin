@@ -56,6 +56,7 @@ name = "Custom path…"
 path = "*"
 
 [telegram]
+enabled = true                   # Set to false to disable Telegram (default: true)
 token = "<FILL ME TELEGRAM BOT TOKEN>"
 # Optional extra bots used only for sending to reduce rate limiting; first token above is still used for updates/webhooks.
 # additional_bot_tokens = ["env:TELEGRAM_TOKEN_2", "env:TELEGRAM_TOKEN_3"]
@@ -67,6 +68,7 @@ message_queue_interval_ms = 3000
 rate_limit_msgs_per_sec = 1.0
 
 [slack]
+enabled = true                   # Set to false to disable Slack (default: true)
 bot_token = "<FILL ME SLACK BOT TOKEN>"
 signing_secret = "<FILL ME SLACK SINGING TOKEN>"
 events_path = "/slack/events"
@@ -200,8 +202,9 @@ keep_per_identity = 50
 sweep_minutes = 360
 
 # WebSocket server configuration for real-time web client connections
+# WebSocket is enabled by default even without this section
 [websocket]
-enabled = true
+enabled = true                          # Default: true (enabled by default)
 path = "/api/ws/chat"
 auth_enabled = false                    # Phase 1: disable token authentication
 # auth_secret = "env:TINTIN_WS_AUTH_SECRET" # Required when auth_enabled = true
