@@ -6,6 +6,7 @@ import type { WebSocketManager } from './manager.js';
 import type { ClientMessage, WebSocketSection } from './types.js';
 import { ErrorCodes } from './types.js';
 import type { SessionRow } from '../store.js';
+import { verifyProxyToken } from '../cloud/proxy.js';
 
 export class WebSocketHandler {
   constructor(
@@ -86,22 +87,44 @@ export class WebSocketHandler {
       return;
     }
 
-    try {
-      // TODO: Implement token verification in Phase 2
-      // For now, reject if auth is enabled but no implementation
+    // Use cloud.proxy.shared_secret to verify token
+    const secret = this.config.cloud?.proxy?.shared_secret;
+    if (!secret) {
+      this.logger.warn(`[ws] auth failed id=${connId}: shared_secret not configured`);
       this.wsManager.sendToConnection(connId, {
         type: 'auth_error',
-        message: 'Token verification not implemented',
+        message: 'Auth not configured',
       });
-      this.wsManager.closeConnection(connId, 4001, 'Token verification not implemented');
-    } catch (err) {
-      this.logger.warn(`[ws] auth failed id=${connId}: ${String(err)}`);
+      this.wsManager.closeConnection(connId, 4001, 'Auth not configured');
+      return;
+    }
+
+    const verified = verifyProxyToken(secret, token);
+    if (!verified) {
+      this.logger.warn(`[ws] auth failed id=${connId}: invalid token`);
       this.wsManager.sendToConnection(connId, {
         type: 'auth_error',
         message: 'Invalid token',
       });
       this.wsManager.closeConnection(connId, 4001, 'Invalid token');
+      return;
     }
+
+    if (!this.wsManager.setAuthenticated(connId, verified.identityId)) {
+      this.wsManager.sendToConnection(connId, {
+        type: 'error',
+        code: ErrorCodes.RATE_LIMIT,
+        message: 'Too many connections',
+      });
+      this.wsManager.closeConnection(connId, 4003, 'Too many connections');
+      return;
+    }
+
+    this.wsManager.sendToConnection(connId, {
+      type: 'auth_ok',
+      identityId: verified.identityId,
+    });
+    this.logger.debug(`[ws] auth ok id=${connId} identity=${verified.identityId}`);
   }
 
   private async handleChat(connId: string, message: { sessionId?: string; projectId?: string; messages: Array<{ role: string; content: string }> }): Promise<void> {

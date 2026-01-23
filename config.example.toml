@@ -205,8 +205,8 @@ sweep_minutes = 360
 # WebSocket is enabled by default even without this section
 [websocket]
 enabled = true                          # Default: true (enabled by default)
+auth_enabled = true   
 path = "/api/ws/chat"
-auth_enabled = false                    # Phase 1: disable token authentication
 # auth_secret = "env:TINTIN_WS_AUTH_SECRET" # Required when auth_enabled = true
 ping_interval_ms = 30000                # Server ping interval
 connection_timeout_ms = 60000           # Close inactive connections after this time

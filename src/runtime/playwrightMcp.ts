@@ -203,7 +203,7 @@ export class PlaywrightMcpManager {
     }
     const info: PlaywrightServerInfo = {
       port,
-      url: `http://${this.config.host}:${port}/mcp`,
+      url: `http://${resolveUrlHost(this.config.host)}:${port}/mcp`,
       userDataDir,
       outputDir,
     };
@@ -213,6 +213,19 @@ export class PlaywrightMcpManager {
 
 function substituteSessionId(p: string, sessionId: string): string {
   return p.replaceAll("{sessionId}", sessionId);
+}
+
+/**
+ * Map bind address to client-accessible URL host.
+ * Playwright MCP's security check only accepts Host header as "localhost",
+ * so local loopback addresses need to be mapped to localhost.
+ */
+function resolveUrlHost(bindHost: string): string {
+  const localAddresses = ["127.0.0.1", "::1", "0.0.0.0", "[::]"];
+  if (localAddresses.includes(bindHost)) {
+    return "localhost";
+  }
+  return bindHost;
 }
 
 function safeSnippet(text: string, maxChars = MAX_SNIPPET_CHARS): string {

@@ -18,7 +18,7 @@ import {
   shouldHandleGithubWebhookEvent,
   verifyGithubWebhookSignature,
 } from "./cloud/githubWebhook.js";
-import { handleProxyRequest } from "./cloud/proxy.js";
+import { handleProxyRequest, createProxyToken } from "./cloud/proxy.js";
 import { completeChatgptOAuth, isAllowedRedirectHost } from "./chatgpt/oauth.js";
 import { purgeExpiredChatgptStates } from "./chatgpt/store.js";
 import { JsonlStreamer, mapEventToFragments } from "./streamer.js";
@@ -1508,6 +1508,35 @@ export async function createBotService(deps: BotServiceDeps) {
     try {
       if (req.method === "GET" && pathname === "/healthz") {
         sendText(res, 200, "ok");
+        return;
+      }
+
+      // OPTIONS /api/ws/token - CORS preflight
+      if (req.method === "OPTIONS" && pathname === "/api/ws/token") {
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+        res.statusCode = 204;
+        res.end();
+        return;
+      }
+
+      // GET /api/ws/token - Generate WebSocket authentication token
+      if (req.method === "GET" && pathname === "/api/ws/token") {
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        const proxy = config.cloud?.proxy;
+        if (!proxy?.shared_secret) {
+          sendJson(res, 500, { error: "WebSocket token auth not configured" });
+          return;
+        }
+
+        // Generate anonymous token for web clients
+        // In production, this should validate user identity first
+        const identityId = `ws:web:${crypto.randomUUID().slice(0, 8)}`;
+        const ttlMs = proxy.token_ttl_ms ?? 3600000; // Default 1 hour
+        const token = createProxyToken(proxy.shared_secret, identityId, ttlMs);
+
+        sendJson(res, 200, { token, identityId, expiresIn: ttlMs });
         return;
       }
 
