@@ -137,6 +137,30 @@ export class SessionManager {
     };
   }
 
+  /**
+   * Build CLI args for cloud proxy.
+   * For codex, this overrides the hardcoded model_providers.crs.base_url config
+   * so it uses the proxy URL instead of the direct oai-relay URL.
+   */
+  private buildCloudProxyCliArgs(agent: SessionAgent): string[] {
+    const proxy = this.config.cloud?.proxy;
+    if (!proxy?.enabled || !proxy.openai_api_key || !proxy.shared_secret) {
+      return [];
+    }
+
+    // Only codex needs CLI args override (claude code uses env vars properly)
+    if (agent !== "codex") {
+      return [];
+    }
+
+    const baseUrl = this.config.cloud?.public_base_url ?? `http://127.0.0.1:${this.config.bot.port}`;
+    const trimmedBase = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
+    const proxyUrl = `${trimmedBase}${proxy.openai_path}`;
+
+    // Override codex's model_providers.crs.base_url to use the proxy
+    return ["-c", `model_providers.crs.base_url=${proxyUrl}`];
+  }
+
   private async resolveSessionLanguageById(sessionId: string): Promise<UserLanguage> {
     const row = await this.db
       .selectFrom("sessions")
@@ -283,7 +307,9 @@ export class SessionManager {
       this.logger.debug(
         `[session] spawn agent=${opts.agent} kind=exec session=${id} project=${opts.projectId} cwd=${session.codex_cwd} sessionsRoot=${sessionsRoot} home=${homeDir} search_policy=${searchPolicy.mode} search_provider=${hyperbrowserAvailable ? "hyperbrowser" : "none"} search_enforce=${enforceSearch ? "1" : "0"}`,
       );
-      const extraArgs = await this.playwrightCliArgs(opts.agent);
+      const playwrightArgs = await this.playwrightCliArgs(opts.agent);
+      const cloudProxyArgs = this.buildCloudProxyCliArgs(opts.agent);
+      const extraArgs = [...(playwrightArgs ?? []), ...cloudProxyArgs];
       const spawnedProc = adapter.spawnExec({
         config: this.config,
         logger: this.logger,
@@ -291,7 +317,7 @@ export class SessionManager {
         prompt: agentPrompt,
         homeDir,
         extraEnv: envOverrides,
-        extraArgs: extraArgs ?? undefined,
+        extraArgs: extraArgs.length > 0 ? extraArgs : undefined,
       });
       childToKill = spawnedProc.child;
 
@@ -399,6 +425,9 @@ export class SessionManager {
     const searchDirective = buildSearchDirective({ policy: searchPolicy, lang: language, hyperbrowserAvailable });
     const agentPrompt = buildLocalizedPrompt(prompt, language, { searchDirective });
     let spawned;
+    const playwrightArgs = await this.playwrightCliArgs(session.agent);
+    const cloudProxyArgs = this.buildCloudProxyCliArgs(session.agent);
+    const extraArgs = [...(playwrightArgs ?? []), ...cloudProxyArgs];
     try {
       spawned = adapter.spawnResume({
         config: this.config,
@@ -408,7 +437,7 @@ export class SessionManager {
         prompt: agentPrompt,
         homeDir,
         extraEnv: envWithCloudProxy,
-        extraArgs: (await this.playwrightCliArgs(session.agent)) ?? undefined,
+        extraArgs: extraArgs.length > 0 ? extraArgs : undefined,
       });
     } catch (e) {
       await this.teardownChatgptProxy(session.id, session.workspace_id, session.platform, session.created_by_user_id);
