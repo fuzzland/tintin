@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Tintin is a chat-based control interface (Telegram/Slack) for coding agents (Codex and Claude Code). It allows users to trigger coding tasks, run code, interact with repositories, and view results directly from chat platforms. Supports both local execution and cloud execution via Modal sandboxes.
+Tintin is a chat-based control interface (Telegram/Slack/WebSocket) for coding agents (Codex and Claude Code). It allows users to trigger coding tasks, run code, interact with repositories, and view results directly from chat platforms. Supports both local execution and cloud execution via Modal sandboxes, with Cloud Proxy support for CLI agents.
 
 ## Build & Test Commands
 
@@ -26,19 +26,26 @@ node dist/tinc.js lift|pull|attach
 ## Architecture
 
 ```
-User Interface Layer:  Telegram / Slack / CLI (tinc) / Cloud UI
+User Interface Layer:  Telegram / Slack / WebSocket / Cloud UI
                               │
                               ▼
-Session Orchestration: Controller2 + SessionManager
+HTTP Service & Routing:  service.ts + controller2.ts
                               │
                     ┌─────────┼─────────┐
                     │         │         │
                     ▼         ▼         ▼
-              Agents     Playwright   CloudManager
-           (Codex/CC)      MCP      (Local/Modal)
-                              │
-                              ▼
-Storage & Artifacts:   DB (Kysely) + JSONL/diff/screenshots/S3
+Session Manager     │    CloudManager   │    Cloud Proxy
+(local agents)      │  (Modal/Local)    │    (token auth)
+        │           │         │         │
+        ▼           ▼         ▼         ▼
+    Agents      Playwright  GitHub/     ChatGPT
+  (Codex/CC)      MCP       GitLab      OAuth
+        │                     │
+        ▼                     ▼
+    Streamer              S3 Artifacts
+        │
+        ▼
+Storage: DB (Kysely) + JSONL sessions + S3 screenshots
 ```
 
 ### Key Modules (`src/runtime/`)
@@ -50,12 +57,19 @@ Storage & Artifacts:   DB (Kysely) + JSONL/diff/screenshots/S3
 - **agents.ts / codex.ts / claudeCode.ts**: Agent adapters spawning CLI processes, monitoring output.
 - **cloud/manager.ts**: Cloud run orchestration - workspace creation, file uploads, execution, snapshots.
 - **cloud/modalProvider.ts / localProvider.ts**: Pluggable providers implementing `CloudProvider` interface.
+- **cloud/proxy.ts**: Cloud Proxy token authentication - allows CLI agents to access cloud API endpoints securely.
+- **websocket/**: WebSocket real-time communication - `manager.ts` manages connections, `handler.ts` processes messages, `types.ts` defines protocols.
+- **chatgpt/**: ChatGPT OAuth integration - `oauth.ts` handles authentication flow, `store.ts` manages token storage and refresh.
 
 ### Data Flow
 
 **Local run**: Chat → Platform Adapter → controller2 → sessionManager → Agent (codex/claude) executes in local repo → JSONL events → streamer → Chat
 
 **Cloud run (Modal)**: Chat → controller2 → cloud/manager → modalProvider creates sandbox → uploads repo → agent executes remotely → logs/screenshots via tunnel or S3 → Chat/UI
+
+**WebSocket stream**: Client → WebSocket Auth (token) → Handler → Controller → SessionManager → Agent → Streamer → WebSocket → Client (real-time)
+
+**Cloud Proxy flow**: CLI Agent → Proxy Token Verification → SessionManager → Agent accesses LLM API through proxy endpoint
 
 ## Code Conventions
 
