@@ -26,23 +26,74 @@ export function createProxyToken(secret: string, identityId: string, ttlMs: numb
   return `${payload}.${sig}`;
 }
 
-export function verifyProxyToken(secret: string, token: string): { identityId: string; exp: number } | null {
-  if (!token) return null;
+export interface VerifyResult {
+  identityId: string;
+  exp: number;
+}
+
+export interface VerifyFailure {
+  reason: string;
+  details?: Record<string, unknown>;
+}
+
+export function verifyProxyToken(secret: string, token: string): VerifyResult | null;
+export function verifyProxyToken(secret: string, token: string, debug: true): { result: VerifyResult | null; failure?: VerifyFailure };
+export function verifyProxyToken(secret: string, token: string, debug?: boolean): VerifyResult | null | { result: VerifyResult | null; failure?: VerifyFailure } {
+  const fail = (reason: string, details?: Record<string, unknown>): VerifyResult | null | { result: null; failure: VerifyFailure } => {
+    if (debug) return { result: null, failure: { reason, details } };
+    return null;
+  };
+
+  if (!token) {
+    return fail("no_token");
+  }
+
+  const dotIndex = token.indexOf(".");
+  if (dotIndex === -1) {
+    return fail("no_dot_separator", { tokenLength: token.length, tokenPrefix: token.slice(0, 30) });
+  }
+
   const [payload, sig] = token.split(".");
-  if (!payload || !sig) return null;
+  if (!payload || !sig) {
+    return fail("invalid_format", { hasPayload: !!payload, hasSig: !!sig });
+  }
+
   const expected = base64Url(crypto.createHmac("sha256", secret).update(payload).digest());
   const expectedBuf = Buffer.from(expected);
   const sigBuf = Buffer.from(sig);
-  if (expectedBuf.length !== sigBuf.length) return null;
+
+  if (expectedBuf.length !== sigBuf.length) {
+    return fail("sig_length_mismatch", {
+      expectedLength: expectedBuf.length,
+      actualLength: sigBuf.length,
+      expectedPrefix: expected.slice(0, 20),
+      actualPrefix: sig.slice(0, 20),
+    });
+  }
+
   const ok = crypto.timingSafeEqual(expectedBuf, sigBuf);
-  if (!ok) return null;
+  if (!ok) {
+    return fail("sig_mismatch", {
+      expectedPrefix: expected.slice(0, 20),
+      actualPrefix: sig.slice(0, 20),
+    });
+  }
+
   try {
-    const parsed = JSON.parse(base64UrlDecode(payload)) as { id?: string; exp?: number };
-    if (!parsed?.id || typeof parsed.exp !== "number") return null;
-    if (parsed.exp < Date.now() - 5_000) return null;
-    return { identityId: parsed.id, exp: parsed.exp };
-  } catch {
-    return null;
+    const decoded = base64UrlDecode(payload);
+    const parsed = JSON.parse(decoded) as { id?: string; exp?: number };
+    if (!parsed?.id || typeof parsed.exp !== "number") {
+      return fail("invalid_payload_structure", { parsed, decoded });
+    }
+    const now = Date.now();
+    if (parsed.exp < now - 5_000) {
+      return fail("token_expired", { exp: parsed.exp, now, diffMs: now - parsed.exp });
+    }
+    const result = { identityId: parsed.id, exp: parsed.exp };
+    if (debug) return { result };
+    return result;
+  } catch (e) {
+    return fail("payload_parse_error", { error: String(e) });
   }
 }
 
@@ -82,9 +133,19 @@ async function readRequestBuffer(req: http.IncomingMessage): Promise<Buffer> {
 }
 
 function buildTargetUrl(opts: { baseUrl: string; path: string; search: string }): string {
+  const baseUrlObj = new URL(opts.baseUrl);
+  const basePath = baseUrlObj.pathname.replace(/\/$/, ""); // Remove trailing slash
+  let path = opts.path;
+
+  // If path starts with basePath, remove the duplicate prefix
+  // e.g.: basePath="/v1", path="/v1/models" -> path="/models"
+  if (basePath && basePath !== "/" && path.startsWith(basePath)) {
+    path = path.slice(basePath.length) || "/";
+  }
+
   const base = opts.baseUrl.endsWith("/") ? opts.baseUrl : `${opts.baseUrl}/`;
-  const path = opts.path.startsWith("/") ? opts.path.slice(1) : opts.path;
-  const url = new URL(path, base);
+  const normalizedPath = path.startsWith("/") ? path.slice(1) : path;
+  const url = new URL(normalizedPath, base);
   url.search = opts.search;
   return url.toString();
 }
@@ -111,12 +172,27 @@ export async function handleProxyRequest(opts: {
     return;
   }
   const token = extractProxyToken(opts.req);
-  const verified = token ? verifyProxyToken(proxy.shared_secret, token) : null;
+  const verifyResult = token ? verifyProxyToken(proxy.shared_secret, token, true) : null;
+  const verified = verifyResult?.result ?? null;
   if (!verified) {
+    opts.logger.debug(`[proxy] token verification failed kind=${opts.kind}`);
+    opts.logger.debug(`[proxy] auth header: ${opts.req.headers.authorization ? opts.req.headers.authorization.slice(0, 50) + "..." : "(none)"}`);
+    opts.logger.debug(`[proxy] x-api-key header: ${opts.req.headers["x-api-key"] ? String(opts.req.headers["x-api-key"]).slice(0, 30) + "..." : "(none)"}`);
+    opts.logger.debug(`[proxy] extracted token: ${token ? token.slice(0, 30) + "..." : "(null)"}`);
+    opts.logger.debug(`[proxy] token length: ${token?.length ?? 0}`);
+    opts.logger.debug(`[proxy] has dot separator: ${token?.includes(".") ?? false}`);
+    if (verifyResult?.failure) {
+      opts.logger.debug(`[proxy] failure reason: ${verifyResult.failure.reason}`);
+      if (verifyResult.failure.details) {
+        opts.logger.debug(`[proxy] failure details: ${JSON.stringify(verifyResult.failure.details)}`);
+      }
+    }
     opts.res.statusCode = 401;
     opts.res.end("unauthorized");
     return;
   }
+
+  opts.logger.debug(`[proxy] request verified identity=${verified.identityId} kind=${opts.kind} path=${opts.url.pathname}`);
 
   const body = await readRequestBuffer(opts.req);
   const targetBase = opts.kind === "openai" ? proxy.openai_base_url : proxy.anthropic_base_url;
@@ -133,10 +209,12 @@ export async function handleProxyRequest(opts: {
 
   if (opts.kind === "openai") {
     if (!proxy.openai_api_key) {
+      opts.logger.warn(`[proxy] openai_api_key not configured`);
       opts.res.statusCode = 502;
       opts.res.end("openai proxy not configured");
       return;
     }
+    opts.logger.debug(`[proxy] forwarding to openai baseUrl=${targetBase} hasApiKey=${!!proxy.openai_api_key} apiKeyPrefix=${proxy.openai_api_key.slice(0, 10)}...`);
     headers.authorization = `Bearer ${proxy.openai_api_key}`;
   } else {
     if (!proxy.anthropic_api_key) {
@@ -151,11 +229,14 @@ export async function handleProxyRequest(opts: {
   let responseBytes = 0;
   const start = nowMs();
   try {
+    opts.logger.debug(`[proxy] sending upstream request to ${target}`);
     const upstream = await fetchWithProxy(target, {
       method: opts.req.method ?? "POST",
       headers,
       body: body.length > 0 ? body : undefined,
     });
+
+    opts.logger.debug(`[proxy] upstream response status=${upstream.status}`);
 
     opts.res.statusCode = upstream.status;
     upstream.headers.forEach((value, key) => {
