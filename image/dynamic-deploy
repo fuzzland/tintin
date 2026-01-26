@@ -1,0 +1,7 @@
+#!/usr/bin/env node
+const { run } = require("./tintin-helper-lib.js");
+
+run("dynamic-deploy", process.argv.slice(2)).catch((err) => {
+  console.error(`[dynamic-deploy] ${err && err.message ? err.message : String(err)}`);
+  process.exit(1);
+});

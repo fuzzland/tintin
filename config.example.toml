@@ -98,6 +98,9 @@ app_name = "tintin-cloud"
 # Image must include Playwright + Codex + Claude Code preinstalled.
 image = "debian:12"
 # image_id = "" # optional override (snapshot image ID)
+# image_next = "" # optional Next.js Modal image tag
+# image_express = "" # optional Express Modal image tag
+# image_flask = "" # optional Flask Modal image tag
 timeout_ms = 86400000
 idle_timeout_ms = 86400000
 request_timeout_ms = 60000

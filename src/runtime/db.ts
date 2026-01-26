@@ -193,6 +193,65 @@ export interface CloudWorkspacesTable {
   updated_at: number;
 }
 
+export interface CodeRegistryTable {
+  id: string;
+  idx: number;
+  identity_id: string;
+  directory: string;
+  summary: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface SiteRegistryTable {
+  id: string;
+  idx: number;
+  identity_id: string;
+  port: number;
+  path: string;
+  summary: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface StaticDeploysTable {
+  id: string;
+  idx: number;
+  identity_id: string;
+  session_id: string;
+  app_name: string;
+  summary: string;
+  root_path: string;
+  version_host: string;
+  stable_host: string;
+  is_active: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface DynamicDeploysTable {
+  id: string;
+  idx: number;
+  identity_id: string;
+  session_id: string;
+  app_name: string;
+  summary: string;
+  provider: string;
+  image_ref: string;
+  workspace_id: string;
+  port: number;
+  startup: string;
+  setup_json: string;
+  ignore_json: string;
+  snapshot_id: string | null;
+  archive_path: string;
+  url: string;
+  log_path: string;
+  status: string;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface SecretsTable {
   id: string;
   identity_id: string;
@@ -340,6 +399,10 @@ export interface DatabaseSchema {
   cloud_run_screenshots: CloudRunScreenshotsTable;
   cloud_snapshots: CloudSnapshotsTable;
   cloud_workspaces: CloudWorkspacesTable;
+  code_registry: CodeRegistryTable;
+  site_registry: SiteRegistryTable;
+  static_deploys: StaticDeploysTable;
+  dynamic_deploys: DynamicDeploysTable;
   secrets: SecretsTable;
   setup_specs: SetupSpecsTable;
   shared_repos: SharedReposTable;

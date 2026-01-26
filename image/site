@@ -1,0 +1,7 @@
+#!/usr/bin/env node
+const { run } = require("./tintin-helper-lib.js");
+
+run("site", process.argv.slice(2)).catch((err) => {
+  console.error(`[site] ${err && err.message ? err.message : String(err)}`);
+  process.exit(1);
+});

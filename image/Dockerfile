@@ -55,7 +55,12 @@ RUN curl -fsSL https://code-server.dev/install.sh | sh \
 
 COPY tintin-log-agent.js /usr/local/bin/tintin-log-agent
 COPY tintin-chatgpt-proxy.js /usr/local/bin/tintin-chatgpt-proxy.js
-RUN chmod +x /usr/local/bin/tintin-log-agent /usr/local/bin/tintin-chatgpt-proxy.js
+COPY tintin-helper-lib.js /usr/local/bin/tintin-helper-lib.js
+COPY code /usr/local/bin/code
+COPY site /usr/local/bin/site
+COPY static-deploy /usr/local/bin/static-deploy
+COPY dynamic-deploy /usr/local/bin/dynamic-deploy
+RUN chmod +x /usr/local/bin/tintin-log-agent /usr/local/bin/tintin-chatgpt-proxy.js /usr/local/bin/code /usr/local/bin/site /usr/local/bin/static-deploy /usr/local/bin/dynamic-deploy
 
 RUN mkdir -p /home/ubuntu/.image
 RUN chown -R ubuntu:ubuntu /home/ubuntu

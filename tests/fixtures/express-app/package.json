@@ -1,0 +1,8 @@
+{
+  "name": "tintin-e2e-express",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  }
+}

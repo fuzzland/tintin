@@ -21,6 +21,7 @@ import * as githubDisconnect0018 from "./migrations/0018_github_disconnect.js";
 import * as chatgptOauth0019 from "./migrations/0019_chatgpt_oauth.js";
 import * as userPreferences0020 from "./migrations/0020_user_preferences.js";
 import * as sessionLanguage0021 from "./migrations/0021_session_language.js";
+import * as deployRegistry0022 from "./migrations/0022_deploy_registry.js";
 
 const provider = {
   async getMigrations() {
@@ -45,6 +46,7 @@ const provider = {
       "0019_chatgpt_oauth": chatgptOauth0019,
       "0020_user_preferences": userPreferences0020,
       "0021_session_language": sessionLanguage0021,
+      "0022_deploy_registry": deployRegistry0022,
     };
   },
 };

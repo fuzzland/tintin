@@ -1,3 +1,4 @@
+import { createReadStream } from "node:fs";
 import path from "node:path";
 import { ModalClient, type App, type Image, type Sandbox, type SandboxCreateParams } from "modal";
 import type { CloudModalSection } from "../config.js";
@@ -61,6 +62,10 @@ export class ModalCloudProvider implements CloudProvider {
     return sandbox;
   }
 
+  async getSandboxHandle(workspaceId: string): Promise<Sandbox | null> {
+    return await this.getOrFetchSandbox(workspaceId);
+  }
+
   async createWorkspace(opts: { prefix?: string }): Promise<CloudWorkspace> {
     const app = await this.getApp();
     const image = await this.getImage();
@@ -70,12 +75,35 @@ export class ModalCloudProvider implements CloudProvider {
     });
   }
 
-  async createWorkspaceFromSnapshot(snapshotId: string): Promise<CloudWorkspace> {
+  async createWorkspaceFromImageRef(opts: {
+    imageId?: string;
+    imageTag?: string;
+    label?: string;
+    encryptedPorts?: number[];
+  }): Promise<CloudWorkspace> {
+    const app = await this.getApp();
+    let image: Image;
+    if (opts.imageId) {
+      image = await this.client.images.fromId(opts.imageId);
+    } else if (opts.imageTag) {
+      image = this.client.images.fromRegistry(opts.imageTag);
+    } else {
+      image = await this.getImage();
+    }
+    return await this.createWorkspaceWithImage(app, image, {
+      source: "image",
+      label: opts.label || opts.imageId || opts.imageTag || this.imageId || this.imageTag || "image",
+      encryptedPorts: opts.encryptedPorts,
+    });
+  }
+
+  async createWorkspaceFromSnapshot(snapshotId: string, opts?: { encryptedPorts?: number[] }): Promise<CloudWorkspace> {
     const app = await this.getApp();
     const image = await this.client.images.fromId(snapshotId);
     return await this.createWorkspaceWithImage(app, image, {
       source: "snapshot",
       label: snapshotId,
+      encryptedPorts: opts?.encryptedPorts,
     });
   }
 
@@ -99,6 +127,39 @@ export class ModalCloudProvider implements CloudProvider {
         if (Number.isFinite(mode)) {
           await this.runCommand(sandbox, `chmod ${mode.toString(8)} ${shellQuote(target)}`, { cwd: "/" });
         }
+      }
+    }
+  }
+
+  async uploadFileFromPath(
+    workspace: CloudWorkspace,
+    localPath: string,
+    remotePath: string,
+    mode?: string,
+  ): Promise<void> {
+    const sandbox = this.getSandbox(workspace.id);
+    const rel = toPosix(remotePath);
+    const target = path.posix.join(workspace.rootPath, rel);
+    const dir = path.posix.dirname(target);
+    await this.runCommand(sandbox, `mkdir -p ${shellQuote(dir)}`, { cwd: "/" });
+
+    const handle = await sandbox.open(target, "w");
+    const stream = createReadStream(localPath, { highWaterMark: 4 * 1024 * 1024 });
+    try {
+      for await (const chunk of stream) {
+        const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+        await handle.write(bytes);
+      }
+      await handle.flush();
+    } finally {
+      await handle.close().catch(() => {});
+      stream.destroy();
+    }
+
+    if (mode) {
+      const parsed = Number.parseInt(mode, 8);
+      if (Number.isFinite(parsed)) {
+        await this.runCommand(sandbox, `chmod ${parsed.toString(8)} ${shellQuote(target)}`, { cwd: "/" });
       }
     }
   }
@@ -209,12 +270,17 @@ export class ModalCloudProvider implements CloudProvider {
   private async createWorkspaceWithImage(
     app: App,
     image: Image,
-    opts?: { source?: string; label?: string },
+    opts?: { source?: string; label?: string; encryptedPorts?: number[] },
   ): Promise<CloudWorkspace> {
+    const extraPorts = Array.isArray(opts?.encryptedPorts)
+      ? opts.encryptedPorts.filter((port) => Number.isFinite(port) && port > 0)
+      : [];
+    const basePorts = [8080, 9223];
+    const encryptedPorts = Array.from(new Set<number>([...basePorts, ...extraPorts]));
     const params: SandboxCreateParams = {
       timeoutMs: this.timeoutMs > 0 ? this.timeoutMs : undefined,
       idleTimeoutMs: this.idleTimeoutMs > 0 ? this.idleTimeoutMs : undefined,
-      encryptedPorts: [8080, 9223],
+      encryptedPorts,
     };
     if (this.blockNetwork) {
       params.blockNetwork = true;

@@ -1,0 +1,40 @@
+name: E2E Deploy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  e2e-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nginx sqlite3
+          sudo systemctl start nginx
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Write e2e config
+        env:
+          TINTIN_E2E_CONFIG_B64: ${{ secrets.TINTIN_E2E_CONFIG_B64 }}
+        run: |
+          if [ -z "${TINTIN_E2E_CONFIG_B64}" ]; then
+            echo "Missing secret TINTIN_E2E_CONFIG_B64" >&2
+            exit 1
+          fi
+          printf "%s" "${TINTIN_E2E_CONFIG_B64}" | base64 -d > config.e2e.toml
+
+      - name: Run e2e deploy
+        run: bash scripts/e2e/deploy-e2e.sh

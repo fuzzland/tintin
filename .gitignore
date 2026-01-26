@@ -34,6 +34,7 @@ data
 config.toml
 config2.toml
 config-aws.toml
+config.e2e.toml
 .codex
 .claude
 

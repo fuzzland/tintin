@@ -681,6 +681,10 @@ export class CloudManager {
     return token;
   }
 
+  issueAgentTokenForSession(sessionId: string): string {
+    return this.issueAgentToken(sessionId);
+  }
+
   verifyAgentToken(sessionId: string, token: string): boolean {
     const entry = this.agentTokens.get(sessionId);
     if (!entry) return false;
@@ -1305,6 +1309,14 @@ export class CloudManager {
   private getModalProvider(): ModalCloudProvider {
     if (this.provider.id !== "modal") throw new Error("Modal provider is not configured.");
     return this.provider as ModalCloudProvider;
+  }
+
+  getProviderId(): string {
+    return this.provider.id;
+  }
+
+  getModalProviderForDeploy(): ModalCloudProvider {
+    return this.getModalProvider();
   }
 
   private async resolveCloneInfo(repoId: string): Promise<{ repo: any; clone: { url: string; redacted: string } }> {

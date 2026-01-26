@@ -66,6 +66,9 @@ export interface CloudModalSection {
   app_name: string;
   image: string;
   image_id: string;
+  image_next: string;
+  image_express: string;
+  image_flask: string;
   timeout_ms: number;
   idle_timeout_ms: number;
   request_timeout_ms: number;
@@ -587,6 +590,9 @@ function normalizeCloudModalSection(value: unknown): CloudModalSection {
     typeof (raw as any).app_name === "string" && (raw as any).app_name.length > 0 ? (raw as any).app_name : "tintin-cloud";
   const image = typeof (raw as any).image === "string" && (raw as any).image.length > 0 ? (raw as any).image : "debian:12";
   const image_id = typeof (raw as any).image_id === "string" ? (raw as any).image_id : "";
+  const image_next = typeof (raw as any).image_next === "string" ? (raw as any).image_next : "";
+  const image_express = typeof (raw as any).image_express === "string" ? (raw as any).image_express : "";
+  const image_flask = typeof (raw as any).image_flask === "string" ? (raw as any).image_flask : "";
   const timeout_ms =
     typeof (raw as any).timeout_ms === "number" && Number.isFinite((raw as any).timeout_ms) && (raw as any).timeout_ms > 0
       ? Math.floor((raw as any).timeout_ms)
@@ -627,6 +633,9 @@ function normalizeCloudModalSection(value: unknown): CloudModalSection {
     app_name,
     image,
     image_id,
+    image_next,
+    image_express,
+    image_flask,
     timeout_ms,
     idle_timeout_ms,
     request_timeout_ms,

@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { sql } from "kysely";
 import type { Db, CloudRunStatus } from "../db.js";
 import { nowMs } from "../util.js";
 
@@ -942,4 +943,273 @@ export async function consumePendingAction(db: Db, opts: { action: string; ident
   if (row.consumed_at) return null;
   await db.updateTable("pending_actions").set({ consumed_at: now }).where("id", "=", row.id).execute();
   return row;
+}
+
+async function nextIdx(db: Db, table: "code_registry" | "site_registry" | "static_deploys" | "dynamic_deploys"): Promise<number> {
+  const row = await db.selectFrom(table).select(sql`max(idx)`.as("max")).executeTakeFirst();
+  const raw = row?.max;
+  if (typeof raw === "number") return raw + 1;
+  if (typeof raw === "bigint") return Number(raw) + 1;
+  if (raw === null || raw === undefined) return 1;
+  const parsed = Number.parseInt(String(raw), 10);
+  return (Number.isFinite(parsed) ? parsed : 0) + 1;
+}
+
+function isUniqueConstraintError(err: unknown): boolean {
+  const anyErr = err as { code?: string; message?: string };
+  const code = anyErr?.code ?? "";
+  if (code === "SQLITE_CONSTRAINT" || code === "SQLITE_CONSTRAINT_UNIQUE" || code === "23505" || code === "ER_DUP_ENTRY") return true;
+  const message = (anyErr?.message ?? String(err)).toLowerCase();
+  return message.includes("unique") || message.includes("duplicate") || message.includes("constraint");
+}
+
+async function insertWithRetry<T>(fn: () => Promise<T>, attempts = 5): Promise<T> {
+  let lastErr: unknown = null;
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isUniqueConstraintError(err) || i === attempts - 1) throw err;
+    }
+  }
+  throw lastErr ?? new Error("insert failed");
+}
+
+export async function createCodeRegistryEntry(db: Db, opts: { identityId: string; directory: string; summary: string }) {
+  return await insertWithRetry(async () => {
+    return await db.transaction().execute(async (trx) => {
+      const idx = await nextIdx(trx, "code_registry");
+      const now = nowMs();
+      const id = crypto.randomUUID();
+      const row = {
+        id,
+        idx,
+        identity_id: opts.identityId,
+        directory: opts.directory,
+        summary: opts.summary,
+        created_at: now,
+        updated_at: now,
+      };
+      await trx.insertInto("code_registry").values(row).execute();
+      return row;
+    });
+  });
+}
+
+export async function listCodeRegistryEntries(db: Db, identityId: string) {
+  return await db.selectFrom("code_registry").selectAll().where("identity_id", "=", identityId).orderBy("idx", "asc").execute();
+}
+
+export async function ignoreCodeRegistryEntry(db: Db, opts: { identityId: string; target: string }): Promise<number> {
+  const target = opts.target.trim();
+  if (!target) return 0;
+  const idx = Number.parseInt(target, 10);
+  let query = db.deleteFrom("code_registry").where("identity_id", "=", opts.identityId);
+  if (Number.isFinite(idx) && String(idx) === target) {
+    query = query.where("idx", "=", idx);
+  } else {
+    query = query.where("directory", "=", target);
+  }
+  const res = await query.executeTakeFirst();
+  return Number(res?.numDeletedRows ?? 0);
+}
+
+export async function createSiteRegistryEntry(db: Db, opts: { identityId: string; port: number; path: string; summary: string }) {
+  return await insertWithRetry(async () => {
+    return await db.transaction().execute(async (trx) => {
+      const idx = await nextIdx(trx, "site_registry");
+      const now = nowMs();
+      const id = crypto.randomUUID();
+      const row = {
+        id,
+        idx,
+        identity_id: opts.identityId,
+        port: opts.port,
+        path: opts.path,
+        summary: opts.summary,
+        created_at: now,
+        updated_at: now,
+      };
+      await trx.insertInto("site_registry").values(row).execute();
+      return row;
+    });
+  });
+}
+
+export async function listSiteRegistryEntries(db: Db, identityId: string) {
+  return await db.selectFrom("site_registry").selectAll().where("identity_id", "=", identityId).orderBy("idx", "asc").execute();
+}
+
+export async function ignoreSiteRegistryEntry(db: Db, opts: { identityId: string; idx: number }): Promise<number> {
+  const res = await db
+    .deleteFrom("site_registry")
+    .where("identity_id", "=", opts.identityId)
+    .where("idx", "=", opts.idx)
+    .executeTakeFirst();
+  return Number(res?.numDeletedRows ?? 0);
+}
+
+export async function createStaticDeployEntry(db: Db, opts: {
+  identityId: string;
+  sessionId: string;
+  appName: string;
+  summary: string;
+  rootPath: string;
+  versionHost: string;
+  stableHost: string;
+}) {
+  return await insertWithRetry(async () => {
+    return await db.transaction().execute(async (trx) => {
+      const idx = await nextIdx(trx, "static_deploys");
+      const now = nowMs();
+      const id = crypto.randomUUID();
+      const row = {
+        id,
+        idx,
+        identity_id: opts.identityId,
+        session_id: opts.sessionId,
+        app_name: opts.appName,
+        summary: opts.summary,
+        root_path: opts.rootPath,
+        version_host: opts.versionHost,
+        stable_host: opts.stableHost,
+        is_active: 0,
+        created_at: now,
+        updated_at: now,
+      };
+      await trx.insertInto("static_deploys").values(row).execute();
+      return row;
+    });
+  });
+}
+
+export type StaticDeployPatch = Partial<{
+  root_path: string;
+  version_host: string;
+  stable_host: string;
+  is_active: number;
+}>;
+
+export async function updateStaticDeployEntry(db: Db, opts: { identityId: string; idx: number; patch: StaticDeployPatch }) {
+  await db
+    .updateTable("static_deploys")
+    .set({ ...opts.patch, updated_at: nowMs() })
+    .where("identity_id", "=", opts.identityId)
+    .where("idx", "=", opts.idx)
+    .execute();
+}
+
+export async function setStaticDeployActive(db: Db, opts: { identityId: string; sessionId: string; idx: number }) {
+  const now = nowMs();
+  await db
+    .updateTable("static_deploys")
+    .set({ is_active: 0, updated_at: now })
+    .where("identity_id", "=", opts.identityId)
+    .where("session_id", "=", opts.sessionId)
+    .execute();
+  await db
+    .updateTable("static_deploys")
+    .set({ is_active: 1, updated_at: now })
+    .where("identity_id", "=", opts.identityId)
+    .where("idx", "=", opts.idx)
+    .execute();
+}
+
+export async function listStaticDeploys(db: Db, identityId: string) {
+  return await db.selectFrom("static_deploys").selectAll().where("identity_id", "=", identityId).orderBy("created_at", "desc").execute();
+}
+
+export async function getStaticDeployByIdx(db: Db, identityId: string, idx: number) {
+  return await db
+    .selectFrom("static_deploys")
+    .selectAll()
+    .where("identity_id", "=", identityId)
+    .where("idx", "=", idx)
+    .executeTakeFirst();
+}
+
+export async function createDynamicDeployEntry(db: Db, opts: {
+  identityId: string;
+  sessionId: string;
+  appName: string;
+  summary: string;
+  provider: string;
+  imageRef: string;
+  workspaceId: string;
+  port: number;
+  startup: string;
+  setupJson: string;
+  ignoreJson: string;
+  archivePath: string;
+  logPath: string;
+}) {
+  return await insertWithRetry(async () => {
+    return await db.transaction().execute(async (trx) => {
+      const idx = await nextIdx(trx, "dynamic_deploys");
+      const now = nowMs();
+      const id = crypto.randomUUID();
+      const row = {
+        id,
+        idx,
+        identity_id: opts.identityId,
+        session_id: opts.sessionId,
+        app_name: opts.appName,
+        summary: opts.summary,
+        provider: opts.provider,
+        image_ref: opts.imageRef,
+        workspace_id: opts.workspaceId,
+        port: opts.port,
+        startup: opts.startup,
+        setup_json: opts.setupJson,
+        ignore_json: opts.ignoreJson,
+        snapshot_id: null,
+        archive_path: opts.archivePath,
+        url: "",
+        log_path: opts.logPath,
+        status: "pending",
+        created_at: now,
+        updated_at: now,
+      };
+      await trx.insertInto("dynamic_deploys").values(row).execute();
+      return row;
+    });
+  });
+}
+
+export type DynamicDeployPatch = Partial<{
+  provider: string;
+  image_ref: string;
+  workspace_id: string;
+  port: number;
+  startup: string;
+  setup_json: string;
+  ignore_json: string;
+  snapshot_id: string | null;
+  archive_path: string;
+  url: string;
+  log_path: string;
+  status: string;
+}>;
+
+export async function updateDynamicDeployEntry(db: Db, opts: { identityId: string; idx: number; patch: DynamicDeployPatch }) {
+  await db
+    .updateTable("dynamic_deploys")
+    .set({ ...opts.patch, updated_at: nowMs() })
+    .where("identity_id", "=", opts.identityId)
+    .where("idx", "=", opts.idx)
+    .execute();
+}
+
+export async function listDynamicDeploys(db: Db, identityId: string) {
+  return await db.selectFrom("dynamic_deploys").selectAll().where("identity_id", "=", identityId).orderBy("created_at", "desc").execute();
+}
+
+export async function getDynamicDeployByIdx(db: Db, identityId: string, idx: number) {
+  return await db
+    .selectFrom("dynamic_deploys")
+    .selectAll()
+    .where("identity_id", "=", identityId)
+    .where("idx", "=", idx)
+    .executeTakeFirst();
 }
