@@ -1841,6 +1841,77 @@ export async function createBotService(deps: BotServiceDeps) {
         const command = pathParts[3] ?? "";
         const subcommand = pathParts[4] ?? "";
 
+        const emitAgentEvent = (payload: {
+          command: string;
+          subcommand: string;
+          request: {
+            method: string;
+            path: string;
+            query?: Record<string, string>;
+            body?: unknown;
+            meta?: unknown;
+            upload_bytes?: number;
+          };
+          response: {
+            status: number;
+            body?: unknown;
+            text?: string;
+            error?: string;
+          };
+        }) => {
+          if (!wsManager) return;
+          wsManager.broadcastToSession(ctx.sessionId, {
+            type: "agent_event",
+            sessionId: ctx.sessionId,
+            command: payload.command,
+            subcommand: payload.subcommand,
+            request: payload.request,
+            response: payload.response,
+          });
+        };
+
+        const sendAgentJson = (
+          status: number,
+          body: unknown,
+          request: {
+            method: string;
+            path: string;
+            query?: Record<string, string>;
+            body?: unknown;
+            meta?: unknown;
+            upload_bytes?: number;
+          },
+        ) => {
+          sendJson(res, status, body);
+          emitAgentEvent({
+            command,
+            subcommand,
+            request,
+            response: { status, body },
+          });
+        };
+
+        const sendAgentText = (
+          status: number,
+          text: string,
+          request: {
+            method: string;
+            path: string;
+            query?: Record<string, string>;
+            body?: unknown;
+            meta?: unknown;
+            upload_bytes?: number;
+          },
+        ) => {
+          sendText(res, status, text);
+          emitAgentEvent({
+            command,
+            subcommand,
+            request,
+            response: status >= 400 ? { status, error: text } : { status, text },
+          });
+        };
+
         if (command === "code") {
           if (req.method === "POST" && subcommand === "add") {
             const raw = await readRequestBody(req);
@@ -1849,23 +1920,31 @@ export async function createBotService(deps: BotServiceDeps) {
               try {
                 body = JSON.parse(raw);
               } catch {
-                sendText(res, 400, "invalid json");
+                sendAgentText(400, "invalid json", { method: req.method ?? "", path: pathname, body: raw });
                 return;
               }
             }
             const directory = typeof body.directory === "string" ? body.directory.trim() : "";
             const summary = typeof body.summary === "string" ? body.summary.trim() : "";
             if (!directory || !summary) {
-              sendText(res, 400, "missing directory or summary");
+              sendAgentText(400, "missing directory or summary", { method: req.method ?? "", path: pathname, body });
               return;
             }
             const entry = await createCodeRegistryEntry(db, { identityId: ctx.identityId, directory, summary });
-            sendJson(res, 200, { idx: entry.idx, directory: entry.directory, summary: entry.summary });
+            sendAgentJson(
+              200,
+              { idx: entry.idx, directory: entry.directory, summary: entry.summary },
+              { method: req.method ?? "", path: pathname, body },
+            );
             return;
           }
           if (req.method === "GET" && subcommand === "list") {
             const entries = await listCodeRegistryEntries(db, ctx.identityId);
-            sendJson(res, 200, { items: entries.map((row) => ({ idx: row.idx, directory: row.directory, summary: row.summary })) });
+            sendAgentJson(
+              200,
+              { items: entries.map((row) => ({ idx: row.idx, directory: row.directory, summary: row.summary })) },
+              { method: req.method ?? "", path: pathname },
+            );
             return;
           }
           if (req.method === "POST" && subcommand === "ignore") {
@@ -1875,17 +1954,17 @@ export async function createBotService(deps: BotServiceDeps) {
               try {
                 body = JSON.parse(raw);
               } catch {
-                sendText(res, 400, "invalid json");
+                sendAgentText(400, "invalid json", { method: req.method ?? "", path: pathname, body: raw });
                 return;
               }
             }
             const target = typeof body.target === "string" ? body.target.trim() : "";
             if (!target) {
-              sendText(res, 400, "missing target");
+              sendAgentText(400, "missing target", { method: req.method ?? "", path: pathname, body });
               return;
             }
             const deleted = await ignoreCodeRegistryEntry(db, { identityId: ctx.identityId, target });
-            sendJson(res, 200, { deleted });
+            sendAgentJson(200, { deleted }, { method: req.method ?? "", path: pathname, body });
             return;
           }
         }
@@ -1898,7 +1977,7 @@ export async function createBotService(deps: BotServiceDeps) {
               try {
                 body = JSON.parse(raw);
               } catch {
-                sendText(res, 400, "invalid json");
+                sendAgentText(400, "invalid json", { method: req.method ?? "", path: pathname, body: raw });
                 return;
               }
             }
@@ -1906,27 +1985,30 @@ export async function createBotService(deps: BotServiceDeps) {
             const summary = typeof body.summary === "string" ? body.summary.trim() : "";
             const sitePath = typeof body.path === "string" ? body.path.trim() : "";
             if (!Number.isFinite(port) || port <= 0) {
-              sendText(res, 400, "invalid port");
+              sendAgentText(400, "invalid port", { method: req.method ?? "", path: pathname, body });
               return;
             }
             if (!summary) {
-              sendText(res, 400, "missing summary");
+              sendAgentText(400, "missing summary", { method: req.method ?? "", path: pathname, body });
               return;
             }
             const entry = await createSiteRegistryEntry(db, { identityId: ctx.identityId, port, path: sitePath, summary });
-            sendJson(res, 200, {
-              idx: entry.idx,
-              port: entry.port,
-              path: entry.path,
-              summary: entry.summary,
-              url: buildLocalSiteUrl(entry.port, entry.path),
-            });
+            sendAgentJson(
+              200,
+              {
+                idx: entry.idx,
+                port: entry.port,
+                path: entry.path,
+                summary: entry.summary,
+                url: buildLocalSiteUrl(entry.port, entry.path),
+              },
+              { method: req.method ?? "", path: pathname, body },
+            );
             return;
           }
           if (req.method === "GET" && subcommand === "list") {
             const entries = await listSiteRegistryEntries(db, ctx.identityId);
-            sendJson(
-              res,
+            sendAgentJson(
               200,
               {
                 items: entries.map((row) => ({
@@ -1937,6 +2019,7 @@ export async function createBotService(deps: BotServiceDeps) {
                   url: buildLocalSiteUrl(row.port, row.path),
                 })),
               },
+              { method: req.method ?? "", path: pathname },
             );
             return;
           }
@@ -1947,17 +2030,17 @@ export async function createBotService(deps: BotServiceDeps) {
               try {
                 body = JSON.parse(raw);
               } catch {
-                sendText(res, 400, "invalid json");
+                sendAgentText(400, "invalid json", { method: req.method ?? "", path: pathname, body: raw });
                 return;
               }
             }
             const idx = Number(body.idx);
             if (!Number.isFinite(idx)) {
-              sendText(res, 400, "invalid idx");
+              sendAgentText(400, "invalid idx", { method: req.method ?? "", path: pathname, body });
               return;
             }
             const deleted = await ignoreSiteRegistryEntry(db, { identityId: ctx.identityId, idx });
-            sendJson(res, 200, { deleted });
+            sendAgentJson(200, { deleted }, { method: req.method ?? "", path: pathname, body });
             return;
           }
         }
@@ -1965,8 +2048,7 @@ export async function createBotService(deps: BotServiceDeps) {
         if (command === "static-deploy") {
           if (req.method === "GET" && subcommand === "list") {
             const entries = await listStaticDeploys(db, ctx.identityId);
-            sendJson(
-              res,
+            sendAgentJson(
               200,
               {
                 items: entries.map((row) => ({
@@ -1977,6 +2059,7 @@ export async function createBotService(deps: BotServiceDeps) {
                   url: `http://${row.stable_host}`,
                 })),
               },
+              { method: req.method ?? "", path: pathname },
             );
             return;
           }
@@ -1987,18 +2070,18 @@ export async function createBotService(deps: BotServiceDeps) {
               try {
                 body = JSON.parse(raw);
               } catch {
-                sendText(res, 400, "invalid json");
+                sendAgentText(400, "invalid json", { method: req.method ?? "", path: pathname, body: raw });
                 return;
               }
             }
             const idx = Number(body.idx);
             if (!Number.isFinite(idx)) {
-              sendText(res, 400, "invalid idx");
+              sendAgentText(400, "invalid idx", { method: req.method ?? "", path: pathname, body });
               return;
             }
             const entry = await getStaticDeployByIdx(db, ctx.identityId, idx);
             if (!entry) {
-              sendText(res, 404, "deploy not found");
+              sendAgentText(404, "deploy not found", { method: req.method ?? "", path: pathname, body });
               return;
             }
             const stableHost = entry.stable_host;
@@ -2006,11 +2089,19 @@ export async function createBotService(deps: BotServiceDeps) {
             await writeFile(stableConfPath, buildNginxServerBlock(stableHost, entry.root_path), "utf8");
             const reload = await runCommand("nginx", ["-s", "reload"]);
             if (reload.exitCode !== 0) {
-              sendText(res, 500, `nginx reload failed: ${reload.stderr || reload.stdout}`);
+              sendAgentText(500, `nginx reload failed: ${reload.stderr || reload.stdout}`, {
+                method: req.method ?? "",
+                path: pathname,
+                body,
+              });
               return;
             }
             await setStaticDeployActive(db, { identityId: ctx.identityId, sessionId: entry.session_id, idx: entry.idx });
-            sendJson(res, 200, { status: "rolled_back", idx: entry.idx, url: `http://${stableHost}` });
+            sendAgentJson(
+              200,
+              { status: "rolled_back", idx: entry.idx, url: `http://${stableHost}` },
+              { method: req.method ?? "", path: pathname, body },
+            );
             return;
           }
           if (req.method === "POST" && subcommand === "new") {
@@ -2018,12 +2109,19 @@ export async function createBotService(deps: BotServiceDeps) {
             const summary = typeof meta?.summary === "string" ? meta.summary.trim() : "";
             const appName = typeof meta?.app_name === "string" ? meta.app_name.trim() : "";
             if (!summary || !appName) {
-              sendText(res, 400, "missing summary or app_name");
+              sendAgentText(400, "missing summary or app_name", { method: req.method ?? "", path: pathname, meta });
               return;
             }
+            const requestInfo: {
+              method: string;
+              path: string;
+              meta?: unknown;
+              upload_bytes?: number;
+            } = { method: req.method ?? "", path: pathname, meta };
             const tmpArchive = path.join(DYNAMIC_DEPLOY_ROOT, "tmp", `static-${ctx.sessionId}-${Date.now()}.tar.gz`);
             try {
-              await writeRequestToFile(req, tmpArchive, MAX_UPLOAD_BYTES);
+              const uploadBytes = await writeRequestToFile(req, tmpArchive, MAX_UPLOAD_BYTES);
+              requestInfo.upload_bytes = uploadBytes;
               const entry = await createStaticDeployEntry(db, {
                 identityId: ctx.identityId,
                 sessionId: ctx.sessionId,
@@ -2058,7 +2156,11 @@ export async function createBotService(deps: BotServiceDeps) {
                   patch: { root_path: rootPath, version_host: versionHost, stable_host: stableHost, is_active: 1 },
                 });
                 await setStaticDeployActive(db, { identityId: ctx.identityId, sessionId: ctx.sessionId, idx: entry.idx });
-                sendJson(res, 200, { idx: entry.idx, url: `http://${stableHost}` });
+                sendAgentJson(
+                  200,
+                  { idx: entry.idx, url: `http://${stableHost}` },
+                  requestInfo,
+                );
                 return;
               } catch (err) {
                 if (prevStableConf !== null) {
@@ -2075,7 +2177,7 @@ export async function createBotService(deps: BotServiceDeps) {
                   .execute()
                   .catch(() => {});
                 await runCommand("nginx", ["-s", "reload"]).catch(() => {});
-                sendText(res, 500, `static deploy failed: ${String(err)}`);
+                sendAgentText(500, `static deploy failed: ${String(err)}`, requestInfo);
                 return;
               }
             } finally {
@@ -2087,8 +2189,7 @@ export async function createBotService(deps: BotServiceDeps) {
         if (command === "dynamic-deploy") {
           if (req.method === "GET" && subcommand === "list") {
             const entries = await listDynamicDeploys(db, ctx.identityId);
-            sendJson(
-              res,
+            sendAgentJson(
               200,
               {
                 items: entries.map((row) => ({
@@ -2098,6 +2199,7 @@ export async function createBotService(deps: BotServiceDeps) {
                   app_name: row.app_name,
                 })),
               },
+              { method: req.method ?? "", path: pathname },
             );
             return;
           }
@@ -2105,32 +2207,56 @@ export async function createBotService(deps: BotServiceDeps) {
             const idxRaw = url.searchParams.get("idx") ?? "";
             const idx = Number(idxRaw);
             if (!Number.isFinite(idx)) {
-              sendText(res, 400, "invalid idx");
+              sendAgentText(400, "invalid idx", {
+                method: req.method ?? "",
+                path: pathname,
+                query: { idx: idxRaw },
+              });
               return;
             }
             const entry = await getDynamicDeployByIdx(db, ctx.identityId, idx);
             if (!entry) {
-              sendText(res, 404, "deploy not found");
+              sendAgentText(404, "deploy not found", {
+                method: req.method ?? "",
+                path: pathname,
+                query: { idx: idxRaw },
+              });
               return;
             }
             if (!cloudManager || cloudManager.getProviderId() !== "modal") {
-              sendText(res, 503, "modal provider required");
+              sendAgentText(503, "modal provider required", {
+                method: req.method ?? "",
+                path: pathname,
+                query: { idx: idxRaw },
+              });
               return;
             }
             const modal = cloudManager.getModalProviderForDeploy();
             const sandbox = await modal.getSandboxHandle(entry.workspace_id);
             if (!sandbox) {
-              sendText(res, 404, "sandbox not found");
+              sendAgentText(404, "sandbox not found", {
+                method: req.method ?? "",
+                path: pathname,
+                query: { idx: idxRaw },
+              });
               return;
             }
             const logCmd = `tail -n 400 ${JSON.stringify(entry.log_path)}`;
             const proc = await sandbox.exec(["/bin/sh", "-lc", logCmd], { workdir: "/", timeoutMs: 10_000, mode: "text" });
             const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.readText(), proc.stderr.readText(), proc.wait()]);
             if (exitCode !== 0) {
-              sendText(res, 500, stderr || stdout || "log unavailable");
+              sendAgentText(500, stderr || stdout || "log unavailable", {
+                method: req.method ?? "",
+                path: pathname,
+                query: { idx: idxRaw },
+              });
               return;
             }
-            sendText(res, 200, stdout || "");
+            sendAgentText(200, stdout || "", {
+              method: req.method ?? "",
+              path: pathname,
+              query: { idx: idxRaw },
+            });
             return;
           }
           if (req.method === "POST" && subcommand === "rollback") {
@@ -2140,22 +2266,22 @@ export async function createBotService(deps: BotServiceDeps) {
               try {
                 body = JSON.parse(raw);
               } catch {
-                sendText(res, 400, "invalid json");
+                sendAgentText(400, "invalid json", { method: req.method ?? "", path: pathname, body: raw });
                 return;
               }
             }
             const idx = Number(body.idx);
             if (!Number.isFinite(idx)) {
-              sendText(res, 400, "invalid idx");
+              sendAgentText(400, "invalid idx", { method: req.method ?? "", path: pathname, body });
               return;
             }
             const entry = await getDynamicDeployByIdx(db, ctx.identityId, idx);
             if (!entry) {
-              sendText(res, 404, "deploy not found");
+              sendAgentText(404, "deploy not found", { method: req.method ?? "", path: pathname, body });
               return;
             }
             if (!cloudManager || cloudManager.getProviderId() !== "modal") {
-              sendText(res, 503, "modal provider required");
+              sendAgentText(503, "modal provider required", { method: req.method ?? "", path: pathname, body });
               return;
             }
             const modal = cloudManager.getModalProviderForDeploy();
@@ -2208,7 +2334,7 @@ export async function createBotService(deps: BotServiceDeps) {
             try {
               await modal.runCommands({ workspace, cwd: "/", commands });
             } catch (e) {
-              sendText(res, 500, `deploy rollback failed: ${String(e)}`);
+              sendAgentText(500, `deploy rollback failed: ${String(e)}`, { method: req.method ?? "", path: pathname, body });
               return;
             }
             const sandbox = await modal.getSandboxHandle(workspace.id);
@@ -2218,7 +2344,11 @@ export async function createBotService(deps: BotServiceDeps) {
               idx: entry.idx,
               patch: { workspace_id: workspace.id, url: urlResult, status: "running", log_path: logPath },
             });
-            sendJson(res, 200, { status: "rolled_back", idx: entry.idx, url: urlResult });
+            sendAgentJson(
+              200,
+              { status: "rolled_back", idx: entry.idx, url: urlResult },
+              { method: req.method ?? "", path: pathname, body },
+            );
             return;
           }
           if (req.method === "POST" && subcommand.startsWith("new")) {
@@ -2231,16 +2361,23 @@ export async function createBotService(deps: BotServiceDeps) {
             const metaPort = Number(meta?.port);
             const overridePort = Number.isFinite(metaPort) ? metaPort : null;
             if (!summary || !appName || !startup) {
-              sendText(res, 400, "missing summary, app_name, or startup");
+              sendAgentText(400, "missing summary, app_name, or startup", { method: req.method ?? "", path: pathname, meta });
               return;
             }
             if (!cloudManager || cloudManager.getProviderId() !== "modal") {
-              sendText(res, 503, "modal provider required");
+              sendAgentText(503, "modal provider required", { method: req.method ?? "", path: pathname, meta });
               return;
             }
+            const requestInfo: {
+              method: string;
+              path: string;
+              meta?: unknown;
+              upload_bytes?: number;
+            } = { method: req.method ?? "", path: pathname, meta };
             const tmpArchive = path.join(DYNAMIC_DEPLOY_ROOT, "tmp", `dynamic-${ctx.sessionId}-${Date.now()}.tar.gz`);
             try {
-              await writeRequestToFile(req, tmpArchive, MAX_UPLOAD_BYTES);
+              const uploadBytes = await writeRequestToFile(req, tmpArchive, MAX_UPLOAD_BYTES);
+              requestInfo.upload_bytes = uploadBytes;
               const modalCfg = config.cloud?.modal;
               const imageForKind = () => {
                 if (!modalCfg) return { imageTag: "", imageId: "" };
@@ -2309,7 +2446,7 @@ export async function createBotService(deps: BotServiceDeps) {
                   snapshot_id: snapshotId,
                 },
               });
-              sendJson(res, 200, { idx: entry.idx, log: entry.log_path, url: urlResult });
+              sendAgentJson(200, { idx: entry.idx, log: entry.log_path, url: urlResult }, requestInfo);
               return;
             } finally {
               await rm(tmpArchive, { force: true }).catch(() => {});

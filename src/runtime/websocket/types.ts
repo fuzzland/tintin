@@ -80,6 +80,27 @@ export interface ToolOutputMessage {
   output: string;
 }
 
+export interface AgentEventMessage {
+  type: 'agent_event';
+  sessionId: string;
+  command: string;
+  subcommand: string;
+  request: {
+    method: string;
+    path: string;
+    query?: Record<string, string>;
+    body?: unknown;
+    meta?: unknown;
+    upload_bytes?: number;
+  };
+  response: {
+    status: number;
+    body?: unknown;
+    text?: string;
+    error?: string;
+  };
+}
+
 export interface PlanUpdateMessage {
   type: 'plan_update';
   sessionId: string;
@@ -119,6 +140,7 @@ export type ServerMessage =
   | ChunkMessage
   | ToolCallMessage
   | ToolOutputMessage
+  | AgentEventMessage
   | PlanUpdateMessage
   | DoneMessage
   | ErrorMessage
