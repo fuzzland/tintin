@@ -1,9 +1,8 @@
 import { readFile } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
 import * as toml from "@iarna/toml";
+import dotenvFlow from "dotenv-flow";
 
 export type Platform = "telegram" | "slack";
 
@@ -288,70 +287,19 @@ function toStringIdArray(value: unknown): string[] {
   return out;
 }
 
-let dotenvCache: Record<string, string> | null = null;
-let dotenvConfigDir: string | undefined = undefined;
+let dotenvLoaded = false;
+let dotenvLoadedPath: string | undefined = undefined;
 
-function findEnvFile(configDir?: string): string | null {
-  // Search paths in order of priority
-  const searchPaths: string[] = [];
+function ensureDotenvLoaded(configDir?: string): void {
+  // If already loaded for the same path, skip
+  if (dotenvLoaded && dotenvLoadedPath === configDir) return;
 
-  // Priority 1: config.toml directory (if provided)
-  if (configDir) {
-    searchPaths.push(path.resolve(configDir, ".env"));
-  }
-
-  // Priority 2: current working directory
-  searchPaths.push(path.resolve(process.cwd(), ".env"));
-
-  // Priority 3: project root (relative to this module)
-  try {
-    const __filename = fileURLToPath(import.meta.url);
-    const __dirname = path.dirname(__filename);
-    // Go up from src/runtime to project root
-    const projectRoot = path.resolve(__dirname, "..", "..");
-    searchPaths.push(path.resolve(projectRoot, ".env"));
-  } catch {
-    // import.meta.url not available, skip
-  }
-
-  for (const envPath of searchPaths) {
-    if (existsSync(envPath)) {
-      return envPath;
-    }
-  }
-  return null;
-}
-
-function loadDotenv(configDir?: string): Record<string, string> {
-  // If configDir changes, reset the cache
-  if (dotenvCache !== null && dotenvConfigDir === configDir) {
-    return dotenvCache;
-  }
-
-  dotenvCache = {};
-  dotenvConfigDir = configDir;
-  try {
-    const envPath = findEnvFile(configDir);
-    if (!envPath) return dotenvCache;
-    const content = readFileSync(envPath, "utf-8");
-    for (const line of content.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      const eqIdx = trimmed.indexOf("=");
-      if (eqIdx === -1) continue;
-      const key = trimmed.slice(0, eqIdx).trim();
-      let value = trimmed.slice(eqIdx + 1).trim();
-      // Remove quotes
-      if ((value.startsWith('"') && value.endsWith('"')) ||
-          (value.startsWith("'") && value.endsWith("'"))) {
-        value = value.slice(1, -1);
-      }
-      dotenvCache[key] = value;
-    }
-  } catch {
-    // .env file does not exist or cannot be read, ignore
-  }
-  return dotenvCache;
+  dotenvFlow.config({
+    path: configDir || process.cwd(),
+    silent: true,  // Don't output warnings for missing files
+  });
+  dotenvLoaded = true;
+  dotenvLoadedPath = configDir;
 }
 
 function resolveEnvSecrets(
@@ -361,12 +309,9 @@ function resolveEnvSecrets(
 ): unknown {
   if (typeof value === "string") {
     if (value.startsWith("env:")) {
+      ensureDotenvLoaded(opts.configDir);  // Ensure dotenv files are loaded
       const key = value.slice("env:".length);
-      let resolved = process.env[key];
-      if (!resolved) {
-        const dotenv = loadDotenv(opts.configDir);
-        resolved = dotenv[key];
-      }
+      const resolved = process.env[key];  // dotenv-flow has already written to process.env
       if (!resolved) {
         if (opts.allowMissing?.(currentPath)) return value;
         throw new Error(`Missing required environment variable ${key}`);
