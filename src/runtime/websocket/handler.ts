@@ -5,10 +5,14 @@ import type { SessionManager } from '../sessionManager.js';
 import type { WebSocketManager } from './manager.js';
 import type { ClientMessage, WebSocketSection } from './types.js';
 import { ErrorCodes } from './types.js';
-import type { SessionRow } from '../store.js';
 import { verifyProxyToken } from '../cloud/proxy.js';
+import { requireAuth, requireSessionId } from './guards.js';
+import { SessionService, GitHubService } from './services/index.js';
 
 export class WebSocketHandler {
+  private readonly sessionService: SessionService;
+  private readonly githubService: GitHubService;
+
   constructor(
     private readonly wsManager: WebSocketManager,
     private readonly sessionManager: SessionManager,
@@ -16,7 +20,21 @@ export class WebSocketHandler {
     private readonly wsConfig: WebSocketSection,
     private readonly db: Db,
     private readonly logger: Logger,
-  ) {}
+  ) {
+    this.sessionService = new SessionService(
+      wsManager,
+      sessionManager,
+      config,
+      db,
+      logger,
+    );
+    this.githubService = new GitHubService(
+      wsManager,
+      config,
+      db,
+      logger,
+    );
+  }
 
   async handleMessage(connId: string, message: ClientMessage): Promise<void> {
     const conn = this.wsManager.getConnection(connId);
@@ -26,21 +44,71 @@ export class WebSocketHandler {
       case 'auth':
         await this.handleAuth(connId, message.token);
         break;
-      case 'chat':
-        await this.handleChat(connId, message);
+
+      case 'chat': {
+        const auth = requireAuth(this.wsManager, connId);
+        if (!auth) return;
+        await this.sessionService.handleChat(connId, auth.conn, message);
         break;
-      case 'stop':
-        await this.handleStop(connId, message.sessionId);
+      }
+
+      case 'stop': {
+        const auth = requireAuth(this.wsManager, connId);
+        if (!auth) return;
+        if (!requireSessionId(this.wsManager, connId, message.sessionId)) return;
+        await this.sessionService.handleStop(connId, auth.conn, message.sessionId);
         break;
-      case 'subscribe':
-        await this.handleSubscribe(connId, message.sessionId);
+      }
+
+      case 'subscribe': {
+        const auth = requireAuth(this.wsManager, connId);
+        if (!auth) return;
+        if (!requireSessionId(this.wsManager, connId, message.sessionId)) return;
+        await this.sessionService.handleSubscribe(connId, message.sessionId);
         break;
-      case 'unsubscribe':
-        this.handleUnsubscribe(connId, message.sessionId);
+      }
+
+      case 'unsubscribe': {
+        if (!message.sessionId) return;
+        this.sessionService.handleUnsubscribe(connId, message.sessionId);
         break;
+      }
+
       case 'ping':
         // Already handled in manager
         break;
+
+      case 'get_connections': {
+        const auth = requireAuth(this.wsManager, connId);
+        if (!auth) return;
+        await this.githubService.handleGetConnections(connId, auth.identityId);
+        break;
+      }
+
+      case 'list_repos': {
+        const auth = requireAuth(this.wsManager, connId);
+        if (!auth) return;
+        await this.githubService.handleListRepos(connId, auth.identityId, {
+          provider: message.provider,
+          search: message.search,
+        });
+        break;
+      }
+
+      case 'get_auth_status': {
+        const auth = requireAuth(this.wsManager, connId);
+        if (!auth) return;
+        await this.githubService.handleGetAuthStatus(connId, auth.identityId, message.provider);
+        break;
+      }
+
+      case 'start_oauth': {
+        const auth = requireAuth(this.wsManager, connId);
+        if (!auth) return;
+        await this.githubService.handleStartOAuth(connId, auth.identityId, message.provider);
+        break;
+      }
+
       default:
         this.wsManager.sendToConnection(connId, {
           type: 'error',
@@ -125,247 +193,5 @@ export class WebSocketHandler {
       identityId: verified.identityId,
     });
     this.logger.debug(`[ws] auth ok id=${connId} identity=${verified.identityId}`);
-  }
-
-  private async handleChat(connId: string, message: { sessionId?: string; projectId?: string; messages: Array<{ role: string; content: string }> }): Promise<void> {
-    const conn = this.wsManager.getConnection(connId);
-    if (!conn || !conn.authenticated || !conn.identityId) {
-      this.wsManager.sendToConnection(connId, {
-        type: 'error',
-        code: ErrorCodes.AUTH_REQUIRED,
-        message: 'Not authenticated',
-      });
-      return;
-    }
-
-    // Extract user message content
-    const userMessages = message.messages.filter(m => m.role === 'user');
-    if (userMessages.length === 0) {
-      this.wsManager.sendToConnection(connId, {
-        type: 'error',
-        code: ErrorCodes.INVALID_MESSAGE,
-        message: 'No user message provided',
-      });
-      return;
-    }
-
-    const userContent = userMessages.map(m => m.content).join('\n');
-
-    try {
-      // Resolve project
-      let projectId = message.projectId;
-      let projectPath: string | null = null;
-
-      if (projectId) {
-        // Check if it's a registered project
-        const project = this.config.projects.find(p => p.id === projectId);
-        if (project) {
-          projectPath = project.path;
-        } else if (projectId === 'playground' || projectId === '__playground__') {
-          // Playground mode - use cloud workspace
-          projectId = 'cloud:playground';
-        } else if (projectId.startsWith('cloud:')) {
-          // Already a cloud project reference
-          projectPath = null;
-        } else {
-          this.wsManager.sendToConnection(connId, {
-            type: 'error',
-            code: ErrorCodes.INVALID_MESSAGE,
-            message: `Unknown project: ${projectId}`,
-          });
-          return;
-        }
-      } else {
-        // Default to first project or playground
-        const firstProject = this.config.projects.find(p => p.path !== '*');
-        if (firstProject) {
-          projectId = firstProject.id;
-          projectPath = firstProject.path;
-        } else {
-          projectId = 'cloud:playground';
-        }
-      }
-
-      // Resume existing session or create new one
-      let sessionId = message.sessionId;
-
-      if (sessionId) {
-        // Verify session exists and belongs to this identity
-        const existingSession = await this.db
-          .selectFrom('sessions')
-          .selectAll()
-          .where('id', '=', sessionId)
-          .executeTakeFirst();
-
-        if (!existingSession) {
-          this.wsManager.sendToConnection(connId, {
-            type: 'error',
-            code: ErrorCodes.SESSION_NOT_FOUND,
-            sessionId,
-            message: 'Session not found',
-          });
-          return;
-        }
-
-        // Check if session is already running
-        if (existingSession.status === 'running' || existingSession.status === 'starting') {
-          this.wsManager.sendToConnection(connId, {
-            type: 'error',
-            code: ErrorCodes.INVALID_MESSAGE,
-            sessionId,
-            message: 'Session is already running',
-          });
-          return;
-        }
-
-        // Subscribe to this session
-        this.wsManager.subscribeToSession(connId, sessionId);
-
-        // Resume session with new message
-        await this.sessionManager.resumeSession(existingSession as SessionRow, userContent);
-
-        this.wsManager.sendToConnection(connId, {
-          type: 'session_started',
-          sessionId,
-        });
-      } else {
-        // Create new session
-        const agent = this.config.cloud?.default_agent === 'claude_code' ? 'claude_code' : 'codex';
-
-        // For WebSocket, we use a virtual chat/space ID based on connection
-        const virtualChatId = `ws:${conn.identityId}`;
-        const virtualSpaceId = `${Date.now()}`;
-
-        // Resolve project path - use the resolved path or default to data dir for cloud projects
-        const resolvedProjectPath = projectPath ?? this.config.bot.data_dir;
-
-        sessionId = await this.sessionManager.startNewSession({
-          platform: 'websocket',
-          workspaceId: null,
-          chatId: virtualChatId,
-          userId: conn.identityId,
-          spaceId: virtualSpaceId,
-          projectId: projectId!,
-          projectPathResolved: resolvedProjectPath,
-          initialPrompt: userContent,
-          agent: agent as any,
-        });
-
-        // Subscribe to this session
-        this.wsManager.subscribeToSession(connId, sessionId);
-
-        this.wsManager.sendToConnection(connId, {
-          type: 'session_started',
-          sessionId,
-        });
-      }
-    } catch (err) {
-      this.logger.error(`[ws] chat error id=${connId}: ${String(err)}`);
-      this.wsManager.sendToConnection(connId, {
-        type: 'error',
-        code: ErrorCodes.SERVICE_ERROR,
-        message: `Failed to start session: ${String(err)}`,
-      });
-    }
-  }
-
-  private async handleStop(connId: string, sessionId: string): Promise<void> {
-    const conn = this.wsManager.getConnection(connId);
-    if (!conn || !conn.authenticated) {
-      this.wsManager.sendToConnection(connId, {
-        type: 'error',
-        code: ErrorCodes.AUTH_REQUIRED,
-        message: 'Not authenticated',
-      });
-      return;
-    }
-
-    if (!sessionId) {
-      this.wsManager.sendToConnection(connId, {
-        type: 'error',
-        code: ErrorCodes.INVALID_MESSAGE,
-        message: 'Session ID required',
-      });
-      return;
-    }
-
-    // Check if subscribed to this session
-    if (!conn.subscribedSessions.has(sessionId)) {
-      this.wsManager.sendToConnection(connId, {
-        type: 'error',
-        code: ErrorCodes.ACCESS_DENIED,
-        sessionId,
-        message: 'Not subscribed to this session',
-      });
-      return;
-    }
-
-    try {
-      await this.sessionManager.killSession(sessionId, 'Stopped via WebSocket');
-
-      this.wsManager.broadcastToSession(sessionId, {
-        type: 'done',
-        sessionId,
-        stopped: true,
-      });
-
-      this.logger.debug(`[ws] session stopped id=${connId} session=${sessionId}`);
-    } catch (err) {
-      this.logger.error(`[ws] stop error id=${connId} session=${sessionId}: ${String(err)}`);
-      this.wsManager.sendToConnection(connId, {
-        type: 'error',
-        code: ErrorCodes.SERVICE_ERROR,
-        sessionId,
-        message: `Failed to stop session: ${String(err)}`,
-      });
-    }
-  }
-
-  private async handleSubscribe(connId: string, sessionId: string): Promise<void> {
-    const conn = this.wsManager.getConnection(connId);
-    if (!conn || !conn.authenticated) {
-      this.wsManager.sendToConnection(connId, {
-        type: 'error',
-        code: ErrorCodes.AUTH_REQUIRED,
-        message: 'Not authenticated',
-      });
-      return;
-    }
-
-    if (!sessionId) {
-      this.wsManager.sendToConnection(connId, {
-        type: 'error',
-        code: ErrorCodes.INVALID_MESSAGE,
-        message: 'Session ID required',
-      });
-      return;
-    }
-
-    // Verify session exists
-    const session = await this.db
-      .selectFrom('sessions')
-      .select(['id', 'status'])
-      .where('id', '=', sessionId)
-      .executeTakeFirst();
-
-    if (!session) {
-      this.wsManager.sendToConnection(connId, {
-        type: 'error',
-        code: ErrorCodes.SESSION_NOT_FOUND,
-        sessionId,
-        message: 'Session not found',
-      });
-      return;
-    }
-
-    // TODO: In Phase 2, verify identity has access to this session
-
-    this.wsManager.subscribeToSession(connId, sessionId);
-    this.logger.debug(`[ws] subscribed id=${connId} session=${sessionId}`);
-  }
-
-  private handleUnsubscribe(connId: string, sessionId: string): void {
-    if (!sessionId) return;
-    this.wsManager.unsubscribeFromSession(connId, sessionId);
   }
 }

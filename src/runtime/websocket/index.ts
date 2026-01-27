@@ -1,6 +1,9 @@
 // WebSocket module exports
 export { WebSocketManager } from './manager.js';
 export { WebSocketHandler } from './handler.js';
+export { requireAuth, requireSessionId } from './guards.js';
+export type { AuthenticatedConnection } from './guards.js';
+export { SessionService, GitHubService } from './services/index.js';
 export type {
   // Client → Server messages
   AuthMessage,

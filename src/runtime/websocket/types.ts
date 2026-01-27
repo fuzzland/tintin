@@ -34,13 +34,37 @@ export interface PingMessage {
   type: 'ping';
 }
 
+export interface GetConnectionsMessage {
+  type: 'get_connections';
+}
+
+export interface ListReposMessage {
+  type: 'list_repos';
+  provider?: string;  // 'github' | 'gitlab'
+  search?: string;
+}
+
+export interface GetAuthStatusMessage {
+  type: 'get_auth_status';
+  provider: 'github' | 'gitlab';
+}
+
+export interface StartOAuthMessage {
+  type: 'start_oauth';
+  provider: 'github' | 'gitlab';
+}
+
 export type ClientMessage =
   | AuthMessage
   | ChatMessage
   | StopMessage
   | SubscribeMessage
   | UnsubscribeMessage
-  | PingMessage;
+  | PingMessage
+  | GetConnectionsMessage
+  | ListReposMessage
+  | GetAuthStatusMessage
+  | StartOAuthMessage;
 
 // ============ Server → Client Messages ============
 
@@ -133,6 +157,44 @@ export interface PongMessage {
   type: 'pong';
 }
 
+export interface ConnectionsListMessage {
+  type: 'connections_list';
+  connections: Array<{
+    id: string;
+    type: string;
+    installationId?: string;
+    accountLogin?: string;
+    status?: string;
+    createdAt: number;
+  }>;
+}
+
+export interface ReposListMessage {
+  type: 'repos_list';
+  repos: Array<{
+    id: string;
+    name: string;
+    url: string;
+    provider: string;
+    defaultBranch: string | null;
+  }>;
+  total: number;
+}
+
+export interface AuthStatusMessage {
+  type: 'auth_status';
+  provider: string;
+  connected: boolean;
+  accountLogin?: string;
+  installationId?: string;
+}
+
+export interface OAuthStartedMessage {
+  type: 'oauth_started';
+  provider: string;
+  authorizeUrl: string;
+}
+
 export type ServerMessage =
   | AuthOkMessage
   | AuthErrorMessage
@@ -144,7 +206,11 @@ export type ServerMessage =
   | PlanUpdateMessage
   | DoneMessage
   | ErrorMessage
-  | PongMessage;
+  | PongMessage
+  | ConnectionsListMessage
+  | ReposListMessage
+  | AuthStatusMessage
+  | OAuthStartedMessage;
 
 // ============ Error Codes ============
 
