@@ -217,7 +217,7 @@ export class JsonlStreamer {
             const mapper = EVENT_MAPPERS[session.agent];
             fragments.push(
               ...mapper(obj, {
-                includeUserMessages: session.platform !== "telegram",
+                includeUserMessages: session.platform !== "telegram" && session.platform !== "websocket",
                 verbosity: messageVerbosity,
                 lang,
               }),
