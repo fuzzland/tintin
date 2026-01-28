@@ -702,6 +702,14 @@ export class BotController {
     if (!session) {
       const nextLang = requested ?? getOtherLanguage(fallbackLang);
       await setUserLanguage(this.db, "telegram", opts.userId, nextLang);
+      await this.db
+        .updateTable("sessions")
+        .set({ language: nextLang, updated_at: nowMs() })
+        .where("platform", "=", "telegram")
+        .where("chat_id", "=", chatId)
+        .where("created_by_user_id", "=", opts.userId)
+        .where("status", "in", ["starting", "running"])
+        .execute();
       const confirmKey = nextLang === "zh" ? "lang.default_set_zh" : "lang.default_set_en";
       await this.telegram.sendMessage({
         chatId,
@@ -775,6 +783,14 @@ export class BotController {
     if (!session) {
       const nextLang = requested ?? getOtherLanguage(fallbackLang);
       await setUserLanguage(this.db, "slack", opts.userId, nextLang);
+      await this.db
+        .updateTable("sessions")
+        .set({ language: nextLang, updated_at: nowMs() })
+        .where("platform", "=", "slack")
+        .where("chat_id", "=", opts.channelId)
+        .where("created_by_user_id", "=", opts.userId)
+        .where("status", "in", ["starting", "running"])
+        .execute();
       const confirmKey = nextLang === "zh" ? "lang.default_set_zh" : "lang.default_set_en";
       await sendText(t(confirmKey, nextLang));
       return;

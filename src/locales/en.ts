@@ -491,8 +491,8 @@ export const en = {
   "lang.usage": "Usage: {cmd} (en or zh). Run it in a session thread or reply to a session message.",
   "lang.session_required": "No active session found here. Run {cmd} in a session thread or reply to a session message.",
   "lang.invalid": "Unsupported language. Use en or zh.",
-  "lang.default_set_zh": "Default language set to Chinese 🇨🇳. New sessions will use this.",
-  "lang.default_set_en": "Default language set to English 🇬🇧. New sessions will use this.",
+  "lang.default_set_zh": "Switched to Chinese 🇨🇳.",
+  "lang.default_set_en": "Switched to English 🇬🇧.",
   "lang.switched_zh": "Switched to Chinese 🇨🇳",
   "lang.switched_en": "Switched to English 🇬🇧",
 } as const;
