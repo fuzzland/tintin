@@ -971,3 +971,19 @@ function isPidAlive(pid: number): boolean {
     return code === "EPERM";
   }
 }
+
+// Re-export from modular implementation for migration path.
+// Consumers can import from either './sessionManager' or './session/index'.
+export {
+  SessionStateMachine,
+  ProcessLifecycleManager,
+  ChatGptProxyManager,
+  EnvironmentBuilder,
+  VALID_TRANSITIONS,
+  isTerminalStatus,
+  type ProcessContext,
+  type ProcessRegisterOptions,
+  type ChatGptProxyContext,
+  type CloudProxyResult as ModularCloudProxyResult,
+  type KillReason as ModularKillReason,
+} from "./session/index.js";
