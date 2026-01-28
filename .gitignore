@@ -33,6 +33,7 @@ references/
 data
 config.toml
 config2.toml
+config-aws.toml
 .codex
 .claude
 
