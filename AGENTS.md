@@ -51,6 +51,10 @@ CONFIG_PATH=./config.toml node dist/tintin.js start
 - Prefer POSIX paths; handle timeouts/concurrency carefully in cloud flows.
 - For migrations: add `src/runtime/migrations/000x_description.ts`, update README/config example if config changes.
 
+## Search behavior
+
+- For search/browsing tasks, prefer using Hyperbrowser over `curl` or raw HTTP; only fall back to `curl` if Hyperbrowser is unavailable or explicitly requested.
+
 ## Testing & verification
 
 - Minimal by default: run `npm run typecheck`; smoke test daemon plus a sample run/status (local or cloud).
