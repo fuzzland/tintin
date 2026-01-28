@@ -677,7 +677,6 @@ export class BotController {
     }
 
     const raw = opts.rawArg.trim();
-    const cmdHint = opts.isDirect ? "lang en" : "@bot lang en";
     const requested = raw ? normalizeLanguageToken(raw) : null;
     if (raw && !requested) {
       const text = `${t("lang.invalid", fallbackLang)}\n${t("lang.usage", fallbackLang, { cmd: "/lang en" })}`;
@@ -694,8 +693,11 @@ export class BotController {
     const spaceIds = this.telegramSpaceIdsFromMessage(opts.message);
     let session: SessionRow | null = null;
     for (const spaceId of spaceIds) {
-      session = await getSessionBySpace(this.db, "telegram", chatId, spaceId);
-      if (session) break;
+      const found = await getSessionBySpace(this.db, "telegram", chatId, spaceId);
+      if (found) {
+        session = found;
+        break;
+      }
     }
     if (!session) {
       await this.telegram.sendMessage({
@@ -730,7 +732,8 @@ export class BotController {
     isDirect: boolean;
     rawArg: string;
   }) {
-    if (!this.slack) return;
+    const slack = this.slack;
+    if (!slack) return;
     const fallbackLang = await this.resolveUserLanguage("slack", opts.userId);
     const access = this.slackAccessDecision(opts.teamId, opts.channelId, opts.userId);
     if (!access.allowed) {
@@ -738,11 +741,12 @@ export class BotController {
     }
 
     const raw = opts.rawArg.trim();
+    const cmdHint = opts.isDirect ? "lang en" : "@bot lang en";
     const requested = raw ? normalizeLanguageToken(raw) : null;
     const threadTs = this.config.slack?.session_mode === "thread" ? opts.spaceId : undefined;
     const sendText = async (text: string) => {
       if (opts.isDirect) {
-        await this.slack.postMessageDetailed({
+        await slack.postMessageDetailed({
           channel: opts.channelId,
           thread_ts: threadTs,
           text,
@@ -750,7 +754,7 @@ export class BotController {
         });
         return;
       }
-      await this.slack.postEphemeral({
+      await slack.postEphemeral({
         channel: opts.channelId,
         user: opts.userId,
         text,
