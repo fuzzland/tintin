@@ -491,6 +491,8 @@ export const zh = {
   "lang.usage": "用法：{cmd}（en 或 zh）。请在会话线程中使用或回复会话消息。",
   "lang.session_required": "当前上下文未找到会话，请在会话线程中使用 {cmd} 或回复会话消息。",
   "lang.invalid": "不支持的语言参数，请使用 en 或 zh。",
+  "lang.default_set_zh": "默认语言已设为中文 🇨🇳，新会话将使用该语言。",
+  "lang.default_set_en": "默认语言已设为英文 🇬🇧，新会话将使用该语言。",
   "lang.switched_zh": "已切换到中文 🇨🇳",
   "lang.switched_en": "已切换到英文 🇬🇧",
 } as const;

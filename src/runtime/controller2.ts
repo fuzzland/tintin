@@ -700,11 +700,14 @@ export class BotController {
       }
     }
     if (!session) {
+      const nextLang = requested ?? getOtherLanguage(fallbackLang);
+      await setUserLanguage(this.db, "telegram", opts.userId, nextLang);
+      const confirmKey = nextLang === "zh" ? "lang.default_set_zh" : "lang.default_set_en";
       await this.telegram.sendMessage({
         chatId,
         messageThreadId: forumThreadId,
         replyToMessageId: opts.message.message_id,
-        text: t("lang.session_required", fallbackLang, { cmd: "/lang en" }),
+        text: t(confirmKey, nextLang),
         priority: "user",
       });
       return;
@@ -770,7 +773,10 @@ export class BotController {
 
     const session = await getSessionBySpace(this.db, "slack", opts.channelId, opts.spaceId);
     if (!session) {
-      await sendText(t("lang.session_required", fallbackLang, { cmd: cmdHint }));
+      const nextLang = requested ?? getOtherLanguage(fallbackLang);
+      await setUserLanguage(this.db, "slack", opts.userId, nextLang);
+      const confirmKey = nextLang === "zh" ? "lang.default_set_zh" : "lang.default_set_en";
+      await sendText(t(confirmKey, nextLang));
       return;
     }
 
