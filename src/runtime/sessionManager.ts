@@ -14,6 +14,7 @@ import { redactText } from "./redact.js";
 import { nowMs, sleep } from "./util.js";
 import { PlaywrightMcpManager } from "./playwrightMcp.js";
 import { buildLocalizedPrompt } from "./prompt.js";
+import { applySearchEnv, buildSearchDirective, isHyperbrowserAvailable, resolveSearchPolicy } from "./searchPolicy.js";
 import {
   consumePendingMessages,
   countConcurrentSessionsForChat,
@@ -185,7 +186,10 @@ export class SessionManager {
     const id = crypto.randomUUID();
     const now = nowMs();
     const language = await getUserLanguage(this.db, opts.platform, opts.userId);
-    const agentPrompt = buildLocalizedPrompt(opts.initialPrompt, language);
+    const searchPolicy = resolveSearchPolicy(this.config);
+    const hyperbrowserAvailable = isHyperbrowserAvailable(this.config);
+    const searchDirective = buildSearchDirective({ policy: searchPolicy, lang: language, hyperbrowserAvailable });
+    const agentPrompt = buildLocalizedPrompt(opts.initialPrompt, language, { searchDirective });
     const session: SessionRow = {
       id,
       agent: opts.agent,
@@ -223,10 +227,11 @@ export class SessionManager {
       const homeDir = adapter.resolveHomeDir(sessionsRoot);
       await adapter.ensureSessionsRootExists(sessionsRoot);
       const envSeed = this.applyLanguageEnv(opts.envOverrides ?? {}, language);
-      const envOverrides = await this.maybePrepareChatgptProxy(session, envSeed);
+      const envWithSearch = applySearchEnv(envSeed, searchPolicy, hyperbrowserAvailable);
+      const envOverrides = await this.maybePrepareChatgptProxy(session, envWithSearch);
 
       this.logger.debug(
-        `[session] spawn agent=${opts.agent} kind=exec session=${id} project=${opts.projectId} cwd=${session.codex_cwd} sessionsRoot=${sessionsRoot} home=${homeDir}`,
+        `[session] spawn agent=${opts.agent} kind=exec session=${id} project=${opts.projectId} cwd=${session.codex_cwd} sessionsRoot=${sessionsRoot} home=${homeDir} search_policy=${searchPolicy.mode} search_provider=${hyperbrowserAvailable ? "hyperbrowser" : "none"}`,
       );
       const extraArgs = await this.playwrightCliArgs(opts.agent);
       const spawnedProc = adapter.spawnExec({
@@ -302,8 +307,12 @@ export class SessionManager {
     const sessionsRoot = adapter.resolveSessionsRoot(session.codex_cwd, this.config);
     const homeDir = adapter.resolveHomeDir(sessionsRoot);
     await adapter.ensureSessionsRootExists(sessionsRoot);
-    const envSeed = this.applyLanguageEnv(envOverrides ?? {}, this.resolveSessionLanguage(session));
-    const envWithChatgpt = await this.maybePrepareChatgptProxy(session, envSeed);
+    const language = this.resolveSessionLanguage(session);
+    const searchPolicy = resolveSearchPolicy(this.config);
+    const hyperbrowserAvailable = isHyperbrowserAvailable(this.config);
+    const envSeed = this.applyLanguageEnv(envOverrides ?? {}, language);
+    const envWithSearch = applySearchEnv(envSeed, searchPolicy, hyperbrowserAvailable);
+    const envWithChatgpt = await this.maybePrepareChatgptProxy(session, envWithSearch);
 
     // Ensure offsets exist.
     const existingOffsets = await listSessionOffsets(this.db, session.id);
@@ -327,7 +336,8 @@ export class SessionManager {
       }
     }
 
-    const agentPrompt = buildLocalizedPrompt(prompt, this.resolveSessionLanguage(session));
+    const searchDirective = buildSearchDirective({ policy: searchPolicy, lang: language, hyperbrowserAvailable });
+    const agentPrompt = buildLocalizedPrompt(prompt, language, { searchDirective });
     let spawned;
     try {
       spawned = adapter.spawnResume({

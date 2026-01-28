@@ -14,6 +14,7 @@ import { PlaywrightMcpManager } from "./playwrightMcp.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { isUserLanguage, t, type UserLanguage } from "../locales/index.js";
+import { isHyperbrowserAvailable, isShellSearchCommand, resolveSearchPolicy } from "./searchPolicy.js";
 
 interface BufferState {
   text: string;
@@ -46,6 +47,7 @@ export class JsonlStreamer {
   private readonly pendingUserPriority = new Map<string, number>();
   private readonly lastUserMessageAtSeen = new Map<string, number | null>();
   private readonly chatgptAuthWarned = new Set<string>();
+  private readonly searchPolicyWarned = new Set<string>();
   private running = false;
 
   constructor(
@@ -199,6 +201,10 @@ export class JsonlStreamer {
             this.logCloudCodexEvent(session, obj, trimmed);
             void this.maybeCapturePlaywrightScreenshot(session.id, obj as Record<string, unknown>, lang);
             await this.maybeHandleChatgptAuthError(session, obj as Record<string, unknown>);
+            const shellCommand = extractShellCommandFromEvent(obj as Record<string, unknown>);
+            if (shellCommand) {
+              await this.maybeWarnSearchFallback(session, shellCommand);
+            }
 
             const planFragment = this.parsePlanUpdate(obj, session.id);
             if (planFragment) {
@@ -281,6 +287,9 @@ export class JsonlStreamer {
     for (const warned of Array.from(this.chatgptAuthWarned)) {
       if (!runningSessionIds.has(warned)) this.chatgptAuthWarned.delete(warned);
     }
+    for (const warned of Array.from(this.searchPolicyWarned)) {
+      if (!runningSessionIds.has(warned)) this.searchPolicyWarned.delete(warned);
+    }
   }
 
   private append(sessionId: string, text: string, opts?: { continuous?: boolean }) {
@@ -313,6 +322,25 @@ export class JsonlStreamer {
       /* ignore */
     }
     // Keep tokens for manual retry; user can choose to /connect chatgpt to replace.
+  }
+
+  private async maybeWarnSearchFallback(session: SessionRow, command: string) {
+    if (this.searchPolicyWarned.has(session.id)) return;
+    const policy = resolveSearchPolicy(this.config);
+    if (policy.mode !== "hyperbrowser_first" || !policy.warn_on_shell) return;
+    const hyperbrowserAvailable = isHyperbrowserAvailable(this.config);
+    if (!hyperbrowserAvailable) return;
+    if (!isShellSearchCommand(command)) return;
+    this.searchPolicyWarned.add(session.id);
+    try {
+      const lang = this.resolveSessionLanguage(session);
+      await this.sendToSession(session.id, {
+        text: t("search.policy_warning", lang),
+        priority: "user",
+      });
+    } catch {
+      /* ignore */
+    }
   }
 
   private async maybeCapturePlaywrightScreenshot(
@@ -2130,6 +2158,47 @@ function extractCommandFromToolArgs(name: string, argsText: string): string | nu
   } catch {
     return null;
   }
+  return null;
+}
+
+function extractShellCommandFromEvent(obj: Record<string, unknown>): string | null {
+  const type = stringOrEmpty((obj as { type?: unknown }).type);
+  if (type === "response_item") {
+    const payload = (obj as { payload?: unknown }).payload;
+    if (!payload || typeof payload !== "object") return null;
+    const itemType = stringOrEmpty((payload as { type?: unknown }).type);
+    if (itemType === "function_call") {
+      const name = stringOrEmpty((payload as { name?: unknown }).name);
+      const argsText = typeof (payload as { arguments?: unknown }).arguments === "string" ? (payload as { arguments: string }).arguments : "";
+      if (!name || !argsText) return null;
+      return extractCommandFromToolArgs(name, argsText);
+    }
+    if (itemType === "local_shell_call") {
+      const action = (payload as { action?: unknown }).action;
+      if (!action || typeof action !== "object") return null;
+      const cmd = stringOrEmpty((action as { command?: unknown }).command);
+      return cmd || null;
+    }
+    return null;
+  }
+
+  if (type === "exec_command_begin" || type === "exec_command_end" || type === "exec_command_output_delta") {
+    const payload = (obj as { payload?: unknown }).payload;
+    if (!payload || typeof payload !== "object") return null;
+    const cmd = formatCommand((payload as { command?: unknown }).command);
+    return cmd || null;
+  }
+
+  if (type.startsWith("item.")) {
+    const item = (obj as { item?: unknown }).item;
+    if (!item || typeof item !== "object") return null;
+    const detailsType = stringOrEmpty((item as { type?: unknown }).type);
+    if (detailsType === "command_execution") {
+      const cmd = stringOrEmpty((item as { command?: unknown }).command);
+      return cmd || null;
+    }
+  }
+
   return null;
 }
 

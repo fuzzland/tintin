@@ -16,6 +16,8 @@ export const zh = {
   // Prompts
   "prompt.language_directive":
     "你必须用中文回答。禁止描述或提及“切换/使用中文/翻译”等元信息；不要输出任何关于语言选择的说明。除非是代码、命令、路径、专有名词或原始日志片段，禁止使用英文。面向用户的计划、推理、进度与解释必须是中文，保持简洁直接。",
+  "prompt.search_directive":
+    "进行网页搜索/浏览时，优先使用 Hyperbrowser（Playwright MCP）。除非 Hyperbrowser 不可用或用户明确要求，否则不要使用 curl/wget/直接 HTTP。",
 
   // Wizard
   "wizard.choose_project": "选择一个项目来启动 {agent} 会话。",
@@ -48,6 +50,7 @@ export const zh = {
   "actions.none_runs": "暂无运行记录。",
   "command.dm_only": "该命令仅支持私聊使用。请使用 {cmd}。",
   "callback.unsupported_context": "不支持的回调上下文。",
+  "search.policy_warning": "提醒：网页搜索/浏览请优先使用 Hyperbrowser（Playwright MCP），除非用户明确要求使用 curl/wget。",
 
   // Agents
   "agent.claude_code.not_configured": "未配置 Claude Code。",
