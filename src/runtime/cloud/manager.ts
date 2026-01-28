@@ -1960,6 +1960,9 @@ export class CloudManager {
     const language = await getUserLanguage(this.db, opts.platform, opts.userId);
     const searchPolicy = resolveSearchPolicy(this.config);
     const hyperbrowserAvailable = isHyperbrowserAvailable(this.config);
+    const enforceSearch = searchPolicy.mode === "hyperbrowser_first" && hyperbrowserAvailable;
+    const guardDir = enforceSearch ? "/tmp/tintin-search-guard" : undefined;
+    const guardLines = enforceSearch ? buildSearchGuardBootstrapLines({ guardDir: guardDir! }) : [];
     const searchDirective = buildSearchDirective({ policy: searchPolicy, lang: language, hyperbrowserAvailable });
     const agentPrompt = buildLocalizedPrompt(opts.prompt, language, { searchDirective });
     await createSession(this.db, {
@@ -1997,12 +2000,17 @@ export class CloudManager {
       );
       envOverrides = this.applyProxyEnv(envOverrides, opts.identityId, opts.agent);
       envOverrides = this.applyLanguageEnv(envOverrides, language);
-      envOverrides = applySearchEnv(envOverrides, searchPolicy, hyperbrowserAvailable);
+      envOverrides = applySearchEnv(envOverrides, {
+        policy: searchPolicy,
+        hyperbrowserAvailable,
+        enforce: enforceSearch,
+        guardDir,
+      });
       if (opts.agent === "codex") {
         envOverrides = this.normalizeChatgptProxyEnv(sessionId, envOverrides);
       }
       this.logger.info(
-        `[cloud] spawn agent=${opts.agent} session=${sessionId} cwd=${opts.projectPath} env_keys=${Object.keys(envOverrides).length} search_policy=${searchPolicy.mode} search_provider=${hyperbrowserAvailable ? "hyperbrowser" : "none"}`,
+        `[cloud] spawn agent=${opts.agent} session=${sessionId} cwd=${opts.projectPath} env_keys=${Object.keys(envOverrides).length} search_policy=${searchPolicy.mode} search_provider=${hyperbrowserAvailable ? "hyperbrowser" : "none"} search_enforce=${enforceSearch ? "1" : "0"}`,
       );
       let playwrightSetup: RemotePlaywrightSetup | null = null;
       if (this.isBrowserbaseEnabled()) {
@@ -2045,6 +2053,7 @@ export class CloudManager {
             workspace: opts.workspace,
             envOverrides,
             playwright: playwrightSetup,
+            extraBootstrapLines: guardLines,
           }),
         `session=${sessionId} agent=${opts.agent}`,
       );
@@ -3106,7 +3115,15 @@ export class CloudManager {
     const language = this.resolveSessionLanguage(session);
     const searchPolicy = resolveSearchPolicy(this.config);
     const hyperbrowserAvailable = isHyperbrowserAvailable(this.config);
-    const envOverrides = applySearchEnv(this.applyLanguageEnv(envOverridesBase, language), searchPolicy, hyperbrowserAvailable);
+    const enforceSearch = searchPolicy.mode === "hyperbrowser_first" && hyperbrowserAvailable;
+    const guardDir = enforceSearch ? "/tmp/tintin-search-guard" : undefined;
+    const guardLines = enforceSearch ? buildSearchGuardBootstrapLines({ guardDir: guardDir! }) : [];
+    const envOverrides = applySearchEnv(this.applyLanguageEnv(envOverridesBase, language), {
+      policy: searchPolicy,
+      hyperbrowserAvailable,
+      enforce: enforceSearch,
+      guardDir,
+    });
     const normalizedEnv = session.agent === "codex" ? this.normalizeChatgptProxyEnv(session.id, envOverrides) : envOverrides;
     const searchDirective = buildSearchDirective({ policy: searchPolicy, lang: language, hyperbrowserAvailable });
     const agentPrompt = buildLocalizedPrompt(prompt, language, { searchDirective });
@@ -3163,6 +3180,7 @@ export class CloudManager {
             workspace,
             envOverrides: normalizedEnv,
             playwright: playwrightSetup,
+            extraBootstrapLines: guardLines,
           }),
         `session=${session.id} agent=${session.agent}`,
       );
