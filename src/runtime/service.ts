@@ -46,7 +46,7 @@ import http from "node:http";
 import { PlaywrightMcpManager } from "./playwrightMcp.js";
 import { appendFile, open, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import { getLanguageLabel, getOtherLanguage, isUserLanguage, t, type UserLanguage } from "../locales/index.js";
+import { isUserLanguage, t, type UserLanguage } from "../locales/index.js";
 
 export interface BotServiceDeps {
   config: AppConfig;
@@ -234,28 +234,6 @@ export async function createBotService(deps: BotServiceDeps) {
     }
   };
 
-  const buildLanguageToggleTelegram = (lang: UserLanguage) => {
-    const nextLang = getOtherLanguage(lang);
-    return { inline_keyboard: [[{ text: getLanguageLabel(nextLang), callback_data: `lang:${nextLang}` }]] };
-  };
-
-  const buildLanguageToggleSlackBlocks = (lang: UserLanguage) => {
-    const nextLang = getOtherLanguage(lang);
-    return [
-      {
-        type: "actions",
-        elements: [
-          {
-            type: "button",
-            text: { type: "plain_text", text: getLanguageLabel(nextLang) },
-            action_id: "switch_language",
-            value: nextLang,
-          },
-        ],
-      },
-    ];
-  };
-
   const uiConfig = config.cloud?.ui ?? null;
 
   const extractPlaywrightTool = (caption?: string): string | null => {
@@ -431,7 +409,6 @@ export async function createBotService(deps: BotServiceDeps) {
         await telegram.sendMessage({
           chatId,
           text,
-          replyMarkup: buildLanguageToggleTelegram(lang),
           priority: "user",
         });
         return;
@@ -444,8 +421,6 @@ export async function createBotService(deps: BotServiceDeps) {
       await slack.postMessageDetailed({
         channel,
         text,
-        blocks: buildLanguageToggleSlackBlocks(lang),
-        blocksOnLastChunk: false,
       });
     } catch (e) {
       logger.warn(`Failed to send GitHub connect message: ${String(e)}`);
@@ -468,7 +443,6 @@ export async function createBotService(deps: BotServiceDeps) {
         await telegram.sendMessage({
           chatId,
           text,
-          replyMarkup: buildLanguageToggleTelegram(lang),
           priority: "user",
         });
         return;
@@ -481,8 +455,6 @@ export async function createBotService(deps: BotServiceDeps) {
       await slack.postMessageDetailed({
         channel,
         text,
-        blocks: buildLanguageToggleSlackBlocks(lang),
-        blocksOnLastChunk: false,
       });
     } catch (e) {
       logger.warn(`Failed to send ChatGPT connect message: ${String(e)}`);
@@ -500,7 +472,6 @@ export async function createBotService(deps: BotServiceDeps) {
     includeReview: boolean;
     includeCommit: boolean;
     includeStopSandbox: boolean;
-    includeLangToggle?: boolean;
     currentLang?: UserLanguage;
   }) => {
     const lang = opts.currentLang ?? "en";
@@ -513,10 +484,6 @@ export async function createBotService(deps: BotServiceDeps) {
     if (opts.includeReview) actionRow.push({ text: t("button.review", lang), callback_data: `review:${opts.sessionId}` });
     if (opts.includeCommit) actionRow.push({ text: t("button.commit", lang), callback_data: `commit:${opts.sessionId}` });
     if (actionRow.length > 0) rows.push(actionRow);
-    if (opts.includeLangToggle) {
-      const nextLang = getOtherLanguage(lang);
-      rows.push([{ text: getLanguageLabel(nextLang), callback_data: `lang:${nextLang}` }]);
-    }
     return rows.length > 0 ? { inline_keyboard: rows } : undefined;
   };
 
@@ -526,7 +493,6 @@ export async function createBotService(deps: BotServiceDeps) {
     includeReview: boolean;
     includeCommit: boolean;
     includeStopSandbox: boolean;
-    includeLangToggle?: boolean;
     currentLang?: UserLanguage;
   }) => {
     const lang = opts.currentLang ?? "en";
@@ -565,20 +531,10 @@ export async function createBotService(deps: BotServiceDeps) {
         value: opts.sessionId,
       });
     }
-    if (opts.includeLangToggle) {
-      const nextLang = getOtherLanguage(lang);
-      elements.push({
-        type: "button",
-        text: { type: "plain_text", text: getLanguageLabel(nextLang) },
-        action_id: "switch_language",
-        value: nextLang,
-      });
-    }
     return elements.length > 0 ? [{ type: "actions", elements }] : undefined;
   };
 
   const buildCommitProposalTelegramKeyboard = (proposalId: string, lang: UserLanguage) => {
-    const nextLang = getOtherLanguage(lang);
     return {
       inline_keyboard: [
         [
@@ -586,13 +542,11 @@ export async function createBotService(deps: BotServiceDeps) {
           { text: t("button.commit_push", lang), callback_data: `cpr:${proposalId}:push` },
         ],
         [{ text: t("button.create_pr", lang), callback_data: `cpr:${proposalId}:pr` }],
-        [{ text: getLanguageLabel(nextLang), callback_data: `lang:${nextLang}` }],
       ],
     };
   };
 
   const buildCommitProposalSlackBlocks = (proposalId: string, lang: UserLanguage) => {
-    const nextLang = getOtherLanguage(lang);
     return [
       {
         type: "actions",
@@ -615,12 +569,6 @@ export async function createBotService(deps: BotServiceDeps) {
             text: { type: "plain_text", text: t("button.create_pr", lang) },
             action_id: "commit_pr",
             value: proposalId,
-          },
-          {
-            type: "button",
-            text: { type: "plain_text", text: getLanguageLabel(nextLang) },
-            action_id: "switch_language",
-            value: nextLang,
           },
         ],
       },
@@ -732,7 +680,6 @@ export async function createBotService(deps: BotServiceDeps) {
           chatId,
           messageThreadId: Number(space),
           text,
-          replyMarkup: buildLanguageToggleTelegram(lang),
           priority: "user",
         });
         return;
@@ -742,12 +689,11 @@ export async function createBotService(deps: BotServiceDeps) {
           chatId,
           replyToMessageId: Number(space),
           text,
-          replyMarkup: buildLanguageToggleTelegram(lang),
           priority: "user",
         });
         return;
       }
-      await telegram.sendMessage({ chatId, text, replyMarkup: buildLanguageToggleTelegram(lang), priority: "user" });
+      await telegram.sendMessage({ chatId, text, priority: "user" });
       return;
     }
     if (pending.platform === "slack") {
@@ -757,8 +703,6 @@ export async function createBotService(deps: BotServiceDeps) {
         channel: pending.chatId,
         thread_ts: threadTs,
         text,
-        blocks: buildLanguageToggleSlackBlocks(lang),
-        blocksOnLastChunk: false,
       });
     }
   };
@@ -868,7 +812,6 @@ export async function createBotService(deps: BotServiceDeps) {
         includeReview: !actionsDisabled,
         includeCommit: !actionsDisabled,
         includeStopSandbox: !actionsDisabled && isCloudSession,
-        includeLangToggle: true,
         currentLang: lang,
       });
       const priority = "user" as const;
@@ -900,7 +843,6 @@ export async function createBotService(deps: BotServiceDeps) {
             includeReview: !actionsDisabled,
             includeCommit: !actionsDisabled,
             includeStopSandbox: !actionsDisabled && isCloudSession,
-            includeLangToggle: true,
             currentLang: lang,
           }),
           blocksOnLastChunk: false,
@@ -1029,7 +971,6 @@ export async function createBotService(deps: BotServiceDeps) {
       const space = Number(session.space_id);
       if (Number.isNaN(chatId) || Number.isNaN(space)) return;
       const text = formatPlanMessageTelegramHtml({ plan, explanation, lang });
-      const replyMarkup = buildLanguageToggleTelegram(lang);
       const existing = planTelegramMessageId.get(sessionId);
       if (existing) {
         try {
@@ -1038,7 +979,6 @@ export async function createBotService(deps: BotServiceDeps) {
             messageId: existing,
             text,
             parseMode: "HTML",
-            replyMarkup,
             priority: "user",
           });
           return;
@@ -1055,7 +995,6 @@ export async function createBotService(deps: BotServiceDeps) {
                 messageThreadId: space,
                 text,
                 parseMode: "HTML",
-                replyMarkup,
                 priority: "user",
                 forcePrimary: true,
               }
@@ -1064,7 +1003,6 @@ export async function createBotService(deps: BotServiceDeps) {
                 replyToMessageId: space,
                 text,
                 parseMode: "HTML",
-                replyMarkup,
                 priority: "user",
                 forcePrimary: true,
               },
@@ -1084,11 +1022,10 @@ export async function createBotService(deps: BotServiceDeps) {
       const channel = session.chat_id;
       const threadTs = config.slack?.session_mode === "thread" ? session.space_id : undefined;
       const text = formatPlanMessageSlack({ plan, explanation, lang });
-      const blocks = buildLanguageToggleSlackBlocks(lang);
       const existing = planSlackMessageTs.get(sessionId);
       if (existing) {
         try {
-          await slack.updateMessage({ channel, ts: existing, text, blocks });
+          await slack.updateMessage({ channel, ts: existing, text });
           return;
         } catch {
           planSlackMessageTs.delete(sessionId);
@@ -1099,8 +1036,6 @@ export async function createBotService(deps: BotServiceDeps) {
           channel,
           thread_ts: threadTs,
           text,
-          blocks,
-          blocksOnLastChunk: false,
         });
         if (posted.lastTs) planSlackMessageTs.set(sessionId, posted.lastTs);
       } catch {
@@ -1233,7 +1168,6 @@ export async function createBotService(deps: BotServiceDeps) {
           includeReview: includeReviewButton,
           includeCommit: includeCommitButton,
           includeStopSandbox: false,
-          includeLangToggle: true,
           currentLang: lang,
         });
 
@@ -1295,7 +1229,6 @@ export async function createBotService(deps: BotServiceDeps) {
           includeReview: includeReviewButton,
           includeCommit: includeCommitButton,
           includeStopSandbox: false,
-          includeLangToggle: true,
           currentLang: lang,
         });
         const posted = await slack.postMessageDetailed({ channel, thread_ts: threadTs, text, blocks, blocksOnLastChunk: false });

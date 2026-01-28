@@ -189,6 +189,7 @@ export const zh = {
   "cloud.help.notes": "注意事项：",
   "cloud.help.note_group": "- 群聊中先用 {cmd} 共享仓库。",
   "cloud.help.note_disconnect": "- 使用 {cmd} 断开 GitHub App。",
+  "cloud.help.note_lang": "- 使用 {cmd} 切换当前会话语言。",
   "cloud.help.note_slack_mention": "- Slack 频道中需要 @ 机器人执行命令。",
 
   "connect.dm_only": "请在私聊中使用 {cmd}。",
@@ -487,6 +488,9 @@ export const zh = {
   "time.years_ago": "{n} 年前",
 
   // Language
+  "lang.usage": "用法：{cmd}（en 或 zh）。请在会话线程中使用或回复会话消息。",
+  "lang.session_required": "当前上下文未找到会话，请在会话线程中使用 {cmd} 或回复会话消息。",
+  "lang.invalid": "不支持的语言参数，请使用 en 或 zh。",
   "lang.switched_zh": "已切换到中文 🇨🇳",
   "lang.switched_en": "已切换到英文 🇬🇧",
 } as const;

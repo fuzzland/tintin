@@ -189,6 +189,7 @@ export const en = {
   "cloud.help.notes": "Notes:",
   "cloud.help.note_group": "- In group chats, share repos with {cmd} first.",
   "cloud.help.note_disconnect": "- Use {cmd} to disconnect a GitHub App.",
+  "cloud.help.note_lang": "- Use {cmd} to switch language for the current session.",
   "cloud.help.note_slack_mention": "- In Slack channels, mention the bot to issue commands.",
 
   "connect.dm_only": "Please run {cmd} in a direct message.",
@@ -487,6 +488,9 @@ export const en = {
   "time.years_ago": "{n}y ago",
 
   // Language
+  "lang.usage": "Usage: {cmd} (en or zh). Run it in a session thread or reply to a session message.",
+  "lang.session_required": "No active session found here. Run {cmd} in a session thread or reply to a session message.",
+  "lang.invalid": "Unsupported language. Use en or zh.",
   "lang.switched_zh": "Switched to Chinese 🇨🇳",
   "lang.switched_en": "Switched to English 🇬🇧",
 } as const;

@@ -78,7 +78,7 @@ import {
   revokeChatgptAccount,
   startChatgptOAuth,
 } from "./chatgpt/oauth.js";
-import { getLanguageLabel, getOtherLanguage, isUserLanguage, t, type UserLanguage } from "../locales/index.js";
+import { getOtherLanguage, isUserLanguage, t, type UserLanguage } from "../locales/index.js";
 
 const REVIEW_PROMPT = "Run codex review";
 const COMMIT_PROMPT = "Stage all current changes and commit them with a clear, meaningful git commit message summarizing the diff.";
@@ -325,7 +325,6 @@ export class BotController {
               messageThreadId: this.telegramForumThreadIdFromMessage(update.callback_query.message ?? undefined),
               replyToMessageId,
               text: t("error.generic", lang, { message: redactText(msg) }),
-              replyMarkup: this.buildLanguageToggleTelegram(lang),
               priority: "user",
             });
           } catch {}
@@ -366,7 +365,6 @@ export class BotController {
           messageThreadId: this.telegramForumThreadIdFromMessage(message),
           replyToMessageId: message.message_id,
           text: t("error.generic", lang, { message: redactText(msg) }),
-          replyMarkup: this.buildLanguageToggleTelegram(lang),
           priority: "user",
         });
       } catch {}
@@ -418,7 +416,6 @@ export class BotController {
           messageThreadId: forumThreadId,
           replyToMessageId: message.message_id,
           text: t("error.not_authorized", lang),
-          replyMarkup: this.buildLanguageToggleTelegram(lang),
           priority: "user",
         });
         return;
@@ -436,7 +433,6 @@ export class BotController {
         messageThreadId: forumThreadId,
         replyToMessageId: message.message_id,
         text: formatSessionList("telegram", lang, { ...sessionPage, filterLabel: formatSessionFilterLabel(listIntent.statuses) }),
-        replyMarkup: this.buildLanguageToggleTelegram(lang),
         priority: "user",
       });
       return;
@@ -452,7 +448,6 @@ export class BotController {
           messageThreadId: forumThreadId,
           replyToMessageId: message.message_id,
           text: t("error.not_authorized", lang),
-          replyMarkup: this.buildLanguageToggleTelegram(lang),
           priority: "user",
         });
         return;
@@ -474,7 +469,6 @@ export class BotController {
           messageThreadId: forumThreadId,
           replyToMessageId: message.message_id,
           text: result,
-          replyMarkup: this.buildLanguageToggleTelegram(lang),
           priority: "user",
         });
         return;
@@ -502,8 +496,17 @@ export class BotController {
         messageThreadId: forumThreadId,
         replyToMessageId: message.message_id,
         text: result,
-        replyMarkup: this.buildLanguageToggleTelegram(lang),
         priority: "user",
+      });
+      return;
+    }
+
+    const languageCmd = parseLanguageCommandFromTelegram(text);
+    if (languageCmd) {
+      await this.handleLanguageCommandTelegram({
+        message,
+        userId,
+        rawArg: languageCmd.raw,
       });
       return;
     }
@@ -540,7 +543,6 @@ export class BotController {
           messageThreadId: forumThreadId,
           replyToMessageId: message.message_id,
           text: t("error.not_authorized", lang),
-          replyMarkup: this.buildLanguageToggleTelegram(lang),
           priority: "user",
         });
         return;
@@ -574,7 +576,6 @@ export class BotController {
               messageThreadId: forumThreadId,
               replyToMessageId: message.message_id,
               text: t("error.not_authorized", lang),
-              replyMarkup: this.buildLanguageToggleTelegram(lang),
               priority: "user",
             });
             return;
@@ -609,7 +610,6 @@ export class BotController {
           messageThreadId: forumThreadId,
           replyToMessageId: message.message_id,
           text: t("error.not_authorized", lang),
-          replyMarkup: this.buildLanguageToggleTelegram(lang),
           priority: "user",
         });
         return;
@@ -625,7 +625,6 @@ export class BotController {
           messageThreadId: forumThreadId,
           replyToMessageId: message.message_id,
           text: t("error.generic", lang, { message: redactText(msg) }),
-          replyMarkup: this.buildLanguageToggleTelegram(lang),
           priority: "user",
         });
         return;
@@ -648,7 +647,6 @@ export class BotController {
         messageThreadId: forumThreadId,
         replyToMessageId: message.message_id,
         text: t("error.not_authorized", lang),
-        replyMarkup: this.buildLanguageToggleTelegram(lang),
         priority: "user",
       });
       return;
@@ -659,6 +657,125 @@ export class BotController {
       messageThreadId: forumThreadId,
       chat: message.chat,
     });
+  }
+
+  private async handleLanguageCommandTelegram(opts: { message: TelegramMessage; userId: string; rawArg: string }) {
+    if (!this.telegram) return;
+    const chatId = String(opts.message.chat.id);
+    const forumThreadId = this.telegramForumThreadIdFromMessage(opts.message);
+    const fallbackLang = await this.resolveUserLanguage("telegram", opts.userId);
+    const access = await this.telegramAccessDecision(chatId, opts.userId);
+    if (!access.allowed) {
+      await this.telegram.sendMessage({
+        chatId,
+        messageThreadId: forumThreadId,
+        replyToMessageId: opts.message.message_id,
+        text: t("error.not_authorized", fallbackLang),
+        priority: "user",
+      });
+      return;
+    }
+
+    const raw = opts.rawArg.trim();
+    const cmdHint = opts.isDirect ? "lang en" : "@bot lang en";
+    const requested = raw ? normalizeLanguageToken(raw) : null;
+    if (raw && !requested) {
+      const text = `${t("lang.invalid", fallbackLang)}\n${t("lang.usage", fallbackLang, { cmd: "/lang en" })}`;
+      await this.telegram.sendMessage({
+        chatId,
+        messageThreadId: forumThreadId,
+        replyToMessageId: opts.message.message_id,
+        text,
+        priority: "user",
+      });
+      return;
+    }
+
+    const spaceIds = this.telegramSpaceIdsFromMessage(opts.message);
+    let session: SessionRow | null = null;
+    for (const spaceId of spaceIds) {
+      session = await getSessionBySpace(this.db, "telegram", chatId, spaceId);
+      if (session) break;
+    }
+    if (!session) {
+      await this.telegram.sendMessage({
+        chatId,
+        messageThreadId: forumThreadId,
+        replyToMessageId: opts.message.message_id,
+        text: t("lang.session_required", fallbackLang, { cmd: "/lang en" }),
+        priority: "user",
+      });
+      return;
+    }
+
+    const currentLang = this.resolveSessionLanguage(session);
+    const nextLang = requested ?? getOtherLanguage(currentLang);
+    await updateSession(this.db, session.id, { language: nextLang });
+    await setUserLanguage(this.db, "telegram", opts.userId, nextLang);
+    const confirmKey = nextLang === "zh" ? "lang.switched_zh" : "lang.switched_en";
+    await this.telegram.sendMessage({
+      chatId,
+      messageThreadId: forumThreadId,
+      replyToMessageId: opts.message.message_id,
+      text: t(confirmKey, nextLang),
+      priority: "user",
+    });
+  }
+
+  private async handleLanguageCommandSlack(opts: {
+    channelId: string;
+    userId: string;
+    teamId: string | null;
+    spaceId: string;
+    isDirect: boolean;
+    rawArg: string;
+  }) {
+    if (!this.slack) return;
+    const fallbackLang = await this.resolveUserLanguage("slack", opts.userId);
+    const access = this.slackAccessDecision(opts.teamId, opts.channelId, opts.userId);
+    if (!access.allowed) {
+      return;
+    }
+
+    const raw = opts.rawArg.trim();
+    const requested = raw ? normalizeLanguageToken(raw) : null;
+    const threadTs = this.config.slack?.session_mode === "thread" ? opts.spaceId : undefined;
+    const sendText = async (text: string) => {
+      if (opts.isDirect) {
+        await this.slack.postMessageDetailed({
+          channel: opts.channelId,
+          thread_ts: threadTs,
+          text,
+          blocksOnLastChunk: false,
+        });
+        return;
+      }
+      await this.slack.postEphemeral({
+        channel: opts.channelId,
+        user: opts.userId,
+        text,
+        thread_ts: threadTs,
+      });
+    };
+
+    if (raw && !requested) {
+      const text = `${t("lang.invalid", fallbackLang)}\n${t("lang.usage", fallbackLang, { cmd: cmdHint })}`;
+      await sendText(text);
+      return;
+    }
+
+    const session = await getSessionBySpace(this.db, "slack", opts.channelId, opts.spaceId);
+    if (!session) {
+      await sendText(t("lang.session_required", fallbackLang, { cmd: cmdHint }));
+      return;
+    }
+
+    const currentLang = this.resolveSessionLanguage(session);
+    const nextLang = requested ?? getOtherLanguage(currentLang);
+    await updateSession(this.db, session.id, { language: nextLang });
+    await setUserLanguage(this.db, "slack", opts.userId, nextLang);
+    const confirmKey = nextLang === "zh" ? "lang.switched_zh" : "lang.switched_en";
+    await sendText(t(confirmKey, nextLang));
   }
 
   private telegramSpaceIdsFromMessage(message: TelegramMessage): string[] {
@@ -696,30 +813,6 @@ export class BotController {
     return await getUserLanguage(this.db, platform, userId);
   }
 
-  private buildLanguageToggleTelegram(lang: UserLanguage) {
-    const nextLang = getOtherLanguage(lang);
-    return {
-      inline_keyboard: [[{ text: getLanguageLabel(nextLang), callback_data: `lang:${nextLang}` }]],
-    };
-  }
-
-  private buildLanguageToggleSlackBlocks(lang: UserLanguage) {
-    const nextLang = getOtherLanguage(lang);
-    return [
-      {
-        type: "actions",
-        elements: [
-          {
-            type: "button",
-            text: { type: "plain_text", text: getLanguageLabel(nextLang) },
-            action_id: "switch_language",
-            value: nextLang,
-          },
-        ],
-      },
-    ];
-  }
-
   private async sendSessionMessageMarkdown(session: SessionRow, text: string) {
     const lang = this.resolveSessionLanguage(session);
     if (session.platform === "telegram") {
@@ -729,8 +822,8 @@ export class BotController {
       if (Number.isNaN(chatId) || Number.isNaN(space)) return;
       await this.telegram.sendMessage(
         this.isTelegramTopicSession(session)
-          ? { chatId, messageThreadId: space, text, priority: "user", replyMarkup: this.buildLanguageToggleTelegram(lang) }
-          : { chatId, replyToMessageId: space, text, priority: "user", replyMarkup: this.buildLanguageToggleTelegram(lang) },
+          ? { chatId, messageThreadId: space, text, priority: "user" }
+          : { chatId, replyToMessageId: space, text, priority: "user" },
       );
       return;
     }
@@ -741,8 +834,6 @@ export class BotController {
         channel: session.chat_id,
         thread_ts: threadTs,
         text,
-        blocks: this.buildLanguageToggleSlackBlocks(lang),
-        blocksOnLastChunk: false,
       });
     }
   }
@@ -765,7 +856,6 @@ export class BotController {
         text: opts.text,
         replyToMessageId: opts.replyToMessageId,
         messageThreadId: opts.messageThreadId,
-        replyMarkup: this.buildLanguageToggleTelegram(lang),
         priority: "user",
       });
       return;
@@ -778,7 +868,6 @@ export class BotController {
         channel: opts.chatId,
         user: opts.userId,
         text: opts.text,
-        blocks: this.buildLanguageToggleSlackBlocks(lang),
       });
       return;
     }
@@ -786,7 +875,6 @@ export class BotController {
       channel: opts.chatId,
       thread_ts: opts.slackThreadTs,
       text: opts.text,
-      blocks: this.buildLanguageToggleSlackBlocks(lang),
     });
   }
 
@@ -807,7 +895,6 @@ export class BotController {
     if (viewUrl) linkRow.push({ text: t("button.view", lang), url: viewUrl });
     if (vscodeUrl) linkRow.push({ text: t("button.vscode", lang), url: vscodeUrl });
     if (linkRow.length > 0) rows.push(linkRow);
-    rows.push([{ text: getLanguageLabel(getOtherLanguage(lang)), callback_data: `lang:${getOtherLanguage(lang)}` }]);
     return { inline_keyboard: rows };
   }
 
@@ -841,12 +928,6 @@ export class BotController {
     if (vscodeUrl) {
       elements.push({ type: "button", text: { type: "plain_text", text: t("button.vscode", lang) }, action_id: "open_vscode", url: vscodeUrl });
     }
-    elements.push({
-      type: "button",
-      text: { type: "plain_text", text: getLanguageLabel(getOtherLanguage(lang)) },
-      action_id: "switch_language",
-      value: getOtherLanguage(lang),
-    });
     return [{ type: "actions", elements }];
   }
 
@@ -2168,7 +2249,6 @@ export class BotController {
     const lang = await this.resolveUserLanguage("telegram", userId);
     const menuText = buildMenuText("telegram", agent, lang);
     const keyboard = this.telegram.projectKeyboard(this.config.projects);
-    keyboard.inline_keyboard.push([{ text: getLanguageLabel(getOtherLanguage(lang)), callback_data: `lang:${getOtherLanguage(lang)}` }]);
     await this.telegram.sendMessage({
       chatId,
       text: menuText,
@@ -2187,25 +2267,6 @@ export class BotController {
         safeSnippet(data),
       )}`,
     );
-    if (data.startsWith("lang:")) {
-      const next = data.slice("lang:".length);
-      if (!isUserLanguage(next)) {
-        await this.telegram.answerCallbackQuery(cb.id);
-        return;
-      }
-      const userId = String(cb.from.id);
-      await setUserLanguage(this.db, "telegram", userId, next);
-      await this.db
-        .updateTable("sessions")
-        .set({ language: next, updated_at: nowMs() })
-        .where("platform", "=", "telegram")
-        .where("created_by_user_id", "=", userId)
-        .where("status", "in", ["starting", "running"])
-        .execute();
-      const confirmKey = next === "zh" ? "lang.switched_zh" : "lang.switched_en";
-      await this.telegram.answerCallbackQuery(cb.id, t(confirmKey, next));
-      return;
-    }
     const actorLang = await this.resolveUserLanguage("telegram", String(cb.from.id));
     if (data.startsWith("kill:")) {
       const sessionId = data.slice("kill:".length);
@@ -2308,7 +2369,6 @@ export class BotController {
             messageThreadId: this.telegramForumThreadIdFromMessage(cb.message),
             replyToMessageId: cb.message?.message_id,
             text: t("error.generic", lang, { message: redactText(e instanceof Error ? e.message : String(e)) }),
-            replyMarkup: this.buildLanguageToggleTelegram(lang),
             priority: "user",
           });
         } catch {}
@@ -2378,7 +2438,6 @@ export class BotController {
               messageThreadId: this.telegramForumThreadIdFromMessage(cb.message),
               replyToMessageId: cb.message?.message_id,
               text: t("error.generic", lang, { message: redactText(e instanceof Error ? e.message : String(e)) }),
-              replyMarkup: this.buildLanguageToggleTelegram(lang),
               priority: "user",
             });
           } catch {}
@@ -2400,7 +2459,6 @@ export class BotController {
             messageThreadId: this.telegramForumThreadIdFromMessage(cb.message),
             replyToMessageId: cb.message?.message_id,
             text: t("error.generic", lang, { message: redactText(e instanceof Error ? e.message : String(e)) }),
-            replyMarkup: this.buildLanguageToggleTelegram(lang),
             priority: "user",
           });
         } catch {}
@@ -2576,7 +2634,6 @@ export class BotController {
         project.path === "*"
           ? t("wizard.send_custom_path", lang)
           : t("wizard.send_prompt", lang),
-      replyMarkup: this.buildLanguageToggleTelegram(lang),
       priority: "user",
     });
   }
@@ -2591,7 +2648,6 @@ export class BotController {
 	        messageThreadId: ctx.messageThreadId,
 	        replyToMessageId: ctx.replyToMessageId,
           text: t("wizard.choose_project_buttons", lang),
-          replyMarkup: this.buildLanguageToggleTelegram(lang),
 	        priority: "user",
 	      });
 	      return;
@@ -2604,7 +2660,6 @@ export class BotController {
 	        messageThreadId: ctx.messageThreadId,
 	        replyToMessageId: ctx.replyToMessageId,
           text: t("wizard.expired", lang),
-          replyMarkup: this.buildLanguageToggleTelegram(lang),
 	        priority: "user",
 	      });
 	      return;
@@ -2626,7 +2681,6 @@ export class BotController {
 	        messageThreadId: ctx.messageThreadId,
 	        replyToMessageId: ctx.replyToMessageId,
           text: t("wizard.path_accepted", lang),
-          replyMarkup: this.buildLanguageToggleTelegram(lang),
 	        priority: "user",
 	      });
 	      return;
@@ -2656,7 +2710,6 @@ export class BotController {
           messageThreadId: ctx.messageThreadId,
           replyToMessageId: ctx.replyToMessageId,
           text: `${text}${hint}`,
-          replyMarkup: this.buildLanguageToggleTelegram(lang),
           priority: "user",
         });
         return;
@@ -2705,7 +2758,6 @@ export class BotController {
             chatId: wizard.chat_id,
             messageThreadId: topicId,
             text: `${text}${hint}`,
-            replyMarkup: this.buildLanguageToggleTelegram(lang),
             priority: "user",
           });
         } else {
@@ -2714,7 +2766,6 @@ export class BotController {
             messageThreadId: ctx.messageThreadId,
             replyToMessageId: Number(spaceId),
             text: `${text}${hint}`,
-            replyMarkup: this.buildLanguageToggleTelegram(lang),
             priority: "user",
           });
         }
@@ -2756,7 +2807,6 @@ export class BotController {
 	            messageThreadId: ctx.messageThreadId,
 	            replyToMessageId: ctx.replyToMessageId,
 	            text: announceText,
-              replyMarkup: this.buildLanguageToggleTelegram(lang),
 	            priority: "user",
 	          });
 	        }
@@ -2793,7 +2843,6 @@ export class BotController {
         chatId,
         replyToMessageId: opts.anchorMessageId,
         text: t("session.created", opts.lang),
-        replyMarkup: this.buildLanguageToggleTelegram(opts.lang),
         priority: "user",
       });
       return { spaceId: String(opts.anchorMessageId), announce: false };
@@ -2822,7 +2871,6 @@ export class BotController {
       messageThreadId: opts.anchorMessageThreadId,
       replyToMessageId: opts.anchorMessageId,
       text: t("session.created_reply", opts.lang),
-      replyMarkup: this.buildLanguageToggleTelegram(opts.lang),
       priority: "user",
     });
     return { spaceId: String(root.message_id), announce: false };
@@ -2844,10 +2892,7 @@ export class BotController {
         text: message.text,
         parseMode: message.parseMode,
         replyMarkup: {
-          inline_keyboard: [
-            [{ text: t("button.stop", opts.lang), callback_data: `kill:${opts.sessionId}` }],
-            [{ text: getLanguageLabel(getOtherLanguage(opts.lang)), callback_data: `lang:${getOtherLanguage(opts.lang)}` }],
-          ],
+          inline_keyboard: [[{ text: t("button.stop", opts.lang), callback_data: `kill:${opts.sessionId}` }]],
         },
         priority: "user",
       });
@@ -2992,7 +3037,6 @@ export class BotController {
           channel: channelId,
           user: userId,
           text: formatSessionList("slack", lang, { ...sessionPage, filterLabel: formatSessionFilterLabel(listIntent.statuses) }),
-          blocks: this.buildLanguageToggleSlackBlocks(lang),
         });
         return;
       }
@@ -3015,7 +3059,6 @@ export class BotController {
             channel: channelId,
             user: userId,
             text: result,
-            blocks: this.buildLanguageToggleSlackBlocks(lang),
           });
           return;
         }
@@ -3041,7 +3084,27 @@ export class BotController {
           channel: channelId,
           user: userId,
           text: result,
-          blocks: this.buildLanguageToggleSlackBlocks(lang),
+        });
+        return;
+      }
+
+      const languageCmd = parseLanguageCommandFromSlack(text);
+      if (languageCmd) {
+        const spaceId =
+          this.config.slack?.session_mode === "thread"
+            ? typeof ev.thread_ts === "string"
+              ? ev.thread_ts
+              : typeof ev.ts === "string"
+                ? ev.ts
+                : channelId
+            : channelId;
+        await this.handleLanguageCommandSlack({
+          channelId,
+          userId,
+          teamId,
+          spaceId,
+          isDirect: channelId.startsWith("D"),
+          rawArg: languageCmd.raw,
         });
         return;
       }
@@ -3097,6 +3160,19 @@ export class BotController {
           safeSnippet(text),
         )}`,
       );
+
+      const languageCmd = parseLanguageCommandFromSlack(text);
+      if (languageCmd) {
+        await this.handleLanguageCommandSlack({
+          channelId,
+          userId,
+          teamId,
+          spaceId: cmdSpaceId,
+          isDirect: channelId.startsWith("D"),
+          rawArg: languageCmd.raw,
+        });
+        return;
+      }
 
       const cloudCmd = parseCloudCommand(text);
       if (cloudCmd) {
@@ -3162,7 +3238,6 @@ export class BotController {
           channel,
           user,
           text: t("error.generic", lang, { message: String(e) }),
-          blocks: this.buildLanguageToggleSlackBlocks(lang),
         });
       }
     }
@@ -3211,7 +3286,6 @@ export class BotController {
           type: "section",
           text: { type: "mrkdwn", text: commandExamples },
         },
-        ...this.buildLanguageToggleSlackBlocks(lang),
       ],
     });
   }
@@ -3220,24 +3294,6 @@ export class BotController {
     if (!this.slack) return;
     const action = payload.actions?.[0];
     if (!action) return;
-
-    if (action.action_id === "switch_language") {
-      const next = typeof action.value === "string" ? action.value : "";
-      const channelId = payload.channel?.id as string | undefined;
-      const userId = payload.user?.id as string | undefined;
-      if (!channelId || !userId || !isUserLanguage(next)) return;
-      await setUserLanguage(this.db, "slack", userId, next);
-      await this.db
-        .updateTable("sessions")
-        .set({ language: next, updated_at: nowMs() })
-        .where("platform", "=", "slack")
-        .where("created_by_user_id", "=", userId)
-        .where("status", "in", ["starting", "running"])
-        .execute();
-      const confirmKey = next === "zh" ? "lang.switched_zh" : "lang.switched_en";
-      await this.slack.postEphemeral({ channel: channelId, user: userId, text: t(confirmKey, next) });
-      return;
-    }
 
     if (action.action_id === "kill_session") {
       const sessionId = typeof action.value === "string" ? action.value : null;
@@ -3648,7 +3704,6 @@ export class BotController {
     const rootTs = await this.slack.postMessage({
       channel: meta.channelId,
       text: t("session.starting", lang),
-      blocks: this.buildLanguageToggleSlackBlocks(lang),
     });
     if (!rootTs) throw new Error("Failed to create Slack thread");
 
@@ -3861,6 +3916,25 @@ function parseSettingsIntentFromSlack(text: string): SettingsIntent | null {
   return parsed ? { cmd: parsed, defaultAgent: "codex" } : null;
 }
 
+type LanguageCommand = { raw: string };
+
+function parseLanguageCommandFromTelegram(text: string): LanguageCommand | null {
+  const cmd = parseTelegramCommand(text);
+  if (!cmd) return null;
+  if (cmd.command !== "lang" && cmd.command !== "language") return null;
+  return { raw: cmd.args.trim() };
+}
+
+function parseLanguageCommandFromSlack(text: string): LanguageCommand | null {
+  const normalized = normalizeCloudText(text);
+  if (!normalized) return null;
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return null;
+  const head = tokens.shift()!.toLowerCase();
+  if (head !== "lang" && head !== "language") return null;
+  return { raw: tokens.join(" ").trim() };
+}
+
 type CloudCommand =
   | { kind: "connect"; provider: string; subcommand?: string; payload?: string }
   | { kind: "disconnect"; provider: string; installationId?: string; confirmToken?: string; all?: boolean }
@@ -3898,6 +3972,14 @@ function normalizeCloudText(text: string): string {
     out = [cleanHead, ...parts].join(" ").trim();
   }
   return out;
+}
+
+function normalizeLanguageToken(raw: string): UserLanguage | null {
+  const value = raw.trim().toLowerCase();
+  if (!value) return null;
+  if (value === "en" || value === "english") return "en";
+  if (value === "zh" || value === "chinese" || value === "zh-cn") return "zh";
+  return null;
 }
 
 function truncateText(value: string, max: number): string {
@@ -4282,6 +4364,7 @@ function buildCloudHelpText(platform: "telegram" | "slack", lang: UserLanguage):
     t("cloud.help.note_group", lang, { cmd: repoShareCmd }),
   ];
   notes.push(t("cloud.help.note_disconnect", lang, { cmd: `\`${cmd("disconnect github")}\`` }));
+  notes.push(t("cloud.help.note_lang", lang, { cmd: `\`${cmd("lang zh")}\`` }));
   if (platform === "slack") {
     notes.push(t("cloud.help.note_slack_mention", lang));
   }
@@ -4359,6 +4442,7 @@ function buildCommandExamples(platform: "telegram" | "slack", lang: UserLanguage
     `- \`${sessions}\``,
     `- \`${sessionsPage}\``,
     `- \`${settings}\``,
+    `- \`${prefix}lang zh\``,
     `- \`${prefix}settings set codex.timeout_seconds 1800\``,
     `- \`${envSet}\``,
     `- \`${envUnset}\``,
