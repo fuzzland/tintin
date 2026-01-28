@@ -71,7 +71,6 @@ rate_limit_msgs_per_sec = 1.0
 client_id = "env:SLACK_CLIENT_ID"
 client_secret = "env:SLACK_CLIENT_SECRET"
 state_secret = "env:SLACK_STATE_SECRET"
-public_base_url = "https://tintin.example.com"
 signing_secret = "env:SLACK_SIGNING_SECRET"
 # Bot scopes required by Tintin's current Slack API usage.
 scopes = [
