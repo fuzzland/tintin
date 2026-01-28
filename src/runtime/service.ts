@@ -792,11 +792,17 @@ export async function createBotService(deps: BotServiceDeps) {
 
   const sendSessionCompleteNotice = async (opts: {
     sessionId: string;
-    session: { platform: string; chat_id: string; space_id: string; project_id: string | null; language?: string | null };
+    session: {
+      platform: string;
+      chat_id: string;
+      space_id: string;
+      space_emoji: string | null;
+      project_id: string | null;
+      language?: string | null;
+    };
     actionsDisabled: boolean;
-    telegramTopicSession: boolean;
   }) => {
-    const { sessionId, session, actionsDisabled, telegramTopicSession } = opts;
+    const { sessionId, session, actionsDisabled } = opts;
     const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
     const lang = resolveSessionLanguage(session);
     const text = t("session.complete", lang);
@@ -804,8 +810,6 @@ export async function createBotService(deps: BotServiceDeps) {
     if (session.platform === "telegram") {
       if (!telegram) return;
       const chatId = Number(session.chat_id);
-      const space = Number(session.space_id);
-      if (Number.isNaN(chatId) || Number.isNaN(space)) return;
       const replyMarkup = buildTelegramInlineKeyboard({
         sessionId,
         includeKill: false,
@@ -814,37 +818,102 @@ export async function createBotService(deps: BotServiceDeps) {
         includeStopSandbox: !actionsDisabled && isCloudSession,
         currentLang: lang,
       });
-      const priority = "user" as const;
+      if (Number.isNaN(chatId)) return;
+      const sendFallback = async () => {
+        const space = Number(session.space_id);
+        if (Number.isFinite(space)) {
+          try {
+            const sent = await telegram.sendMessageSingleStrict(
+              isTelegramTopicSession(session)
+                ? {
+                    chatId,
+                    messageThreadId: space,
+                    text,
+                    replyMarkup,
+                    priority: "user",
+                    forcePrimary: true,
+                  }
+                : {
+                    chatId,
+                    replyToMessageId: space,
+                    text,
+                    replyMarkup,
+                    priority: "user",
+                    forcePrimary: true,
+                  },
+            );
+            if (sent) trackTelegramMessage(sessionId, chatId, sent.message_id);
+            return;
+          } catch {
+            // Fall through to a plain message.
+          }
+        }
+        const sent = await telegram.sendMessage({
+          chatId,
+          text,
+          replyMarkup,
+          priority: "user",
+          forcePrimary: true,
+        });
+        if (sent) trackTelegramMessage(sessionId, chatId, sent.message_id);
+      };
+      const messageId = lastTelegramMessageId.get(sessionId);
+      if (!messageId) {
+        try {
+          await sendFallback();
+        } catch {
+          // Ignore failures.
+        }
+        return;
+      }
       try {
-        const sent = await telegram.sendMessageSingleStrict(
-          telegramTopicSession
-            ? { chatId, messageThreadId: space, text, replyMarkup, priority, forcePrimary: true }
-            : { chatId, replyToMessageId: space, text, replyMarkup, priority, forcePrimary: true },
-        );
-        trackTelegramMessage(sessionId, chatId, sent.message_id);
+        await telegram.editMessageReplyMarkup({
+          chatId,
+          messageId,
+          replyMarkup,
+          priority: "user",
+        });
       } catch {
-        // Ignore failures.
+        try {
+          await sendFallback();
+        } catch {
+          // Ignore failures.
+        }
       }
       return;
     }
 
     if (session.platform === "slack") {
       if (!slack) return;
-      const channel = session.chat_id;
-      const threadTs = config.slack?.session_mode === "thread" ? session.space_id : undefined;
+      const blocks = buildSlackButtons({
+        sessionId,
+        includeKill: false,
+        includeReview: !actionsDisabled,
+        includeCommit: !actionsDisabled,
+        includeStopSandbox: !actionsDisabled && isCloudSession,
+        currentLang: lang,
+      });
+      const last = lastSlackMessage.get(sessionId);
+      if (last) {
+        try {
+          await slack.updateMessage({
+            channel: session.chat_id,
+            ts: last.ts,
+            text: last.text,
+            blocks,
+          });
+          return;
+        } catch {
+          // Fall through to a new message.
+        }
+      }
       try {
+        const threadTs = config.slack?.session_mode === "thread" ? session.space_id : undefined;
         const posted = await slack.postMessageDetailed({
-          channel,
+          channel: session.chat_id,
           thread_ts: threadTs,
           text,
-          blocks: buildSlackButtons({
-            sessionId,
-            includeKill: false,
-            includeReview: !actionsDisabled,
-            includeCommit: !actionsDisabled,
-            includeStopSandbox: !actionsDisabled && isCloudSession,
-            currentLang: lang,
-          }),
+          blocks,
           blocksOnLastChunk: false,
         });
         if (posted.lastTs && posted.lastText !== null) {
@@ -1058,7 +1127,7 @@ export async function createBotService(deps: BotServiceDeps) {
         suppressFinalizeForSession.delete(sessionId);
         return;
       }
-      await sendSessionCompleteNotice({ sessionId, session, actionsDisabled, telegramTopicSession });
+      await sendSessionCompleteNotice({ sessionId, session, actionsDisabled });
       return;
     }
     if (message.type === "plan_update") {
@@ -1151,7 +1220,7 @@ export async function createBotService(deps: BotServiceDeps) {
           messageSent = true;
           return;
         }
-        await sendSessionCompleteNotice({ sessionId, session, actionsDisabled, telegramTopicSession });
+        await sendSessionCompleteNotice({ sessionId, session, actionsDisabled });
         messageSent = true;
         return;
       }
