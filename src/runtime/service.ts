@@ -1603,7 +1603,7 @@ export async function createBotService(deps: BotServiceDeps) {
   let wsHandler: WebSocketHandler | null = null;
   if (config.websocket?.enabled) {
     wsManager = new WebSocketManager(config.websocket, logger);
-    wsHandler = new WebSocketHandler(wsManager, sessionManager, config, config.websocket, db, logger);
+    wsHandler = new WebSocketHandler(wsManager, sessionManager, config, config.websocket, db, logger, cloudManager);
     wsManager.setHandler((connId, message) => wsHandler!.handleMessage(connId, message));
     wsManager.startHeartbeat();
     logger.info(`[ws] WebSocket enabled on path=${config.websocket.path}`);

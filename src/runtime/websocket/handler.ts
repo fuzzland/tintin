@@ -2,16 +2,18 @@ import type { Logger } from '../log.js';
 import type { Db } from '../db.js';
 import type { AppConfig } from '../config.js';
 import type { SessionManager } from '../sessionManager.js';
+import type { CloudManager } from '../cloud/manager.js';
 import type { WebSocketManager } from './manager.js';
 import type { ClientMessage, WebSocketSection } from './types.js';
 import { ErrorCodes } from './types.js';
 import { verifyProxyToken } from '../cloud/proxy.js';
 import { requireAuth, requireSessionId } from './guards.js';
-import { SessionService, GitHubService } from './services/index.js';
+import { SessionService, GitHubService, CloudRunService } from './services/index.js';
 
 export class WebSocketHandler {
   private readonly sessionService: SessionService;
   private readonly githubService: GitHubService;
+  private readonly cloudRunService: CloudRunService | null;
 
   constructor(
     private readonly wsManager: WebSocketManager,
@@ -20,6 +22,7 @@ export class WebSocketHandler {
     private readonly wsConfig: WebSocketSection,
     private readonly db: Db,
     private readonly logger: Logger,
+    cloudManager: CloudManager | null = null,
   ) {
     this.sessionService = new SessionService(
       wsManager,
@@ -34,6 +37,9 @@ export class WebSocketHandler {
       db,
       logger,
     );
+    this.cloudRunService = cloudManager
+      ? new CloudRunService(wsManager, cloudManager, config, db, logger)
+      : null;
   }
 
   async handleMessage(connId: string, message: ClientMessage): Promise<void> {
@@ -106,6 +112,44 @@ export class WebSocketHandler {
         const auth = requireAuth(this.wsManager, connId);
         if (!auth) return;
         await this.githubService.handleStartOAuth(connId, auth.identityId, message.provider);
+        break;
+      }
+
+      case 'cloud_run': {
+        const auth = requireAuth(this.wsManager, connId);
+        if (!auth) return;
+        if (!this.cloudRunService) {
+          this.wsManager.sendToConnection(connId, {
+            type: 'error',
+            code: ErrorCodes.SERVICE_ERROR,
+            message: 'Cloud run is not enabled',
+          });
+          return;
+        }
+        await this.cloudRunService.handleCloudRun(connId, auth.conn, message);
+        break;
+      }
+
+      case 'subscribe_run': {
+        const auth = requireAuth(this.wsManager, connId);
+        if (!auth) return;
+        if (!this.cloudRunService) {
+          this.wsManager.sendToConnection(connId, {
+            type: 'error',
+            code: ErrorCodes.SERVICE_ERROR,
+            message: 'Cloud run is not enabled',
+          });
+          return;
+        }
+        if (!message.runId) {
+          this.wsManager.sendToConnection(connId, {
+            type: 'error',
+            code: ErrorCodes.INVALID_MESSAGE,
+            message: 'Run ID required',
+          });
+          return;
+        }
+        await this.cloudRunService.handleSubscribeRun(connId, message.runId);
         break;
       }
 

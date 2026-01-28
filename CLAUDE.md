@@ -175,8 +175,16 @@ src/runtime/
 │
 ├── websocket/              # WebSocket communication
 │   ├── manager.ts          # Connection management
-│   ├── handler.ts          # Message processing
-│   └── types.ts            # Protocol definitions
+│   ├── handler.ts          # Message routing & auth
+│   ├── guards.ts           # Auth guard utilities
+│   ├── types.ts            # Protocol definitions
+│   └── services/           # WebSocket message handlers
+│       ├── index.ts        # Public exports
+│       ├── identity.ts     # IdentityResolver - WS identity mapping
+│       ├── linkBuilder.ts  # CloudLinkBuilder - URL construction
+│       ├── cloud.ts        # CloudRunService - cloud_run handling
+│       ├── session.ts      # SessionService - local chat handling
+│       └── github.ts       # GitHubService - OAuth & repos
 │
 ├── chatgpt/                # ChatGPT OAuth
 │   ├── oauth.ts            # Auth flow handling
@@ -433,6 +441,39 @@ Valid Transitions:
       │                                           │
 ```
 
+### WebSocket Cloud Run Flow
+
+```
+┌────────────┐                              ┌────────────┐
+│   Client   │                              │   Server   │
+└─────┬──────┘                              └─────┬──────┘
+      │                                           │
+      │  ──────── {"type": "auth"} ───────────▶  │
+      │  ◀─────── {"type": "auth_ok"} ─────────  │
+      │                                           │
+      │  ──────── {"type": "cloud_run",    ────▶  │
+      │            "repoIds": [...],              │
+      │            "prompt": "Fix bug"}           │
+      │                                           │
+      │                                    ┌──────┴──────┐
+      │                                    │CloudRunSvc  │
+      │                                    │handleCloudRun│
+      │                                    └──────┬──────┘
+      │                                           │
+      │                                    ┌──────┴──────┐
+      │                                    │CloudManager │
+      │                                    │  startRun   │
+      │                                    └──────┬──────┘
+      │                                           │
+      │  ◀─────── {"type": "run_status"}   ─────  │
+      │  ◀─────── {"type": "session_started"} ──  │
+      │  ◀─────── {"type": "run_links"}    ─────  │
+      │  ◀─────── {"type": "chunk", ...}   ─────  │
+      │  ◀─────── {"type": "tool_call"}    ─────  │
+      │  ◀─────── {"type": "tool_output"}  ─────  │
+      │  ◀─────── {"type": "done"}         ─────  │
+```
+
 ## Key Modules (`src/runtime/`)
 
 ### Core Modules
@@ -462,7 +503,12 @@ Valid Transitions:
 - **cloud/manager.ts**: Cloud run orchestration - workspace creation, file uploads, execution, snapshots.
 - **cloud/modalProvider.ts / localProvider.ts**: Pluggable providers implementing `CloudProvider` interface.
 - **cloud/proxy.ts**: Cloud Proxy token authentication - allows CLI agents to access cloud API endpoints securely.
-- **websocket/**: WebSocket real-time communication - `manager.ts` manages connections, `handler.ts` processes messages.
+- **websocket/**: WebSocket real-time communication
+  - `manager.ts` manages connections, `handler.ts` routes messages
+  - `services/CloudRunService` handles `cloud_run` and `subscribe_run` for cloud sandbox execution
+  - `services/SessionService` handles local `chat` sessions
+  - `services/GitHubService` handles OAuth and repository listing
+  - `services/IdentityResolver` maps WebSocket identities to database identities
 - **chatgpt/**: ChatGPT OAuth integration - `oauth.ts` handles authentication flow, `store.ts` manages tokens.
 
 ## Code Conventions

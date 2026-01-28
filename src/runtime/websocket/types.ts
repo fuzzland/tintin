@@ -54,6 +54,21 @@ export interface StartOAuthMessage {
   provider: 'github' | 'gitlab';
 }
 
+// ============ Cloud Run Messages (Client → Server) ============
+
+export interface CloudRunMessage {
+  type: 'cloud_run';
+  repoIds?: string[];              // repo IDs (empty array = playground mode)
+  prompt: string;                  // user prompt
+  agent?: 'codex' | 'claude_code'; // optional, defaults from config
+  restoreSnapshotId?: string;      // optional, restore from snapshot
+}
+
+export interface SubscribeRunMessage {
+  type: 'subscribe_run';
+  runId: string;
+}
+
 export type ClientMessage =
   | AuthMessage
   | ChatMessage
@@ -64,7 +79,9 @@ export type ClientMessage =
   | GetConnectionsMessage
   | ListReposMessage
   | GetAuthStatusMessage
-  | StartOAuthMessage;
+  | StartOAuthMessage
+  | CloudRunMessage
+  | SubscribeRunMessage;
 
 // ============ Server → Client Messages ============
 
@@ -195,6 +212,25 @@ export interface OAuthStartedMessage {
   authorizeUrl: string;
 }
 
+// ============ Cloud Run Messages (Server → Client) ============
+
+export type CloudRunStatus = 'queued' | 'preparing' | 'cloning' | 'setting_up' | 'running' | 'finished' | 'error';
+
+export interface RunStatusMessage {
+  type: 'run_status';
+  runId: string;
+  status: CloudRunStatus;
+  message?: string;
+}
+
+export interface RunLinksMessage {
+  type: 'run_links';
+  runId: string;
+  sessionId: string;
+  viewUrl?: string;
+  vscodeUrl?: string;
+}
+
 export type ServerMessage =
   | AuthOkMessage
   | AuthErrorMessage
@@ -210,7 +246,9 @@ export type ServerMessage =
   | ConnectionsListMessage
   | ReposListMessage
   | AuthStatusMessage
-  | OAuthStartedMessage;
+  | OAuthStartedMessage
+  | RunStatusMessage
+  | RunLinksMessage;
 
 // ============ Error Codes ============
 

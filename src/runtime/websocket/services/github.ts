@@ -7,25 +7,29 @@ import {
   listConnections,
   listReposForIdentity,
   listGithubInstallationsForIdentity,
-  getOrCreateIdentity,
   replaceGithubInstallationRepos,
   upsertRepo,
 } from '../../cloud/store.js';
 import { startGithubAppFlow, ensureGithubAppTokenForInstallation, parseGithubAppMetadata } from '../../cloud/githubApp.js';
 import { startOAuthFlow } from '../../cloud/oauth.js';
 import { fetchGithubInstallationRepos } from '../../cloud/repos.js';
+import { IdentityResolver } from './identity.js';
 
 export class GitHubService {
+  private readonly identityResolver: IdentityResolver;
+
   constructor(
     private readonly wsManager: WebSocketManager,
     private readonly config: AppConfig,
     private readonly db: Db,
     private readonly logger: Logger,
-  ) {}
+  ) {
+    this.identityResolver = new IdentityResolver(db);
+  }
 
   async handleGetConnections(connId: string, identityId: string): Promise<void> {
     try {
-      const dbIdentityId = await this.getOrCreateDbIdentity(identityId);
+      const dbIdentityId = await this.identityResolver.resolve(identityId);
 
       // Get connections from DB
       const connections = await listConnections(this.db, dbIdentityId);
@@ -99,7 +103,7 @@ export class GitHubService {
     opts: { provider?: string; search?: string },
   ): Promise<void> {
     try {
-      const dbIdentityId = await this.getOrCreateDbIdentity(identityId);
+      const dbIdentityId = await this.identityResolver.resolve(identityId);
 
       // Sync repos from remote if there are GitHub App installations
       await this.syncReposForIdentity(dbIdentityId);
@@ -145,7 +149,7 @@ export class GitHubService {
     provider: 'github' | 'gitlab',
   ): Promise<void> {
     try {
-      const dbIdentityId = await this.getOrCreateDbIdentity(identityId);
+      const dbIdentityId = await this.identityResolver.resolve(identityId);
       const connections = await listConnections(this.db, dbIdentityId);
 
       let connected = false;
@@ -205,7 +209,7 @@ export class GitHubService {
         throw new Error('Cloud configuration not available');
       }
 
-      const dbIdentityId = await this.getOrCreateDbIdentity(identityId);
+      const dbIdentityId = await this.identityResolver.resolve(identityId);
 
       // Build redirect base from config
       const host = this.config.bot.host ?? 'localhost';
@@ -274,29 +278,6 @@ export class GitHubService {
         message: `Failed to start OAuth: ${String(err)}`,
       });
     }
-  }
-
-  /**
-   * Get or create a database identity for the WebSocket connection.
-   * WebSocket identities use the format "ws:<identityId>" from the connection.
-   */
-  private async getOrCreateDbIdentity(wsIdentityId: string): Promise<string> {
-    // Parse the WebSocket identity to extract platform and userId
-    // Format: ws:anonymous:<connId> or ws:<token-identity>
-    const platform = 'websocket';
-    let userId = wsIdentityId;
-
-    if (wsIdentityId.startsWith('ws:')) {
-      userId = wsIdentityId.slice(3); // Remove "ws:" prefix
-    }
-
-    const identity = await getOrCreateIdentity(this.db, {
-      platform,
-      workspaceId: null,
-      userId,
-    });
-
-    return identity.id;
   }
 
   /**
