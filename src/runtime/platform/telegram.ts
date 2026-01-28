@@ -3,6 +3,13 @@ import type { Logger } from "../log.js";
 import type { ProjectEntry, TelegramSection } from "../config.js";
 import { redactText } from "../redact.js";
 import { fetchWithProxy } from "../httpClient.js";
+import type {
+  BaseSendMessageOpts,
+  FileUploadOpts,
+  IAdvancedMessagingPlatform,
+  InteractiveMarkup,
+  MessageResult,
+} from "./base.js";
 
 const TELEGRAM_USER_SEND_RATE_PER_SEC = 10;
 
@@ -69,6 +76,34 @@ type TelegramApiResponse<T> = { ok: true; result: T } | { ok: false; error_code:
 
 export type TelegramSendPriority = "user" | "background";
 
+type TelegramLegacySendMessageOpts = {
+  chatId: number | string;
+  text: string;
+  messageThreadId?: number;
+  replyToMessageId?: number;
+  replyMarkup?: unknown;
+  priority?: TelegramSendPriority;
+  forcePrimary?: boolean;
+  parseMode?: "MarkdownV2" | "Markdown" | "HTML";
+};
+
+type TelegramCompatSendMessageOpts = TelegramLegacySendMessageOpts | (BaseSendMessageOpts & { markup?: InteractiveMarkup });
+
+type TelegramLegacyFileUploadOpts = {
+  chatId: number | string;
+  messageThreadId?: number;
+  replyToMessageId?: number;
+  filename: string;
+  file: Buffer;
+  mimeType?: string;
+  caption?: string;
+  priority?: TelegramSendPriority;
+};
+
+type TelegramLegacySendMessageSingleOpts = TelegramLegacySendMessageOpts & {
+  entities?: TelegramMessageEntity[];
+};
+
 type TelegramSendQueueItem = {
   opts: TelegramSendMessageOpts;
   combinable: boolean;
@@ -77,7 +112,11 @@ type TelegramSendQueueItem = {
   reject: (e: unknown) => void;
 };
 
-export class TelegramClient {
+export class TelegramClient implements IAdvancedMessagingPlatform {
+  readonly platformName = "telegram" as const;
+  readonly supportsTokenRotation = true;
+  readonly supportsPriorityQueuing = true;
+  readonly supportsBatching = true;
   private readonly primaryToken: string;
   private readonly baseUrl: string;
   private readonly sendTokens: string[];
@@ -85,7 +124,7 @@ export class TelegramClient {
   private readonly backgroundSendIntervalMs: number;
   private readonly backgroundLimiter: RateLimiter;
   private readonly userLimiter: RateLimiter;
-  private readonly maxChars: number;
+  readonly maxChars: number;
   private readonly allowedUpdates = [
     "message",
     "edited_message",
@@ -159,17 +198,35 @@ export class TelegramClient {
     await this.apiPrimary("answerCallbackQuery", text ? { callback_query_id: id, text } : { callback_query_id: id });
   }
 
-  async sendMessage(opts: {
-    chatId: number | string;
-    text: string;
-    messageThreadId?: number;
-    replyToMessageId?: number;
-    replyMarkup?: unknown;
-    priority?: TelegramSendPriority;
-    forcePrimary?: boolean;
-  }): Promise<TelegramMessage | null> {
+  async answerInteraction(interactionId: string, text?: string): Promise<void> {
+    await this.answerCallbackQuery(interactionId, text);
+  }
+
+  sendMessage(opts: BaseSendMessageOpts & { markup?: InteractiveMarkup }): Promise<MessageResult | null>;
+  sendMessage(opts: TelegramLegacySendMessageOpts): Promise<TelegramMessage | null>;
+  async sendMessage(opts: TelegramCompatSendMessageOpts): Promise<MessageResult | TelegramMessage | null> {
+    const { legacy, returnBase } = this.normalizeSendMessageOpts(opts);
+    const sent = await this.sendMessageLegacy(legacy);
+    if (!sent) return null;
+    return returnBase ? this.toMessageResult(sent) : sent;
+  }
+
+  sendMessageSingle(opts: BaseSendMessageOpts & { markup?: InteractiveMarkup }): Promise<MessageResult>;
+  sendMessageSingle(opts: TelegramLegacySendMessageSingleOpts): Promise<TelegramMessage>;
+  async sendMessageSingle(
+    opts: (BaseSendMessageOpts & { markup?: InteractiveMarkup }) | TelegramLegacySendMessageSingleOpts,
+  ): Promise<MessageResult | TelegramMessage> {
+    if (this.isBaseSendMessageOpts(opts)) {
+      const legacy = this.normalizeBaseMessageOpts(opts);
+      const sent = await this.sendMessageSingleLegacy({ ...legacy, entities: undefined });
+      return this.toMessageResult(sent);
+    }
+    return this.sendMessageSingleLegacy(opts);
+  }
+
+  private async sendMessageLegacy(opts: TelegramLegacySendMessageOpts): Promise<TelegramMessage | null> {
     const redacted = redactText(opts.text);
-    const parseMode = this.defaultParseMode;
+    const parseMode = opts.parseMode ?? this.defaultParseMode;
     const sanitized = sanitizeTelegramText(redacted, parseMode, false);
     const chunks = chunkText(sanitized, this.maxChars);
     // In Telegram supergroups with Topics (forum groups), updates may include a `message_thread_id`.
@@ -200,16 +257,15 @@ export class TelegramClient {
     return last;
   }
 
-  async sendDocument(opts: {
-    chatId: number | string;
-    messageThreadId?: number;
-    replyToMessageId?: number;
-    filename: string;
-    file: Buffer;
-    mimeType?: string;
-    caption?: string;
-    priority?: TelegramSendPriority;
-  }) {
+  sendDocument(opts: FileUploadOpts): Promise<MessageResult>;
+  sendDocument(opts: TelegramLegacyFileUploadOpts): Promise<TelegramMessage>;
+  async sendDocument(opts: FileUploadOpts | TelegramLegacyFileUploadOpts): Promise<MessageResult | TelegramMessage> {
+    const { legacy, returnBase } = this.normalizeFileUploadOpts(opts);
+    const sent = await this.sendDocumentLegacy(legacy);
+    return returnBase ? this.toMessageResult(sent) : sent;
+  }
+
+  private async sendDocumentLegacy(opts: TelegramLegacyFileUploadOpts): Promise<TelegramMessage> {
     const limiter = (opts.priority ?? "background") === "user" ? this.userLimiter : this.backgroundLimiter;
     await limiter.waitTurn();
 
@@ -228,16 +284,15 @@ export class TelegramClient {
     return json.result;
   }
 
-  async sendPhoto(opts: {
-    chatId: number | string;
-    messageThreadId?: number;
-    replyToMessageId?: number;
-    filename: string;
-    file: Buffer;
-    mimeType?: string;
-    caption?: string;
-    priority?: TelegramSendPriority;
-  }) {
+  sendPhoto(opts: FileUploadOpts): Promise<MessageResult>;
+  sendPhoto(opts: TelegramLegacyFileUploadOpts): Promise<TelegramMessage>;
+  async sendPhoto(opts: FileUploadOpts | TelegramLegacyFileUploadOpts): Promise<MessageResult | TelegramMessage> {
+    const { legacy, returnBase } = this.normalizeFileUploadOpts(opts);
+    const sent = await this.sendPhotoLegacy(legacy);
+    return returnBase ? this.toMessageResult(sent) : sent;
+  }
+
+  private async sendPhotoLegacy(opts: TelegramLegacyFileUploadOpts): Promise<TelegramMessage> {
     const limiter = (opts.priority ?? "background") === "user" ? this.userLimiter : this.backgroundLimiter;
     await limiter.waitTurn();
 
@@ -256,17 +311,7 @@ export class TelegramClient {
     return json.result;
   }
 
-  async sendMessageSingle(opts: {
-    chatId: number | string;
-    text: string;
-    messageThreadId?: number;
-    replyToMessageId?: number;
-    replyMarkup?: unknown;
-    entities?: TelegramMessageEntity[];
-    parseMode?: "MarkdownV2" | "Markdown" | "HTML";
-    priority?: TelegramSendPriority;
-    forcePrimary?: boolean;
-  }): Promise<TelegramMessage> {
+  private async sendMessageSingleLegacy(opts: TelegramLegacySendMessageSingleOpts): Promise<TelegramMessage> {
     const redacted = redactText(opts.text);
     if (opts.entities && redacted !== opts.text) {
       throw new Error("sendMessageSingle cannot apply entities when redaction changes the text");
@@ -387,6 +432,17 @@ export class TelegramClient {
     await this.apiPrimary("editForumTopic", { chat_id: chatId, message_thread_id: messageThreadId, name });
   }
 
+  async createThread(opts: { chatId: string; name: string; iconId?: string }): Promise<string> {
+    const id = await this.createForumTopic(opts.chatId, opts.name, opts.iconId);
+    return String(id);
+  }
+
+  async editThread(opts: { chatId: string; threadId: string; name: string }): Promise<void> {
+    const threadId = Number(opts.threadId);
+    if (!Number.isFinite(threadId)) throw new Error("Telegram threadId must be numeric");
+    await this.editForumTopic(opts.chatId, threadId, opts.name);
+  }
+
   async pinChatMessage(chatId: number | string, messageId: number, disableNotification = true): Promise<void> {
     await this.userLimiter.waitTurn();
     await this.apiPrimary("pinChatMessage", {
@@ -432,6 +488,24 @@ export class TelegramClient {
       message_id: opts.messageId,
       reaction,
       is_big: opts.isBig ?? false,
+    });
+  }
+
+  async setReaction(opts: { chatId: string; messageId: string; emoji: string }): Promise<void> {
+    const messageId = Number(opts.messageId);
+    if (!Number.isFinite(messageId)) throw new Error("Telegram messageId must be numeric");
+    await this.setMessageReaction({ chatId: opts.chatId, messageId, emoji: opts.emoji });
+  }
+
+  async editMessage(opts: { chatId: string; messageId: string; text: string; markup?: InteractiveMarkup }): Promise<void> {
+    const messageId = Number(opts.messageId);
+    if (!Number.isFinite(messageId)) throw new Error("Telegram messageId must be numeric");
+    const replyMarkup = opts.markup?.type === "inline_keyboard" ? opts.markup.payload : undefined;
+    await this.editMessageText({
+      chatId: opts.chatId,
+      messageId,
+      text: opts.text,
+      replyMarkup,
     });
   }
 
@@ -735,6 +809,78 @@ export class TelegramClient {
     } finally {
       this.processingQueue = false;
     }
+  }
+
+  private toMessageResult(message: TelegramMessage): MessageResult {
+    return {
+      messageId: String(message.message_id),
+      chatId: String(message.chat.id),
+      threadId: message.message_thread_id ? String(message.message_thread_id) : undefined,
+    };
+  }
+
+  private normalizeSendMessageOpts(opts: TelegramCompatSendMessageOpts): {
+    legacy: TelegramLegacySendMessageOpts;
+    returnBase: boolean;
+  } {
+    if (this.isBaseSendMessageOpts(opts)) {
+      return { legacy: this.normalizeBaseMessageOpts(opts), returnBase: true };
+    }
+    return { legacy: opts, returnBase: false };
+  }
+
+  private normalizeBaseMessageOpts(opts: BaseSendMessageOpts & { markup?: InteractiveMarkup }): TelegramLegacySendMessageOpts {
+    return {
+      chatId: opts.chatId,
+      text: opts.text,
+      messageThreadId: this.normalizeNumericId(opts.threadId),
+      replyToMessageId: this.normalizeNumericId(opts.replyToMessageId),
+      replyMarkup: opts.markup?.type === "inline_keyboard" ? opts.markup.payload : undefined,
+      priority: opts.priority,
+      forcePrimary: false,
+    };
+  }
+
+  private normalizeFileUploadOpts(opts: FileUploadOpts | TelegramLegacyFileUploadOpts): {
+    legacy: TelegramLegacyFileUploadOpts;
+    returnBase: boolean;
+  } {
+    if (this.isBaseFileUploadOpts(opts)) {
+      return {
+        legacy: {
+          chatId: opts.chatId,
+          messageThreadId: this.normalizeNumericId(opts.threadId),
+          replyToMessageId: this.normalizeNumericId(opts.replyToMessageId),
+          filename: opts.filename,
+          file: opts.file,
+          mimeType: opts.mimeType,
+          caption: opts.caption,
+          priority: opts.priority,
+        },
+        returnBase: true,
+      };
+    }
+    return { legacy: opts, returnBase: false };
+  }
+
+  private isBaseSendMessageOpts(
+    opts: TelegramCompatSendMessageOpts,
+  ): opts is BaseSendMessageOpts & { markup?: InteractiveMarkup } {
+    const candidate = opts as Partial<BaseSendMessageOpts & { markup?: InteractiveMarkup }>;
+    if (typeof candidate !== "object" || candidate === null) return false;
+    if ("threadId" in candidate || "markup" in candidate) return true;
+    if ("replyToMessageId" in candidate && typeof candidate.replyToMessageId === "string") return true;
+    return false;
+  }
+
+  private isBaseFileUploadOpts(opts: FileUploadOpts | TelegramLegacyFileUploadOpts): opts is FileUploadOpts {
+    return typeof (opts as FileUploadOpts).chatId === "string" && ("threadId" in opts || "replyToMessageId" in opts);
+  }
+
+  private normalizeNumericId(value: string | undefined): number | undefined {
+    if (!value) return undefined;
+    const num = Number(value);
+    return Number.isFinite(num) ? num : undefined;
   }
 
   private requirePrimary(forcePrimary: boolean | undefined, replyMarkup: unknown, replyToMessageId: number | undefined): boolean {

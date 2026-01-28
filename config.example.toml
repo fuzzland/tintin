@@ -68,14 +68,30 @@ message_queue_interval_ms = 3000
 rate_limit_msgs_per_sec = 1.0
 
 [slack]
-enabled = true                   # Set to false to disable Slack (default: true)
-bot_token = "<FILL ME SLACK BOT TOKEN>"
-signing_secret = "<FILL ME SLACK SINGING TOKEN>"
+client_id = "env:SLACK_CLIENT_ID"
+client_secret = "env:SLACK_CLIENT_SECRET"
+state_secret = "env:SLACK_STATE_SECRET"
+public_base_url = "https://tintin.example.com"
+signing_secret = "env:SLACK_SIGNING_SECRET"
+# Bot scopes required by Tintin's current Slack API usage.
+scopes = [
+  "chat:write",
+  "conversations:write",
+  "conversations:read",
+  "users:read",
+  "reactions:write",
+  "files:write",
+  "app_mentions:read",
+  "im:read",
+]
+# Optional user scopes (leave empty unless you explicitly use user tokens).
+# user_scopes = []
 events_path = "/slack/events"
 interactions_path = "/slack/interactions"
 session_mode = "thread"
 max_chars = 3000
 rate_limit_msgs_per_sec = 1.0
+message_queue_interval_ms = 1000
 
 [cloud]
 enabled = false

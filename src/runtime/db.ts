@@ -384,6 +384,20 @@ export interface ChatgptOAuthStatesTable {
   created_at: number;
 }
 
+export interface SlackInstallationsTable {
+  id: string;
+  team_id: string | null;
+  enterprise_id: string | null;
+  is_enterprise_install: number;
+  bot_token: string | null;
+  bot_refresh_token: string | null;
+  bot_token_expires_at: number | null;
+  installed_by_user_id: string | null;
+  data_json: string;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface DatabaseSchema {
   sessions: SessionsTable;
   session_stream_offsets: SessionStreamOffsetsTable;
@@ -415,6 +429,7 @@ export interface DatabaseSchema {
   pending_actions: PendingActionsTable;
   chatgpt_accounts: ChatgptAccountsTable;
   chatgpt_oauth_states: ChatgptOAuthStatesTable;
+  slack_installations: SlackInstallationsTable;
 }
 
 export type Db = Kysely<DatabaseSchema>;

@@ -3,7 +3,8 @@ import type { Db } from "./db.js";
 import type { Logger } from "./log.js";
 import { sleep, TaskQueue, nowMs } from "./util.js";
 import { TelegramClient } from "./platform/telegram.js";
-import { SlackClient, verifySlackSignature } from "./platform/slack.js";
+import { SlackClient, type SlackTokenProvider, verifySlackSignature } from "./platform/slack.js";
+import type { IMessagingPlatform, InteractiveMarkup } from "./platform/base.js";
 import { BotController, type CommitProposal, type CommitProposalStore } from "./controller2.js";
 import { CloudManager } from "./cloud/manager.js";
 import { handleOAuthCallback } from "./cloud/oauth.js";
@@ -23,7 +24,7 @@ import { completeChatgptOAuth, isAllowedRedirectHost } from "./chatgpt/oauth.js"
 import { purgeExpiredChatgptStates } from "./chatgpt/store.js";
 import { JsonlStreamer, mapEventToFragments } from "./streamer.js";
 import { SessionManager } from "./sessionManager.js";
-import type { SendToSessionFn } from "./messaging.js";
+import type { SendToSessionFn, SessionMessage } from "./messaging.js";
 import type { TelegramMessage } from "./platform/telegram.js";
 import { getUserLanguage, createSession, type SessionRow } from "./store.js";
 import { getAgentAdapter } from "./agents.js";
@@ -58,6 +59,14 @@ import { uploadScreenshot, signScreenshotUrl } from "./cloud/s3.js";
 import { verifyUiToken, type UiTokenPayload } from "./cloud/uiTokens.js";
 import { buildRunArtifactsFromJsonl } from "./cloud/uiArtifacts.js";
 import { encryptSecret } from "./cloud/secrets.js";
+import {
+  SLACK_INSTALL_PATH,
+  SLACK_OAUTH_REDIRECT_PATH,
+  authorizeSlackWorkspace,
+  createSlackInstallProvider,
+  handleSlackInstall,
+  handleSlackOauthCallback,
+} from "./slack/oauth.js";
 import http from "node:http";
 import { PlaywrightMcpManager } from "./playwrightMcp.js";
 import { appendFile, open, readdir, readFile, mkdir, rm, rename, writeFile } from "node:fs/promises";
@@ -80,6 +89,7 @@ type CloudConnectMetadata = {
   platform: "telegram" | "slack";
   chat_id: string;
   user_id: string;
+  workspace_id?: string | null;
 };
 
 const buildChatgptOauthSuccessHtml = (lang: UserLanguage): string => {
@@ -366,10 +376,16 @@ function parseCloudConnectMetadata(metadataJson: string | null): CloudConnectMet
     const platform = parsed?.platform;
     const chatId = parsed?.chat_id;
     const userId = parsed?.user_id;
+    const workspaceId = parsed?.workspace_id;
     if ((platform !== "slack" && platform !== "telegram") || typeof chatId !== "string" || typeof userId !== "string") {
       return null;
     }
-    return { platform, chat_id: chatId, user_id: userId };
+    return {
+      platform,
+      chat_id: chatId,
+      user_id: userId,
+      workspace_id: typeof workspaceId === "string" ? workspaceId : workspaceId === null ? null : undefined,
+    };
   } catch {
     return null;
   }
@@ -403,6 +419,42 @@ export async function createBotService(deps: BotServiceDeps) {
     }
   };
 
+  const buildLanguageToggleTelegram = (lang: UserLanguage) => {
+    const nextLang = getOtherLanguage(lang);
+    return { inline_keyboard: [[{ text: getLanguageLabel(nextLang), callback_data: `lang:${nextLang}` }]] };
+  };
+
+  const buildLanguageToggleSlackBlocks = (lang: UserLanguage) => {
+    const nextLang = getOtherLanguage(lang);
+    return [
+      {
+        type: "actions",
+        elements: [
+          {
+            type: "button",
+            text: { type: "plain_text", text: getLanguageLabel(nextLang) },
+            action_id: "switch_language",
+            value: nextLang,
+          },
+        ],
+      },
+    ];
+  };
+
+  const buildLanguageToggleMarkup = (platform: "telegram" | "slack", lang: UserLanguage): InteractiveMarkup => {
+    if (platform === "telegram") {
+      return { type: "inline_keyboard", payload: buildLanguageToggleTelegram(lang) };
+    }
+    return { type: "blocks", payload: buildLanguageToggleSlackBlocks(lang) };
+  };
+
+  const getTelegramReplyMarkup = (markup?: InteractiveMarkup) => {
+    return markup?.type === "inline_keyboard" ? markup.payload : undefined;
+  };
+
+  const getSlackBlocks = (markup?: InteractiveMarkup) => {
+    return markup?.type === "blocks" ? (markup.payload as unknown[]) : undefined;
+  };
   const uiConfig = config.cloud?.ui ?? null;
 
   const extractPlaywrightTool = (caption?: string): string | null => {
@@ -474,6 +526,7 @@ export async function createBotService(deps: BotServiceDeps) {
     chatId: string;
     userId: string;
     spaceId: string;
+    workspaceId: string | null;
     isTelegramTopic: boolean;
     gitUserName: string | null;
     gitUserEmail: string | null;
@@ -484,8 +537,21 @@ export async function createBotService(deps: BotServiceDeps) {
   const suppressFinalizeForSession = new Set<string>();
   const commitProposals = new Map<string, CommitProposal>();
 
-  const telegram = config.telegram?.enabled ? new TelegramClient(config.telegram, logger) : null;
-  const slack = config.slack?.enabled ? new SlackClient(config.slack, logger) : null;
+  const telegram = config.telegram ? new TelegramClient(config.telegram, logger) : null;
+  const slackInstallProvider = config.slack ? createSlackInstallProvider(config, db, logger) : null;
+  const slackTokenProvider: SlackTokenProvider | null = slackInstallProvider
+    ? async (context) => {
+        const auth = await authorizeSlackWorkspace({
+          provider: slackInstallProvider,
+          teamId: context.teamId ?? "",
+          enterpriseId: context.enterpriseId,
+          isEnterpriseInstall: context.isEnterpriseInstall,
+        });
+        if (!auth.botToken) throw new Error("Slack bot token missing from installation");
+        return { token: auth.botToken, expiresAt: auth.botTokenExpiresAt ?? null };
+      }
+    : null;
+  const slack = slackTokenProvider ? new SlackClient(config.slack!, logger, slackTokenProvider, config.bot.log_level) : null;
   const playwrightMcp = config.playwright_mcp?.enabled ? new PlaywrightMcpManager(config.playwright_mcp, logger) : null;
 
   // WebSocket manager - initialized here so it's accessible in sendToSession closure
@@ -580,21 +646,27 @@ export async function createBotService(deps: BotServiceDeps) {
         if (!telegram) return;
         const chatId = Number(metadata.chat_id);
         if (!Number.isFinite(chatId)) return;
-        await telegram.sendMessage({
-          chatId,
-          text,
-          priority: "user",
-        });
+        const replyMarkup = getTelegramReplyMarkup(buildLanguageToggleMarkup("telegram", lang));
+        await telegram.sendMessage({ chatId, text, replyMarkup, priority: "user" });
         return;
       }
       if (!slack) return;
+      const workspaceId = metadata.workspace_id ?? null;
+      if (!workspaceId) {
+        logger.warn(`Slack GitHub connect missing workspace_id chat=${metadata.chat_id} user=${metadata.user_id}`);
+        return;
+      }
       let channel = metadata.chat_id;
       if (!channel.startsWith("D")) {
-        channel = await slack.openConversation({ users: [metadata.user_id] });
+        channel = await slack.openConversation({ users: [metadata.user_id], workspaceId });
       }
       await slack.postMessageDetailed({
         channel,
         text,
+        blocks: getSlackBlocks(buildLanguageToggleMarkup("slack", lang)),
+        blocksOnLastChunk: false,
+        priority: "user",
+        workspaceId,
       });
     } catch (e) {
       logger.warn(`Failed to send GitHub connect message: ${String(e)}`);
@@ -654,21 +726,27 @@ export async function createBotService(deps: BotServiceDeps) {
         if (!telegram) return;
         const chatId = Number(metadata.chat_id);
         if (!Number.isFinite(chatId)) return;
-        await telegram.sendMessage({
-          chatId,
-          text,
-          priority: "user",
-        });
+        const replyMarkup = getTelegramReplyMarkup(buildLanguageToggleMarkup("telegram", lang));
+        await telegram.sendMessage({ chatId, text, replyMarkup, priority: "user" });
         return;
       }
       if (!slack) return;
+      const workspaceId = metadata.workspace_id ?? null;
+      if (!workspaceId) {
+        logger.warn(`Slack ChatGPT connect missing workspace_id chat=${metadata.chat_id} user=${metadata.user_id}`);
+        return;
+      }
       let channel = metadata.chat_id;
       if (!channel.startsWith("D")) {
-        channel = await slack.openConversation({ users: [metadata.user_id] });
+        channel = await slack.openConversation({ users: [metadata.user_id], workspaceId });
       }
       await slack.postMessageDetailed({
         channel,
         text,
+        blocks: getSlackBlocks(buildLanguageToggleMarkup("slack", lang)),
+        blocksOnLastChunk: false,
+        priority: "user",
+        workspaceId,
       });
     } catch (e) {
       logger.warn(`Failed to send ChatGPT connect message: ${String(e)}`);
@@ -748,6 +826,26 @@ export async function createBotService(deps: BotServiceDeps) {
     return elements.length > 0 ? [{ type: "actions", elements }] : undefined;
   };
 
+  const buildSessionActionMarkup = (
+    platform: "telegram" | "slack",
+    opts: {
+      sessionId: string;
+      includeKill: boolean;
+      includeReview: boolean;
+      includeCommit: boolean;
+      includeStopSandbox: boolean;
+      includeLangToggle?: boolean;
+      currentLang?: UserLanguage;
+    },
+  ): InteractiveMarkup | undefined => {
+    if (platform === "telegram") {
+      const replyMarkup = buildTelegramInlineKeyboard(opts);
+      return replyMarkup ? { type: "inline_keyboard", payload: replyMarkup } : undefined;
+    }
+    const blocks = buildSlackButtons(opts);
+    return blocks ? { type: "blocks", payload: blocks } : undefined;
+  };
+
   const buildCommitProposalTelegramKeyboard = (proposalId: string, lang: UserLanguage) => {
     return {
       inline_keyboard: [
@@ -787,6 +885,17 @@ export async function createBotService(deps: BotServiceDeps) {
         ],
       },
     ];
+  };
+
+  const buildCommitProposalMarkup = (
+    platform: "telegram" | "slack",
+    proposalId: string,
+    lang: UserLanguage,
+  ): InteractiveMarkup => {
+    if (platform === "telegram") {
+      return { type: "inline_keyboard", payload: buildCommitProposalTelegramKeyboard(proposalId, lang) };
+    }
+    return { type: "blocks", payload: buildCommitProposalSlackBlocks(proposalId, lang) };
   };
 
   const extractCommitProposalPayload = (
@@ -845,7 +954,8 @@ export async function createBotService(deps: BotServiceDeps) {
       const chatId = Number(opts.pending.chatId);
       const space = Number(opts.pending.spaceId);
       if (Number.isNaN(chatId)) return;
-      const replyMarkup = buildCommitProposalTelegramKeyboard(opts.proposalId, opts.lang);
+      const markup = buildCommitProposalMarkup("telegram", opts.proposalId, opts.lang);
+      const replyMarkup = getTelegramReplyMarkup(markup);
       if (opts.pending.isTelegramTopic && Number.isFinite(space)) {
         await telegram.sendMessage({
           chatId,
@@ -877,8 +987,10 @@ export async function createBotService(deps: BotServiceDeps) {
         channel: opts.pending.chatId,
         thread_ts: threadTs,
         text: opts.text,
-        blocks: buildCommitProposalSlackBlocks(opts.proposalId, opts.lang),
+        blocks: getSlackBlocks(buildCommitProposalMarkup("slack", opts.proposalId, opts.lang)),
         blocksOnLastChunk: false,
+        priority: "user",
+        workspaceId: opts.pending.workspaceId,
       });
     }
   };
@@ -889,25 +1001,16 @@ export async function createBotService(deps: BotServiceDeps) {
       const chatId = Number(pending.chatId);
       const space = Number(pending.spaceId);
       if (Number.isNaN(chatId)) return;
+      const replyMarkup = getTelegramReplyMarkup(buildLanguageToggleMarkup("telegram", lang));
       if (pending.isTelegramTopic && Number.isFinite(space)) {
-        await telegram.sendMessage({
-          chatId,
-          messageThreadId: Number(space),
-          text,
-          priority: "user",
-        });
-        return;
-      }
+          await telegram.sendMessage({ chatId, messageThreadId: Number(space), text, replyMarkup, priority: "user" });
+          return;
+        }
       if (Number.isFinite(space)) {
-        await telegram.sendMessage({
-          chatId,
-          replyToMessageId: Number(space),
-          text,
-          priority: "user",
-        });
-        return;
-      }
-      await telegram.sendMessage({ chatId, text, priority: "user" });
+          await telegram.sendMessage({ chatId, replyToMessageId: Number(space), text, replyMarkup, priority: "user" });
+          return;
+        }
+      await telegram.sendMessage({ chatId, text, replyMarkup, priority: "user" });
       return;
     }
     if (pending.platform === "slack") {
@@ -917,6 +1020,10 @@ export async function createBotService(deps: BotServiceDeps) {
         channel: pending.chatId,
         thread_ts: threadTs,
         text,
+        blocks: getSlackBlocks(buildLanguageToggleMarkup("slack", lang)),
+        blocksOnLastChunk: false,
+        priority: "user",
+        workspaceId: pending.workspaceId,
       });
     }
   };
@@ -1004,6 +1111,56 @@ export async function createBotService(deps: BotServiceDeps) {
     telegramMessageToSession.set(telegramMessageKey(chatId, messageId), sessionId);
   };
 
+  const sendSessionImage = async (opts: {
+    sessionId: string;
+    session: SessionRow;
+    telegramTopicSession: boolean;
+    message: Extract<SessionMessage, { type: "image" }>;
+    caption: string;
+    priority: "user" | "background";
+  }) => {
+    const platformClient: IMessagingPlatform | null =
+      opts.session.platform === "telegram" ? telegram : opts.session.platform === "slack" ? slack : null;
+    if (!platformClient) return;
+
+    const isTelegram = opts.session.platform === "telegram";
+    const workspaceId = opts.session.workspace_id ?? null;
+    const threadId = isTelegram
+      ? opts.telegramTopicSession
+        ? opts.session.space_id
+        : undefined
+      : config.slack?.session_mode === "thread"
+        ? opts.session.space_id
+        : undefined;
+    const replyToMessageId = isTelegram && !opts.telegramTopicSession ? opts.session.space_id : undefined;
+    const uploadOpts = {
+      chatId: opts.session.chat_id,
+      threadId,
+      replyToMessageId,
+      filename: opts.message.filename,
+      file: opts.message.file,
+      mimeType: opts.message.mimeType,
+      caption: opts.caption,
+      priority: opts.priority,
+      workspaceId,
+    };
+
+    let result: { messageId: string } | null = null;
+    try {
+      result = await platformClient.sendPhoto(uploadOpts);
+    } catch {
+      result = await platformClient.sendDocument(uploadOpts);
+    }
+
+    if (isTelegram && result?.messageId) {
+      const chatId = Number(opts.session.chat_id);
+      const messageId = Number(result.messageId);
+      if (Number.isFinite(chatId) && Number.isFinite(messageId)) {
+        trackTelegramMessage(opts.sessionId, chatId, messageId);
+      }
+    }
+  };
+
   const sendSessionCompleteNotice = async (opts: {
     sessionId: string;
     session: {
@@ -1013,6 +1170,7 @@ export async function createBotService(deps: BotServiceDeps) {
       space_emoji: string | null;
       project_id: string | null;
       language?: string | null;
+      workspace_id?: string | null;
     };
     actionsDisabled: boolean;
   }) => {
@@ -1024,7 +1182,9 @@ export async function createBotService(deps: BotServiceDeps) {
     if (session.platform === "telegram") {
       if (!telegram) return;
       const chatId = Number(session.chat_id);
-      const replyMarkup = buildTelegramInlineKeyboard({
+      const space = Number(session.space_id);
+      if (Number.isNaN(chatId) || Number.isNaN(space)) return;
+      const markup = buildSessionActionMarkup("telegram", {
         sessionId,
         includeKill: false,
         includeReview: !actionsDisabled,
@@ -1032,9 +1192,8 @@ export async function createBotService(deps: BotServiceDeps) {
         includeStopSandbox: !actionsDisabled && isCloudSession,
         currentLang: lang,
       });
-      if (Number.isNaN(chatId)) return;
+      const replyMarkup = getTelegramReplyMarkup(markup);
       const sendFallback = async () => {
-        const space = Number(session.space_id);
         if (Number.isFinite(space)) {
           try {
             const sent = await telegram.sendMessageSingleStrict(
@@ -1099,36 +1258,37 @@ export async function createBotService(deps: BotServiceDeps) {
 
     if (session.platform === "slack") {
       if (!slack) return;
-      const blocks = buildSlackButtons({
+      const channel = session.chat_id;
+      const threadTs = config.slack?.session_mode === "thread" ? session.space_id : undefined;
+      const workspaceId = session.workspace_id ?? null;
+      const markup = buildSessionActionMarkup("slack", {
         sessionId,
         includeKill: false,
         includeReview: !actionsDisabled,
         includeCommit: !actionsDisabled,
         includeStopSandbox: !actionsDisabled && isCloudSession,
+        includeLangToggle: true,
         currentLang: lang,
       });
+      const blocks = getSlackBlocks(markup);
       const last = lastSlackMessage.get(sessionId);
       if (last) {
         try {
-          await slack.updateMessage({
-            channel: session.chat_id,
-            ts: last.ts,
-            text: last.text,
-            blocks,
-          });
+          await slack.updateMessage({ channel, ts: last.ts, text: last.text, blocks, workspaceId });
           return;
         } catch {
           // Fall through to a new message.
         }
       }
       try {
-        const threadTs = config.slack?.session_mode === "thread" ? session.space_id : undefined;
         const posted = await slack.postMessageDetailed({
-          channel: session.chat_id,
+          channel,
           thread_ts: threadTs,
           text,
           blocks,
           blocksOnLastChunk: false,
+          priority: "user",
+          workspaceId,
         });
         if (posted.lastTs && posted.lastText !== null) {
           lastSlackMessage.set(sessionId, { ts: posted.lastTs, text: posted.lastText });
@@ -1243,7 +1403,13 @@ export async function createBotService(deps: BotServiceDeps) {
 
   const upsertPlanMessage = async (
     sessionId: string,
-    session: { platform: string; chat_id: string; space_id: string; space_emoji: string | null },
+    session: {
+      platform: string;
+      chat_id: string;
+      space_id: string;
+      space_emoji: string | null;
+      workspace_id?: string | null;
+    },
     lang: UserLanguage,
     plan: Array<{ step: string; status: string }>,
     explanation?: string,
@@ -1254,6 +1420,7 @@ export async function createBotService(deps: BotServiceDeps) {
       const space = Number(session.space_id);
       if (Number.isNaN(chatId) || Number.isNaN(space)) return;
       const text = formatPlanMessageTelegramHtml({ plan, explanation, lang });
+      const replyMarkup = getTelegramReplyMarkup(buildLanguageToggleMarkup("telegram", lang));
       const existing = planTelegramMessageId.get(sessionId);
       if (existing) {
         try {
@@ -1304,11 +1471,13 @@ export async function createBotService(deps: BotServiceDeps) {
       if (!slack) return;
       const channel = session.chat_id;
       const threadTs = config.slack?.session_mode === "thread" ? session.space_id : undefined;
+      const workspaceId = session.workspace_id ?? null;
       const text = formatPlanMessageSlack({ plan, explanation, lang });
+      const blocks = getSlackBlocks(buildLanguageToggleMarkup("slack", lang));
       const existing = planSlackMessageTs.get(sessionId);
       if (existing) {
         try {
-          await slack.updateMessage({ channel, ts: existing, text });
+          await slack.updateMessage({ channel, ts: existing, text, blocks, workspaceId });
           return;
         } catch {
           planSlackMessageTs.delete(sessionId);
@@ -1319,6 +1488,10 @@ export async function createBotService(deps: BotServiceDeps) {
           channel,
           thread_ts: threadTs,
           text,
+          blocks,
+          blocksOnLastChunk: false,
+          priority: "user",
+          workspaceId,
         });
         if (posted.lastTs) planSlackMessageTs.set(sessionId, posted.lastTs);
       } catch {
@@ -1397,54 +1570,8 @@ export async function createBotService(deps: BotServiceDeps) {
         caption,
       }).catch((e) => logger.warn(`screenshot upload failed session=${sessionId}: ${String(e)}`));
       try {
-        if (session.platform === "telegram") {
-          if (!telegram) return;
-          const chatId = Number(session.chat_id);
-          const space = Number(session.space_id);
-          if (Number.isNaN(chatId) || Number.isNaN(space)) return;
-          const send = async (opts: { messageThreadId?: number; replyToMessageId?: number }) => {
-            try {
-              const sent = await telegram.sendPhoto({
-                chatId,
-                messageThreadId: opts.messageThreadId,
-                replyToMessageId: opts.replyToMessageId,
-                filename: message.filename,
-                file: message.file,
-                mimeType: message.mimeType,
-                caption,
-                priority,
-              });
-              trackTelegramMessage(sessionId, chatId, sent.message_id);
-            } catch {
-              const sent = await telegram.sendDocument({
-                chatId,
-                messageThreadId: opts.messageThreadId,
-                replyToMessageId: opts.replyToMessageId,
-                filename: message.filename,
-                file: message.file,
-                mimeType: message.mimeType,
-                caption,
-                priority,
-              });
-              trackTelegramMessage(sessionId, chatId, sent.message_id);
-            }
-          };
-          await send(telegramTopicSession ? { messageThreadId: space } : { replyToMessageId: space });
-          return;
-        }
-        if (session.platform === "slack") {
-          if (!slack) return;
-          const threadTs = config.slack?.session_mode === "thread" ? session.space_id : undefined;
-          await slack.uploadFile({
-            channel: session.chat_id,
-            thread_ts: threadTs,
-            filename: message.filename,
-            file: message.file,
-            mimeType: message.mimeType,
-            initial_comment: caption,
-          });
-          return;
-        }
+        await sendSessionImage({ sessionId, session, telegramTopicSession, message, caption, priority });
+        return;
       } catch (e) {
         logger.warn(`send image failed session=${sessionId}: ${String(e)}`);
       }
@@ -1484,7 +1611,7 @@ export async function createBotService(deps: BotServiceDeps) {
         const space = Number(session.space_id);
         if (Number.isNaN(chatId) || Number.isNaN(space)) return;
         const priority = message.priority ?? "background";
-        const replyMarkup = buildTelegramInlineKeyboard({
+        const markup = buildSessionActionMarkup("telegram", {
           sessionId,
           includeKill: includeKillButton,
           includeReview: includeReviewButton,
@@ -1492,6 +1619,7 @@ export async function createBotService(deps: BotServiceDeps) {
           includeStopSandbox: false,
           currentLang: lang,
         });
+        const replyMarkup = getTelegramReplyMarkup(markup);
 
         if (isFencedCodeBlock(text)) {
           const parseMode = "Markdown" as const;
@@ -1545,7 +1673,9 @@ export async function createBotService(deps: BotServiceDeps) {
         if (!slack) return;
         const channel = session.chat_id;
         const threadTs = config.slack?.session_mode === "thread" ? session.space_id : undefined;
-        const blocks = buildSlackButtons({
+        const workspaceId = session.workspace_id ?? null;
+        const priority = message.priority ?? "background";
+        const markup = buildSessionActionMarkup("slack", {
           sessionId,
           includeKill: includeKillButton,
           includeReview: includeReviewButton,
@@ -1553,7 +1683,16 @@ export async function createBotService(deps: BotServiceDeps) {
           includeStopSandbox: false,
           currentLang: lang,
         });
-        const posted = await slack.postMessageDetailed({ channel, thread_ts: threadTs, text, blocks, blocksOnLastChunk: false });
+        const blocks = getSlackBlocks(markup);
+        const posted = await slack.postMessageDetailed({
+          channel,
+          thread_ts: threadTs,
+          text,
+          blocks,
+          blocksOnLastChunk: false,
+          priority,
+          workspaceId,
+        });
         if (posted.lastTs && posted.lastText !== null) {
           lastSlackMessage.set(sessionId, { ts: posted.lastTs, text: posted.lastText });
         }
@@ -1788,6 +1927,23 @@ export async function createBotService(deps: BotServiceDeps) {
         const token = createProxyToken(proxy.shared_secret, identityId, ttlMs);
 
         sendJson(res, 200, { token, identityId, expiresIn: ttlMs });
+        return;
+      }
+      if (slackInstallProvider && req.method === "GET" && pathname === SLACK_INSTALL_PATH) {
+        try {
+          await handleSlackInstall({ provider: slackInstallProvider, req, res, config });
+        } catch (e) {
+          sendText(res, 400, `Slack install failed: ${String(e)}`);
+        }
+        return;
+      }
+
+      if (slackInstallProvider && req.method === "GET" && pathname === SLACK_OAUTH_REDIRECT_PATH) {
+        try {
+          await handleSlackOauthCallback({ provider: slackInstallProvider, req, res, config });
+        } catch (e) {
+          sendText(res, 400, `Slack OAuth failed: ${String(e)}`);
+        }
         return;
       }
 

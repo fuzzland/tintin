@@ -196,14 +196,19 @@ export interface TelegramSection {
 export type SlackSessionMode = "thread" | "channel";
 
 export interface SlackSection {
-  enabled: boolean;
-  bot_token: string;
+  client_id: string;
+  client_secret: string;
+  state_secret: string;
+  public_base_url: string;
   signing_secret: string;
   events_path: string;
   interactions_path: string;
   session_mode: SlackSessionMode;
   max_chars: number;
   rate_limit_msgs_per_sec: number;
+  message_queue_interval_ms: number;
+  scopes: string[];
+  user_scopes: string[];
 }
 
 export type PlaywrightSnapshotMode = "incremental" | "full" | "none";
@@ -1144,12 +1149,25 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
   if (resolved.slack !== undefined) {
     const s = resolved.slack;
     assert(isRecord(s), "[slack] must be a table");
-    const enabled = typeof s.enabled === "boolean" ? s.enabled : true;
+    const scopesRaw = Array.isArray((s as any).scopes)
+      ? (s as any).scopes
+      : typeof (s as any).scopes === "string"
+        ? [(s as any).scopes]
+        : [];
+    const scopes = scopesRaw.filter((v: unknown): v is string => typeof v === "string" && v.trim().length > 0);
+    const userScopesRaw = Array.isArray((s as any).user_scopes)
+      ? (s as any).user_scopes
+      : typeof (s as any).user_scopes === "string"
+        ? [(s as any).user_scopes]
+        : [];
+    const userScopes = userScopesRaw.filter((v: unknown): v is string => typeof v === "string" && v.trim().length > 0);
     const mode = typeof s.session_mode === "string" ? s.session_mode : "thread";
     assert(mode === "thread" || mode === "channel", "[slack].session_mode must be 'thread' or 'channel'");
     slackSection = {
-      enabled,
-      bot_token: typeof s.bot_token === "string" ? s.bot_token : "",
+      client_id: typeof (s as any).client_id === "string" ? (s as any).client_id : "",
+      client_secret: typeof (s as any).client_secret === "string" ? (s as any).client_secret : "",
+      state_secret: typeof (s as any).state_secret === "string" ? (s as any).state_secret : "",
+      public_base_url: typeof (s as any).public_base_url === "string" ? (s as any).public_base_url : "",
       signing_secret: typeof s.signing_secret === "string" ? s.signing_secret : "",
       events_path: normalizeHttpPath(typeof s.events_path === "string" ? s.events_path : "/slack/events", "[slack].events_path"),
       interactions_path: normalizeHttpPath(
@@ -1159,12 +1177,19 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
       session_mode: mode,
       max_chars: typeof s.max_chars === "number" ? s.max_chars : 3000,
       rate_limit_msgs_per_sec: typeof s.rate_limit_msgs_per_sec === "number" ? s.rate_limit_msgs_per_sec : 1.0,
+      message_queue_interval_ms:
+        typeof (s as any).message_queue_interval_ms === "number" ? (s as any).message_queue_interval_ms : 1000,
+      scopes,
+      user_scopes: userScopes,
     };
-    // Only validate required fields when enabled
-    if (slackSection.enabled) {
-      assert(slackSection.bot_token.length > 0, "[slack].bot_token is required when enabled");
-      assert(slackSection.signing_secret.length > 0, "[slack].signing_secret is required when enabled");
-    }
+    assert(slackSection.client_id.length > 0, "[slack].client_id is required");
+    assert(slackSection.client_secret.length > 0, "[slack].client_secret is required");
+    assert(slackSection.state_secret.length > 0, "[slack].state_secret is required");
+    assert(slackSection.public_base_url.length > 0, "[slack].public_base_url is required");
+    slackSection.public_base_url = normalizeUrl(slackSection.public_base_url, "[slack].public_base_url");
+    assert(slackSection.signing_secret.length > 0, "[slack].signing_secret is required");
+    assert(slackSection.scopes.length > 0, "[slack].scopes must include at least one scope");
+    assert(slackSection.message_queue_interval_ms >= 0, "[slack].message_queue_interval_ms must be >= 0");
   }
 
   const playwrightMcp = normalizePlaywrightMcpSection((resolved as any).playwright_mcp, {
