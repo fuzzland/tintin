@@ -14,7 +14,13 @@ import { redactText } from "./redact.js";
 import { nowMs, sleep } from "./util.js";
 import { PlaywrightMcpManager } from "./playwrightMcp.js";
 import { buildLocalizedPrompt } from "./prompt.js";
-import { applySearchEnv, buildSearchDirective, isHyperbrowserAvailable, resolveSearchPolicy } from "./searchPolicy.js";
+import {
+  applySearchEnv,
+  buildSearchDirective,
+  ensureLocalSearchGuard,
+  isHyperbrowserAvailable,
+  resolveSearchPolicy,
+} from "./searchPolicy.js";
 import {
   consumePendingMessages,
   countConcurrentSessionsForChat,
@@ -188,6 +194,7 @@ export class SessionManager {
     const language = await getUserLanguage(this.db, opts.platform, opts.userId);
     const searchPolicy = resolveSearchPolicy(this.config);
     const hyperbrowserAvailable = isHyperbrowserAvailable(this.config);
+    const enforceSearch = searchPolicy.mode === "hyperbrowser_first" && hyperbrowserAvailable;
     const searchDirective = buildSearchDirective({ policy: searchPolicy, lang: language, hyperbrowserAvailable });
     const agentPrompt = buildLocalizedPrompt(opts.initialPrompt, language, { searchDirective });
     const session: SessionRow = {
@@ -227,11 +234,19 @@ export class SessionManager {
       const homeDir = adapter.resolveHomeDir(sessionsRoot);
       await adapter.ensureSessionsRootExists(sessionsRoot);
       const envSeed = this.applyLanguageEnv(opts.envOverrides ?? {}, language);
-      const envWithSearch = applySearchEnv(envSeed, searchPolicy, hyperbrowserAvailable);
+      const guardDir = enforceSearch
+        ? await ensureLocalSearchGuard({ rootDir: path.join(this.config.bot.data_dir, "search-guard") })
+        : undefined;
+      const envWithSearch = applySearchEnv(envSeed, {
+        policy: searchPolicy,
+        hyperbrowserAvailable,
+        enforce: enforceSearch,
+        guardDir,
+      });
       const envOverrides = await this.maybePrepareChatgptProxy(session, envWithSearch);
 
       this.logger.debug(
-        `[session] spawn agent=${opts.agent} kind=exec session=${id} project=${opts.projectId} cwd=${session.codex_cwd} sessionsRoot=${sessionsRoot} home=${homeDir} search_policy=${searchPolicy.mode} search_provider=${hyperbrowserAvailable ? "hyperbrowser" : "none"}`,
+        `[session] spawn agent=${opts.agent} kind=exec session=${id} project=${opts.projectId} cwd=${session.codex_cwd} sessionsRoot=${sessionsRoot} home=${homeDir} search_policy=${searchPolicy.mode} search_provider=${hyperbrowserAvailable ? "hyperbrowser" : "none"} search_enforce=${enforceSearch ? "1" : "0"}`,
       );
       const extraArgs = await this.playwrightCliArgs(opts.agent);
       const spawnedProc = adapter.spawnExec({
@@ -310,8 +325,17 @@ export class SessionManager {
     const language = this.resolveSessionLanguage(session);
     const searchPolicy = resolveSearchPolicy(this.config);
     const hyperbrowserAvailable = isHyperbrowserAvailable(this.config);
+    const enforceSearch = searchPolicy.mode === "hyperbrowser_first" && hyperbrowserAvailable;
     const envSeed = this.applyLanguageEnv(envOverrides ?? {}, language);
-    const envWithSearch = applySearchEnv(envSeed, searchPolicy, hyperbrowserAvailable);
+    const guardDir = enforceSearch
+      ? await ensureLocalSearchGuard({ rootDir: path.join(this.config.bot.data_dir, "search-guard") })
+      : undefined;
+    const envWithSearch = applySearchEnv(envSeed, {
+      policy: searchPolicy,
+      hyperbrowserAvailable,
+      enforce: enforceSearch,
+      guardDir,
+    });
     const envWithChatgpt = await this.maybePrepareChatgptProxy(session, envWithSearch);
 
     // Ensure offsets exist.

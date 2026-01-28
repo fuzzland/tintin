@@ -17,7 +17,7 @@ export const en = {
   "prompt.language_directive":
     "You must respond in English. Do not mention language choice, switching, or translation. Avoid meta commentary about the response language. Use English for user-facing planning, reasoning summaries, progress, and explanations; keep code/paths/commands/logs verbatim.",
   "prompt.search_directive":
-    "For web search/browsing, prefer Hyperbrowser via Playwright MCP. Avoid curl/wget/raw HTTP unless Hyperbrowser is unavailable or the user explicitly requests it.",
+    "For any web search/browsing, you must use Hyperbrowser via Playwright MCP. Do not use curl/wget/raw HTTP. If Hyperbrowser is unavailable, explain and stop.",
 
   // Wizard
   "wizard.choose_project": "Choose a project to start a {agent} session.",
@@ -50,7 +50,7 @@ export const en = {
   "actions.none_runs": "No runs found.",
   "command.dm_only": "This command is only available in direct messages. Use {cmd}.",
   "callback.unsupported_context": "Unsupported callback context.",
-  "search.policy_warning": "Reminder: for web search/browsing, prefer Hyperbrowser (Playwright MCP) over curl/wget unless explicitly requested.",
+  "search.policy_warning": "Search policy enforced: curl/wget disabled. Use Hyperbrowser (Playwright MCP).",
 
   // Agents
   "agent.claude_code.not_configured": "Claude Code is not configured.",

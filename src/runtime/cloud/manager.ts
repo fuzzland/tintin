@@ -23,7 +23,13 @@ import { findRemoteJsonlFiles, getRemoteFileSize, RemoteLogSync } from "./modalL
 import { createProxyToken } from "./proxy.js";
 import { isUserLanguage, t, type UserLanguage } from "../../locales/index.js";
 import { buildLocalizedPrompt } from "../prompt.js";
-import { applySearchEnv, buildSearchDirective, isHyperbrowserAvailable, resolveSearchPolicy } from "../searchPolicy.js";
+import {
+  applySearchEnv,
+  buildSearchDirective,
+  buildSearchGuardBootstrapLines,
+  isHyperbrowserAvailable,
+  resolveSearchPolicy,
+} from "../searchPolicy.js";
 import { getAgentAdapter } from "../agents.js";
 import { getChatgptAccountForIdentity, persistChatgptProxyTokens } from "../chatgpt/oauth.js";
 import {
