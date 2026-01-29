@@ -878,8 +878,9 @@ export class CloudHandler {
         }
         this.lastRepoListByIdentity.set(identity.id, repos.map((r) => r.id));
         const lines = [t("repos.title", lang)];
+        lines.push(`0. \`${t("repo.playground_label", lang)}\``);
         for (const [index, repo] of repos.entries()) {
-          lines.push(`${index + 1}. ${repo.name} (${repo.id})`);
+          lines.push(`${index + 1}. \`${repo.name}\``);
         }
         lines.push(
           t("repos.select_hint", lang, {
