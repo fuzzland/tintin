@@ -9,7 +9,7 @@ import type { BotController } from "../controller2.js";
 import type { CloudManager } from "../cloud/manager.js";
 import type { TelegramClient } from "../platform/telegram.js";
 import type { SlackClient } from "../platform/slack.js";
-import type { SlackInstallProvider } from "../slack/oauth.js";
+import type { InstallProvider } from "@slack/oauth";
 import type { WebSocketManager } from "../websocket/manager.js";
 import type { TaskQueue } from "../util.js";
 import { t, type UserLanguage } from "../../locales/index.js";
@@ -82,7 +82,7 @@ export type CreateHttpServerDeps = {
   cloudManager: CloudManager | null;
   telegram: TelegramClient | null;
   slack: SlackClient | null;
-  slackInstallProvider: SlackInstallProvider | null;
+  slackInstallProvider: InstallProvider | null;
   wsManager: WebSocketManager | null;
   slackEventStartTs: number;
   queue: TaskQueue;

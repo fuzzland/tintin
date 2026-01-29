@@ -93,7 +93,8 @@ export async function createBotService(deps: BotServiceDeps) {
   };
 
   const getTelegramReplyMarkup = (markup?: InteractiveMarkup) => {
-    return markup?.type === "inline_keyboard" ? markup.payload : undefined;
+    if (markup?.type !== "inline_keyboard") return undefined;
+    return markup.payload as { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
   };
 
   const getSlackBlocks = (markup?: InteractiveMarkup) => {
