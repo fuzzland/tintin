@@ -3420,6 +3420,10 @@ export class BotController {
       const userId = ev.user as string | undefined;
       const text = typeof ev.text === "string" ? ev.text.trim() : "";
       if (!channelId || !userId || !text) return;
+      if (!channelId.startsWith("D") && text.includes("<@")) {
+        this.logger.debug(`[slack] skip message mention (handled by app_mention) channel=${channelId} user=${userId}`);
+        return;
+      }
       registerWorkspace(channelId);
       const access = this.slackAccessDecision(teamId, channelId, userId);
       if (!access.allowed) {
