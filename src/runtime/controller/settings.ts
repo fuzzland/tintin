@@ -90,7 +90,7 @@ export function applySettingsCommand(
 
   if (parsed.type === "env") {
     const key = normalizeEnvKey(parsed.envKey);
-    if (!key) return t("settings.empty_key", lang);
+    if (!key) return t("settings.cloud_key.empty", lang, { target: "env" });
     if (cmd.kind === "unset") {
       if (!(key in agentConfig.env)) return t("settings.env_already_unset", lang, { key, prefix });
       delete agentConfig.env[key];

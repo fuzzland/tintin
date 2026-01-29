@@ -118,7 +118,6 @@ export class BotController {
       slack: this.slack,
       sendPlatformMessage: this.sendPlatformMessage.bind(this),
       resolveUserLanguage: this.resolveUserLanguage.bind(this),
-      buildRunActionTelegramKeyboard: this.telegramHandler.buildRunActionTelegramKeyboard.bind(this.telegramHandler),
     });
   }
 

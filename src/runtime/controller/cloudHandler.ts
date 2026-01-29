@@ -21,6 +21,7 @@ import { createUiToken } from "../cloud/uiTokens.js";
 import {
   getCloudRun,
   getLatestSetupSpec,
+  listGithubInstallationsForIdentity,
   createPendingAction,
   consumePendingAction,
   getGithubInstallation,
@@ -28,6 +29,7 @@ import {
   getSharedRepo,
   listCloudRunsForPlayground,
   listCloudRunsForRepo,
+  listCloudRunsForIdentity,
   listConnections,
   listReposForIdentity,
   listSecrets,
@@ -47,11 +49,13 @@ import {
   revokeChatgptAccount,
   startChatgptOAuth,
 } from "../chatgpt/oauth.js";
+import { nowMs } from "../util.js";
 import { t, type UserLanguage } from "../../locales/index.js";
 import {
   PLAYGROUND_REPO_ID,
   humanStatus,
   isPlaygroundRepoId,
+  isPlaygroundTarget,
   parseRepoIndex,
   truncateText,
   type CloudCommand,
@@ -76,13 +80,6 @@ export interface CloudHandlerDeps {
     workspaceId?: string | null;
   }) => Promise<void>;
   resolveUserLanguage: (platform: "telegram" | "slack", userId: string) => Promise<UserLanguage>;
-  buildRunActionTelegramKeyboard: (
-    sessionId: string,
-    runId: string,
-    lang: UserLanguage,
-    viewUrl?: string | null,
-    vscodeUrl?: string | null,
-  ) => unknown[];
 }
 
 type IdentityRepo = Awaited<ReturnType<typeof listReposForIdentity>>[number];
@@ -103,6 +100,26 @@ export class CloudHandler {
       ? createUiToken(ui, { scope: "identity", identity_id: identityId })
       : createUiToken(ui, { scope: "run", run_id: runId });
     return `${base}${path}/${runId}?token=${encodeURIComponent(token)}`;
+  }
+
+  private buildRunActionTelegramKeyboard(
+    sessionId: string,
+    runId: string,
+    lang: UserLanguage,
+    viewUrl?: string | null,
+    vscodeUrl?: string | null,
+  ) {
+    const rows: Array<Array<{ text: string; callback_data?: string; url?: string }>> = [
+      [
+        { text: t("button.stop", lang), callback_data: `kill:${sessionId}` },
+        { text: t("button.status", lang), callback_data: `run_status:${runId}` },
+      ],
+    ];
+    const linkRow: Array<{ text: string; url: string }> = [];
+    if (viewUrl) linkRow.push({ text: t("button.view", lang), url: viewUrl });
+    if (vscodeUrl) linkRow.push({ text: t("button.vscode", lang), url: vscodeUrl });
+    if (linkRow.length > 0) rows.push(linkRow);
+    return { inline_keyboard: rows };
   }
 
   private buildRunActionSlackBlocks(
@@ -149,7 +166,7 @@ export class CloudHandler {
     if (opts.platform === "telegram") {
       return {
         type: "inline_keyboard",
-        payload: this.deps.buildRunActionTelegramKeyboard(opts.sessionId, opts.runId, opts.lang, opts.viewUrl, opts.vscodeUrl),
+        payload: this.buildRunActionTelegramKeyboard(opts.sessionId, opts.runId, opts.lang, opts.viewUrl, opts.vscodeUrl),
       };
     }
     return {
@@ -158,7 +175,7 @@ export class CloudHandler {
     };
   }
 
-  async sendCloudMessage(opts: {
+  private async sendCloudMessage(opts: {
     platform: "telegram" | "slack";
     chatId: string;
     userId: string;
@@ -491,627 +508,643 @@ export class CloudHandler {
             const staleConnections: typeof connections = [];
             const connectedStatuses = new Set(["active", "suspended", "disconnecting"]);
             for (const conn of connections) {
-              const installationId = conn.metadata?.installation_id;
+              const installationId = conn.installation_id ?? null;
               if (!installationId) {
                 staleConnections.push(conn);
                 continue;
               }
               const installation = await getGithubInstallation(this.deps.db, installationId);
-              if (!installation) {
-                staleConnections.push(conn);
-                continue;
-              }
-              if (!connectedStatuses.has(installation.status)) {
+              if (!installation || !connectedStatuses.has(installation.status)) {
                 staleConnections.push(conn);
                 continue;
               }
               activeConnections.push({ connection: conn, installation });
             }
-            if (staleConnections.length) {
+            if (staleConnections.length > 0) {
               await this.deps.db
-                .updateTable("connections")
-                .set({ status: "disconnected", updated_at: Date.now() })
-                .where("id", "in", staleConnections.map((conn) => conn.id))
+                .deleteFrom("connections")
+                .where(
+                  "id",
+                  "in",
+                  staleConnections.map((c) => c.id),
+                )
                 .execute();
+              this.deps.logger.info(
+                `[cloud] cleaned stale github_app connections identity=${identity.id} count=${staleConnections.length}`,
+              );
             }
-            if (activeConnections.length) {
-              const lines = [t("connect.github.already", lang)];
-              for (const { installation } of activeConnections) {
-                lines.push(t("connect.github.installation", lang, { id: installation.id, account: installation.account_login }));
+            if (activeConnections.length > 0) {
+              activeConnections.sort((a, b) => (b.connection.updated_at ?? 0) - (a.connection.updated_at ?? 0));
+              if (activeConnections.length === 1) {
+                const existing = activeConnections[0]!;
+                const installationId = existing.connection.installation_id ?? null;
+                const connectedAt = existing.connection.updated_at ? new Date(existing.connection.updated_at).toISOString() : null;
+                const lines = [t("github.already_connected.title", lang)];
+                if (existing.installation?.account_login) {
+                  const accountType = existing.installation.account_type ?? "unknown";
+                  lines.push(t("github.already_connected.account", lang, { login: existing.installation.account_login, type: accountType }));
+                } else {
+                  lines.push(t("github.already_connected.account_unknown", lang));
+                }
+                if (existing.installation?.status && existing.installation.status !== "active") {
+                  lines.push(t("github.already_connected.status", lang, { status: existing.installation.status }));
+                }
+                if (installationId) lines.push(t("github.already_connected.installation_id", lang, { id: installationId }));
+                if (connectedAt) lines.push(t("github.already_connected.connected_at", lang, { ts: connectedAt }));
+                await reply(lines.join("\n"), true);
+                return true;
               }
+              const lines = [t("github.already_connected.title", lang), t("github.already_connected.active_installations", lang)];
+              for (const item of activeConnections) {
+                const installationId = item.connection.installation_id ?? "unknown";
+                const login = item.installation?.account_login ?? "unknown";
+                const accountType = item.installation?.account_type ?? "unknown";
+                const status = item.installation?.status ?? "unknown";
+                lines.push(t("github.already_connected.installation_item", lang, { id: installationId, login, type: accountType, status }));
+              }
+              lines.push("", t("github.already_connected.disconnect_hint", lang, { cmd: formatCmd("disconnect github --installation <id>") }));
               await reply(lines.join("\n"), true);
               return true;
             }
-            if (!this.deps.config.cloud?.github_app) {
-              await replyText("connect.github.not_configured");
+            if (!cloud.github_app) {
+              await replyText("github.missing_config");
               return true;
             }
-            const { authorizeUrl, state } = await startGithubAppFlow({
+            const { authorizeUrl } = await startGithubAppFlow({
               db: this.deps.db,
-              config: this.deps.config,
-              logger: this.deps.logger,
+              cloud,
+              identityId: identity.id,
+              redirectBase: cloud.public_base_url,
               metadataJson,
             });
-            const lines = [
-              t("connect.github.signin.title", lang),
-              t("connect.github.signin.open_link", lang),
-              authorizeUrl,
-              "",
-              t("connect.github.signin.instructions", lang),
-              t("connect.github.signin.note", lang),
-            ];
-            await reply(lines.join("\n"), true);
+            await replyText("github.install_link", { url: authorizeUrl }, true);
             return true;
           }
-          if (provider === "gitlab") {
-            const connections = (await listConnections(this.deps.db, identity.id)).filter((c) => c.type === "gitlab_oauth");
-            if (connections.length) {
-              await replyText("connect.gitlab.already", undefined, true);
-              return true;
-            }
-            if (!cloud?.oauth) {
-              await replyText("connect.gitlab.not_configured");
-              return true;
-            }
-            const { authorizeUrl } = await startOAuthFlow({
-              config: this.deps.config,
-              db: this.deps.db,
-              provider: "gitlab",
-              metadataJson,
-            });
-            const lines = [
-              t("connect.gitlab.signin.title", lang),
-              t("connect.gitlab.signin.open_link", lang),
-              authorizeUrl,
-            ];
-            await reply(lines.join("\n"), true);
-            return true;
-          }
-          if (provider === "local") {
-            await replyText("connect.local.unsupported", undefined, true);
-            return true;
-          }
+          const { authorizeUrl } = await startOAuthFlow({
+            db: this.deps.db,
+            cloud,
+            provider,
+            identityId: identity.id,
+            redirectBase: cloud.public_base_url,
+            metadataJson,
+          });
+          await replyText("oauth.authorize_link", { provider, url: authorizeUrl }, true);
         } catch (e) {
-          this.deps.logger.warn(`[cloud] connect failed: ${String(e)}`);
-          await replyText("connect.failed", { error: redactText(e instanceof Error ? e.message : String(e)) });
-          return true;
+          await replyText("connect.failed", { error: String(e) });
         }
-        await replyText("connect.unsupported");
         return true;
       }
-      case "connect_callback": {
-        const cmd = opts.command as Extract<CloudCommand, { kind: "connect_callback" }>;
-        const pending = await consumePendingAction(this.deps.db, {
-          id: cmd.token,
-          platform: opts.platform,
-          workspaceId: opts.workspaceId,
-          userId: opts.userId,
+      case "disconnect": {
+        if (!opts.isDirect) {
+          await replyText("disconnect.dm_only", { cmd: formatCmd("disconnect github") });
+          return true;
+        }
+        const cmd = opts.command as Extract<CloudCommand, { kind: "disconnect" }>;
+        const provider = cmd.provider;
+        if (provider !== "github") {
+          await replyText("disconnect.not_supported", { provider });
+          return true;
+        }
+        if (!cloud.github_app) {
+          await replyText("github.missing_config");
+          return true;
+        }
+        const confirmToken = (cmd.confirmToken ?? "").trim();
+        if (confirmToken) {
+          const tokenHash = crypto.createHash("sha256").update(confirmToken, "utf8").digest("hex");
+          const pending = await consumePendingAction(this.deps.db, {
+            action: "github_disconnect",
+            identityId: identity.id,
+            tokenHash,
+          });
+          if (!pending) {
+            await replyText("disconnect.token.invalid");
+            return true;
+          }
+          let payload: { installationIds?: string[] } = {};
+          try {
+            payload = JSON.parse(pending.payload_json ?? "{}") as { installationIds?: string[] };
+          } catch {
+            await replyText("disconnect.token.payload_invalid");
+            return true;
+          }
+          const installationIds = Array.isArray(payload.installationIds)
+            ? payload.installationIds.filter((id) => typeof id === "string" && id.trim().length > 0)
+            : [];
+          if (installationIds.length === 0) {
+            await replyText("disconnect.token.missing_targets");
+            return true;
+          }
+          const results: string[] = [];
+          for (const installationId of installationIds) {
+            try {
+              const impact = await executeGithubDisconnect({
+                db: this.deps.db,
+                cloud,
+                logger: this.deps.logger,
+                installationId,
+                identityId: identity.id,
+                cloudManager: this.deps.cloudManager,
+              });
+              results.push(
+                t("disconnect.result_item", lang, {
+                  installationId,
+                  repos: impact.repos,
+                  runs: impact.runs,
+                  sessions: impact.sessions,
+                  screenshots: impact.screenshots,
+                }),
+              );
+            } catch (e) {
+              await replyText("disconnect.failed_for_installation", { installationId, error: String(e) });
+              return true;
+            }
+          }
+          const lines = [t("disconnect.success_title", lang), ...results];
+          await reply(lines.join("\n"), true);
+          return true;
+        }
+
+        const installations = await listGithubInstallationsForIdentity(this.deps.db, identity.id);
+        if (installations.length === 0) {
+          await replyText("disconnect.none_installed");
+          return true;
+        }
+        let targetIds: string[] = [];
+        if (cmd.all) {
+          targetIds = installations.map((row) => row.installation_id);
+        } else if (cmd.installationId) {
+          const match = installations.find((row) => row.installation_id === cmd.installationId);
+          if (!match) {
+            await replyText("disconnect.installation_not_found", { id: cmd.installationId });
+            return true;
+          }
+          targetIds = [match.installation_id];
+        } else if (installations.length === 1) {
+          targetIds = [installations[0]!.installation_id];
+        } else {
+          const lines = [t("disconnect.multiple_found", lang), ""];
+          for (const row of installations) {
+            const login = row.account_login ?? "unknown";
+            lines.push(t("disconnect.multiple_option", lang, { cmd: formatCmd(`disconnect github --installation ${row.installation_id}`), login }));
+          }
+          lines.push(`- ${formatCmd("disconnect github --all")}`);
+          await reply(lines.join("\n"), true);
+          return true;
+        }
+
+        const impacts = [];
+        for (const installationId of targetIds) {
+          impacts.push(await computeGithubDisconnectImpact(this.deps.db, installationId));
+        }
+        const token = crypto.randomBytes(6).toString("hex");
+        const tokenHash = crypto.createHash("sha256").update(token, "utf8").digest("hex");
+        await createPendingAction(this.deps.db, {
+          action: "github_disconnect",
+          identityId: identity.id,
+          tokenHash,
+          payloadJson: JSON.stringify({ installationIds: targetIds }),
+          ttlMs: 10 * 60 * 1000,
         });
-        if (!pending) {
-          await replyText("connect.callback_expired");
-          return true;
-        }
-        const meta = pending.metadata ?? {};
-        const installToken = meta.install_token;
-        if (pending.action !== "github_app" || !installToken) {
-          await replyText("connect.callback_invalid");
-          return true;
-        }
-        try {
-          await ensureGithubAppToken({
-            db: this.deps.db,
-            logger: this.deps.logger,
-            cloudManager: this.deps.cloudManager,
-          });
-          const connection = await startGithubAppFlow({
-            db: this.deps.db,
-            config: this.deps.config,
-            logger: this.deps.logger,
-            metadataJson: pending.metadata_json,
-            installToken,
-            installationId: meta.installation_id,
-          });
-          const repos = await fetchGithubInstallationRepos({
-            db: this.deps.db,
-            logger: this.deps.logger,
-            installationId: connection.metadata?.installation_id ?? "",
-          });
-          await replaceGithubInstallationRepos(this.deps.db, {
-            installationId: connection.metadata?.installation_id ?? "",
-            repos,
-          });
-          await replyText("connect.github.success", undefined, true);
-        } catch (e) {
-          this.deps.logger.warn(`[cloud] github app install callback failed ${String(e)}`);
-          await replyText("connect.github.failed", { error: redactText(e instanceof Error ? e.message : String(e)) });
-        }
-        return true;
-      }
-      case "connect_status": {
-        const conns = await listConnections(this.deps.db, identity.id);
-        if (!conns.length) {
-          await replyText("connect.status.none", undefined, true);
-          return true;
-        }
-        const lines = [t("connect.status.title", lang)];
-        for (const conn of conns) {
-          lines.push(t("connect.status.line", lang, { provider: conn.type, status: conn.status }));
-        }
+        const lines = [
+          t("disconnect.confirm_title", lang),
+          t("disconnect.uninstall_notice", lang),
+          "",
+          t("disconnect.targets", lang),
+          ...impacts.map((impact) => {
+            return t("disconnect.result_item", lang, {
+              installationId: impact.installationId,
+              repos: impact.repos,
+              runs: impact.runs,
+              sessions: impact.sessions,
+              screenshots: impact.screenshots,
+            });
+          }),
+          "",
+          t("disconnect.confirm_with", lang, { cmd: formatCmd(`disconnect github confirm ${token}`) }),
+        ];
         await reply(lines.join("\n"), true);
         return true;
       }
-      case "connect_refresh": {
+      case "connections": {
         const conns = await listConnections(this.deps.db, identity.id);
-        if (!conns.length) {
-          await replyText("connect.refresh.none", undefined, true);
+        if (conns.length === 0) {
+          await replyText("connections.none");
           return true;
         }
-        let didRefresh = false;
+        const lines = conns.map((c) => t("connections.item", lang, { type: c.type }));
+        await reply(lines.join("\n"));
+        return true;
+      }
+      case "repos": {
+        const cmd = opts.command as Extract<CloudCommand, { kind: "repos" }>;
+        const conns = await listConnections(this.deps.db, identity.id);
         for (const conn of conns) {
           try {
             if (conn.type === "github_app") {
-              const installationId = conn.metadata?.installation_id;
-              if (!installationId) {
+              if (!cloud.github_app) {
+                this.deps.logger.warn("[cloud] github_app not configured; cannot refresh repos.");
+              } else if (!conn.installation_id) {
                 this.deps.logger.warn("[cloud] github_app connection missing installation_id; cannot refresh repos.");
-                continue;
+              } else {
+                const token = await ensureGithubAppToken({
+                  db: this.deps.db,
+                  config: cloud.github_app,
+                  secretKey: cloud.secrets_key,
+                  connection: conn,
+                  forceRefresh: true,
+                });
+                const repos = await fetchGithubInstallationRepos({
+                  token: token.token,
+                  apiBaseUrl: cloud.github_app.api_base_url ?? "https://api.github.com",
+                });
+                await replaceGithubInstallationRepos(this.deps.db, {
+                  installationId: conn.installation_id,
+                  repos: repos.map((r) => ({
+                    providerRepoId: r.providerRepoId,
+                    name: r.name,
+                    url: r.url,
+                    defaultBranch: r.defaultBranch,
+                    archived: r.archived,
+                    private: r.private,
+                    permissionsJson: r.permissionsJson ?? null,
+                  })),
+                });
+                for (const r of repos) {
+                  await this.deps.db
+                    .selectFrom("repos")
+                    .select(["id"])
+                    .where("connection_id", "=", conn.id)
+                    .where("provider_repo_id", "=", r.providerRepoId)
+                    .executeTakeFirst()
+                    .then(async (existing) => {
+                      if (existing) return;
+                      await this.deps.db
+                        .insertInto("repos")
+                        .values({
+                          id: crypto.randomUUID(),
+                          connection_id: conn.id,
+                          provider: "github",
+                          provider_repo_id: r.providerRepoId,
+                          name: r.name,
+                          url: r.url,
+                          default_branch: r.defaultBranch,
+                          fingerprint: null,
+                          created_at: nowMs(),
+                          updated_at: nowMs(),
+                        })
+                        .execute();
+                    });
+                }
               }
-              await ensureGithubAppToken({
-                db: this.deps.db,
-                logger: this.deps.logger,
-                cloudManager: this.deps.cloudManager,
-              });
-              const repos = await fetchGithubInstallationRepos({
-                db: this.deps.db,
-                logger: this.deps.logger,
-                installationId,
-              });
-              await replaceGithubInstallationRepos(this.deps.db, {
-                installationId,
-                repos,
-              });
-              didRefresh = true;
-            } else if (conn.type === "github") {
-              if (!conn.metadata?.access_token) {
-                await this.deps.db
-                  .updateTable("connections")
-                  .set({ status: "expired", updated_at: Date.now() })
-                  .where("id", "=", conn.id)
-                  .execute();
-                continue;
-              }
+            } else if (conn.type === "github_oauth") {
               const repos = await fetchGithubRepos({
-                accessToken: conn.metadata.access_token,
+                token: conn.access_token,
+                apiBaseUrl: cloud.oauth?.github?.api_base_url ?? "https://api.github.com",
               });
-              await this.deps.db
-                .updateTable("repos")
-                .set({ updated_at: Date.now() })
-                .where("connection_id", "=", conn.id)
-                .execute();
-              for (const repo of repos) {
+              for (const r of repos) {
                 await this.deps.db
-                  .insertInto("repos")
-                  .values({
-                    id: `${conn.id}:${repo.id}`,
-                    connection_id: conn.id,
-                    identity_id: conn.identity_id,
-                    name: repo.name,
-                    provider: "github",
-                    repo_owner: repo.owner,
-                    repo_name: repo.name,
-                    metadata: repo,
-                    created_at: Date.now(),
-                    updated_at: Date.now(),
-                  })
-                  .onConflict((oc) =>
-                    oc.column("id").doUpdateSet({
-                      name: repo.name,
-                      repo_owner: repo.owner,
-                      repo_name: repo.name,
-                      metadata: repo,
-                      updated_at: Date.now(),
-                    }),
-                  )
-                  .execute();
+                  .selectFrom("repos")
+                  .select(["id"])
+                  .where("connection_id", "=", conn.id)
+                  .where("provider_repo_id", "=", r.providerRepoId)
+                  .executeTakeFirst()
+                  .then(async (existing) => {
+                    if (existing) return;
+                    await this.deps.db
+                      .insertInto("repos")
+                      .values({
+                        id: crypto.randomUUID(),
+                        connection_id: conn.id,
+                        provider: "github",
+                        provider_repo_id: r.providerRepoId,
+                        name: r.name,
+                        url: r.url,
+                        default_branch: r.defaultBranch,
+                        fingerprint: null,
+                        created_at: nowMs(),
+                        updated_at: nowMs(),
+                      })
+                      .execute();
+                  });
               }
-              didRefresh = true;
             } else if (conn.type === "gitlab_oauth") {
-              if (!conn.metadata?.access_token) {
-                await this.deps.db
-                  .updateTable("connections")
-                  .set({ status: "expired", updated_at: Date.now() })
-                  .where("id", "=", conn.id)
-                  .execute();
-                continue;
-              }
               const repos = await fetchGitlabRepos({
-                accessToken: conn.metadata.access_token,
+                token: conn.access_token,
+                apiBaseUrl: cloud.oauth?.gitlab?.api_base_url ?? "https://gitlab.com/api/v4",
               });
-              await this.deps.db
-                .updateTable("repos")
-                .set({ updated_at: Date.now() })
-                .where("connection_id", "=", conn.id)
-                .execute();
-              for (const repo of repos) {
+              for (const r of repos) {
                 await this.deps.db
-                  .insertInto("repos")
-                  .values({
-                    id: `${conn.id}:${repo.id}`,
-                    connection_id: conn.id,
-                    identity_id: conn.identity_id,
-                    name: repo.name,
-                    provider: "gitlab",
-                    repo_owner: repo.owner,
-                    repo_name: repo.name,
-                    metadata: repo,
-                    created_at: Date.now(),
-                    updated_at: Date.now(),
-                  })
-                  .onConflict((oc) =>
-                    oc.column("id").doUpdateSet({
-                      name: repo.name,
-                      repo_owner: repo.owner,
-                      repo_name: repo.name,
-                      metadata: repo,
-                      updated_at: Date.now(),
-                    }),
-                  )
-                  .execute();
+                  .selectFrom("repos")
+                  .select(["id"])
+                  .where("connection_id", "=", conn.id)
+                  .where("provider_repo_id", "=", r.providerRepoId)
+                  .executeTakeFirst()
+                  .then(async (existing) => {
+                    if (existing) return;
+                    await this.deps.db
+                      .insertInto("repos")
+                      .values({
+                        id: crypto.randomUUID(),
+                        connection_id: conn.id,
+                        provider: "gitlab",
+                        provider_repo_id: r.providerRepoId,
+                        name: r.name,
+                        url: r.url,
+                        default_branch: r.defaultBranch,
+                        fingerprint: null,
+                        created_at: nowMs(),
+                        updated_at: nowMs(),
+                      })
+                      .execute();
+                  });
               }
-              didRefresh = true;
             }
           } catch (e) {
             this.deps.logger.warn(`[cloud] repo refresh failed ${conn.type}: ${String(e)}`);
           }
         }
-        await replyText(didRefresh ? "connect.refresh.ok" : "connect.refresh.no_changes", undefined, true);
-        return true;
-      }
-      case "connect_disconnect": {
-        const cmd = opts.command as Extract<CloudCommand, { kind: "connect_disconnect" }>;
-        const installation = cmd.installation;
-        if (!installation) {
-          await replyText("connect.disconnect.missing", undefined, true);
-          return true;
-        }
-        const impacts = [] as Awaited<ReturnType<typeof computeGithubDisconnectImpact>>[];
-        for (const installationId of installation) {
-          impacts.push(await computeGithubDisconnectImpact(this.deps.db, installationId));
-        }
-        const token = crypto.randomUUID();
-        await createPendingAction(this.deps.db, {
-          id: token,
-          platform: opts.platform,
-          workspaceId: opts.workspaceId,
-          userId: opts.userId,
-          action: "github_disconnect",
-          metadata: {
-            installations: installation,
-          },
-          metadataJson: JSON.stringify({
-            platform: opts.platform,
-            chat_id: opts.chatId,
-            user_id: opts.userId,
-            space_id: opts.spaceId,
-            workspace_id: opts.workspaceId,
-          }),
-        });
-        const lines = [t("connect.disconnect.title", lang)];
-        for (const impact of impacts) {
-          lines.push(t("connect.disconnect.installation", lang, { id: impact.installationId, repos: impact.repoCount }));
-        }
-        lines.push(t("connect.disconnect.confirm", lang, { cmd: formatCmd(`disconnect github confirm ${token}`) }));
-        await reply(lines.join("\n"), true);
-        return true;
-      }
-      case "connect_disconnect_confirm": {
-        const cmd = opts.command as Extract<CloudCommand, { kind: "connect_disconnect_confirm" }>;
-        const pending = await consumePendingAction(this.deps.db, {
-          id: cmd.token,
-          platform: opts.platform,
-          workspaceId: opts.workspaceId,
-          userId: opts.userId,
-        });
-        if (!pending || pending.action !== "github_disconnect") {
-          await replyText("connect.disconnect.confirm_missing", undefined, true);
-          return true;
-        }
-        const installations = pending.metadata?.installations ?? [];
-        if (!Array.isArray(installations) || !installations.length) {
-          await replyText("connect.disconnect.confirm_missing", undefined, true);
-          return true;
-        }
-        const results = [] as string[];
-        for (const installationId of installations) {
-          try {
-            await executeGithubDisconnect(this.deps.db, installationId);
-            results.push(t("connect.disconnect.confirmed", lang, { id: installationId }));
-          } catch (e) {
-            results.push(t("connect.disconnect.failed", lang, { id: installationId, error: redactText(String(e)) }));
-          }
-        }
-        await reply(results.join("\n"), true);
-        return true;
-      }
-      case "repos": {
-        const conns = await listConnections(this.deps.db, identity.id);
-        if (!conns.length) {
-          await replyText("repos.none", undefined, true);
-          return true;
-        }
         let repos = await listReposForIdentity(this.deps.db, identity.id);
-        if (opts.command.provider) {
-          repos = repos.filter((repo) => repo.provider === opts.command.provider);
+        if (cmd.provider) {
+          repos = repos.filter((r) => r.provider === cmd.provider);
         }
-        if (opts.command.search) {
-          const query = opts.command.search.toLowerCase();
-          repos = repos.filter((repo) => repo.name.toLowerCase().includes(query) || repo.id.toLowerCase().includes(query));
+        if (cmd.search) {
+          const search = cmd.search.toLowerCase();
+          repos = repos.filter((r) => r.name.toLowerCase().includes(search) || r.url.toLowerCase().includes(search));
         }
-        if (!repos.length) {
-          await replyText("repos.none", undefined, true);
+        if (repos.length === 0) {
+          await replyText("repo.none", { cmd: formatCmd("connect") });
           return true;
         }
         this.lastRepoListByIdentity.set(identity.id, repos.map((r) => r.id));
-        const lines = [t("repos.title", lang)];
-        repos.forEach((repo, index) => {
-          lines.push(`${index + 1}. ${repo.name}`);
-        });
-        const cmdKey = opts.platform === "telegram" ? "repo select" : "repo select";
-        lines.push(t("repos.select", lang, { cmd: formatCmd(cmdKey), cmd2: formatCmd("repo select <name>") }));
-        await reply(lines.join("\n"), true);
+        const lines = [t("repo.list.title", lang)];
+        for (const repo of repos) {
+          lines.push(`- ${repo.name} (${repo.id})`);
+        }
+        lines.push(t("repo.list.select", lang, { cmd: formatCmd("repo select <index|repo-id>") }));
+        await reply(lines.join("\n"));
         return true;
       }
       case "repo_select": {
-        const repos = await listReposForIdentity(this.deps.db, identity.id);
-        if (!repos.length) {
-          await replyText("repos.none", undefined, true);
-          return true;
-        }
-        if (opts.command.target === "playground") {
+        const cmd = opts.command as Extract<CloudCommand, { kind: "repo_select" }>;
+        if (isPlaygroundTarget(cmd.target)) {
           await setIdentityActiveRepo(this.deps.db, identity.id, PLAYGROUND_REPO_ID);
-          await replyText("repo.selected_playground", undefined, true);
+          await replyText("repo.selected_playground");
           return true;
         }
-        const target = opts.command.target;
-        const repo = this.resolveRepoTarget(identity.id, repos, target);
+        const repos = await listReposForIdentity(this.deps.db, identity.id);
+        if (repos.length === 0) {
+          await replyText("repo.none", { cmd: formatCmd("connect") });
+          return true;
+        }
+        const repo = this.resolveRepoTarget(identity.id, repos, cmd.target);
         if (!repo) {
-          await replyText("repo.not_found", { target: truncateText(target, 40) });
+          await replyText("repo.not_found", { cmd: formatCmd("repos") });
           return true;
         }
         await setIdentityActiveRepo(this.deps.db, identity.id, repo.id);
-        await replyText("repo.selected", { name: repo.name }, true);
+        await replyText("repo.selected", { name: repo.name });
+        return true;
+      }
+      case "repo_current": {
+        if (isPlaygroundRepoId(identity.active_repo_id)) {
+          await replyText("repo.current_playground");
+          return true;
+        }
+        if (!identity.active_repo_id) {
+          await replyText("repo.none_active", { cmd: formatCmd("repo select") });
+          return true;
+        }
+        const repo = await this.deps.db
+          .selectFrom("repos")
+          .selectAll()
+          .where("id", "=", identity.active_repo_id)
+          .executeTakeFirst();
+        if (!repo) {
+          await replyText("repo.none_active", { cmd: formatCmd("repo select") });
+          return true;
+        }
+        await replyText("repo.current", { name: repo.name });
         return true;
       }
       case "repo_share": {
-        if (!opts.command.target) {
-          await replyText("repo.share.missing");
+        if (!opts.isDirect) {
+          await replyText("repo.share.dm_only");
           return true;
         }
-        const repos = await listReposForIdentity(this.deps.db, identity.id);
-        if (!repos.length) {
-          await replyText("repos.none", undefined, true);
+        const cmd = opts.command as Extract<CloudCommand, { kind: "repo_share" }>;
+        if (!identity.active_repo_id || isPlaygroundRepoId(identity.active_repo_id)) {
+          await replyText("repo.share.no_active_repo", { cmd: formatCmd("repo select") });
           return true;
         }
-        const repo = this.resolveRepoTarget(identity.id, repos, opts.command.target);
-        if (!repo) {
-          await replyText("repo.not_found", { target: truncateText(opts.command.target, 40) });
-          return true;
-        }
-        const result = await shareRepo(this.deps.db, {
+        const shared = await shareRepo(this.deps.db, {
           platform: opts.platform,
           workspaceId: opts.workspaceId,
           chatId: opts.chatId,
-          sharedByUserId: opts.userId,
-          repoId: repo.id,
+          repoId: identity.active_repo_id,
+          sharedByIdentityId: identity.id,
         });
-        await replyText("repo.share.ok", { name: repo.name, token: result.token });
+        await replyText(shared.alreadyShared ? "repo.share.already" : "repo.share.success");
         return true;
       }
       case "repo_unshare": {
-        if (!opts.command.target) {
-          await replyText("repo.unshare.missing");
+        if (!opts.isDirect) {
+          await replyText("repo.unshare.dm_only");
           return true;
         }
-        const repos = await listReposForIdentity(this.deps.db, identity.id);
-        if (!repos.length) {
-          await replyText("repos.none", undefined, true);
+        const cmd = opts.command as Extract<CloudCommand, { kind: "repo_unshare" }>;
+        if (!identity.active_repo_id || isPlaygroundRepoId(identity.active_repo_id)) {
+          await replyText("repo.unshare.no_active_repo", { cmd: formatCmd("repo select") });
           return true;
         }
-        const repo = this.resolveRepoTarget(identity.id, repos, opts.command.target);
-        if (!repo) {
-          await replyText("repo.not_found", { target: truncateText(opts.command.target, 40) });
-          return true;
-        }
-        const shared = await getSharedRepo(this.deps.db, {
+        const ok = await unshareRepo(this.deps.db, {
           platform: opts.platform,
           workspaceId: opts.workspaceId,
           chatId: opts.chatId,
-          repoId: repo.id,
+          repoId: identity.active_repo_id,
         });
-        if (!shared) {
-          await replyText("repo.unshare.none");
-          return true;
-        }
-        await unshareRepo(this.deps.db, {
-          id: shared.id,
-          platform: opts.platform,
-          workspaceId: opts.workspaceId,
-          chatId: opts.chatId,
-        });
-        await replyText("repo.unshare.ok", { name: repo.name });
+        await replyText(ok ? "repo.unshare.success" : "repo.unshare.not_shared");
         return true;
       }
-      case "sessions": {
-        if (!identity.active_repo_id) {
-          await replyText("repo.select_first");
+      case "actions_list": {
+        if (!opts.isDirect) {
+          await replyText("command.dm_only", { cmd: formatCmd("actions") });
           return true;
         }
-        if (isPlaygroundRepoId(identity.active_repo_id)) {
-          const runs = await listCloudRunsForPlayground(this.deps.db, identity.id, 10);
-          if (!runs.length) {
-            await replyText("sessions.empty");
-            return true;
-          }
-          const lines = [t("sessions.title", lang)];
-          for (const run of runs) {
-            lines.push(`- ${run.id} (${humanStatus(run.status)})`);
-            const link = this.buildCloudUiLink(run.id, identity.id, opts.isDirect);
-            if (link) lines.push(`  ${link}`);
-          }
-          await reply(lines.join("\n"), true);
+        const runs = await listCloudRunsForIdentity(this.deps.db, { identityId: identity.id, limit: 10 });
+        if (runs.length === 0) {
+          await replyText("run.none_recent");
           return true;
         }
-        const runs = await listCloudRunsForRepo(this.deps.db, identity.active_repo_id, 10);
-        if (!runs.length) {
-          await replyText("sessions.empty");
-          return true;
-        }
-        const lines = [t("sessions.title", lang)];
+        const lines = [t("run.list.title", lang)];
         for (const run of runs) {
-          lines.push(`- ${run.id} (${humanStatus(run.status)})`);
+          lines.push(`- ${run.id} (${humanStatus(run.status, lang)})`);
           const link = this.buildCloudUiLink(run.id, identity.id, opts.isDirect);
           if (link) lines.push(`  ${link}`);
         }
-        await reply(lines.join("\n"), true);
+        await reply(lines.join("\n"));
         return true;
       }
-      case "status": {
-        const cmd = opts.command as Extract<CloudCommand, { kind: "status" }>;
+      case "action_status": {
+        if (!opts.isDirect) {
+          await replyText("command.dm_only", { cmd: formatCmd("status <runId>") });
+          return true;
+        }
+        const cmd = opts.command as Extract<CloudCommand, { kind: "action_status" }>;
         const run = await getCloudRun(this.deps.db, cmd.runId);
         if (!run || run.identity_id !== identity.id) {
           await replyText("run.not_found");
           return true;
         }
         const link = this.buildCloudUiLink(run.id, identity.id, opts.isDirect);
-        const text = link
-          ? t("run.status_with_link", lang, { id: run.id, status: run.status, url: link })
-          : t("run.status_line", lang, { id: run.id, status: run.status });
-        await reply(text, true);
+        await reply(
+          link
+            ? t("run.status_with_link", lang, { id: run.id, status: run.status, url: link })
+            : t("run.status_line", lang, { id: run.id, status: run.status }),
+        );
         return true;
       }
-      case "pull": {
-        const cmd = opts.command as Extract<CloudCommand, { kind: "pull" }>;
+      case "action_pull": {
+        if (!opts.isDirect) {
+          await replyText("command.dm_only", { cmd: formatCmd("pull <runId>") });
+          return true;
+        }
+        const cmd = opts.command as Extract<CloudCommand, { kind: "action_pull" }>;
         const run = await getCloudRun(this.deps.db, cmd.runId);
         if (!run || run.identity_id !== identity.id) {
           await replyText("run.not_found");
           return true;
         }
+        const summary = run.diff_summary ?? t("run.diff_none", lang);
         const link = this.buildCloudUiLink(run.id, identity.id, opts.isDirect);
-        const lines = [t("run.pull.title", lang, { id: run.id })];
-        if (link) lines.push(t("run.pull.link", lang, { url: link }));
-        await reply(lines.join("\n"), true);
+        const tail = link ? `\nView: ${link}` : "";
+        await reply(
+          t("run.diff_summary", lang, {
+            id: run.id,
+            summary,
+            cmd: `tinc pull --run ${run.id}`,
+            view: tail,
+          }),
+        );
         return true;
       }
       case "snapshot_save": {
         const cmd = opts.command as Extract<CloudCommand, { kind: "snapshot_save" }>;
-        if (!identity.active_repo_id) {
-          await replyText("repo.select_first");
-          return true;
-        }
-        if (!this.deps.cloudManager) {
-          await replyText("snapshot.unavailable");
-          return true;
-        }
         try {
           const { snapshotId, runId } = await this.deps.cloudManager.saveSnapshot({
             identityId: identity.id,
-            repoId: identity.active_repo_id,
             note: cmd.note,
+            sourceStatus: "manual",
           });
-          const link = this.buildCloudUiLink(runId, identity.id, opts.isDirect);
-          const lines = [t("snapshot.saved", lang, { id: snapshotId })];
-          if (link) lines.push(t("snapshot.saved_link", lang, { url: link }));
-          await reply(lines.join("\n"), true);
+          await replyText("snapshot.saved", { snapshotId, runId });
         } catch (e) {
-          await replyText("snapshot.save_failed", { error: redactText(String(e)) });
+          await replyText("snapshot.save_failed", { error: String(e) });
         }
         return true;
       }
       case "snapshot_list": {
         const cmd = opts.command as Extract<CloudCommand, { kind: "snapshot_list" }>;
-        if (!this.deps.cloudManager) {
-          await replyText("snapshot.unavailable");
-          return true;
-        }
         const snapshots = await this.deps.cloudManager.listSnapshots(identity.id, cmd.limit);
-        if (!snapshots.length) {
-          await replyText("snapshot.none", undefined, true);
+        if (snapshots.length === 0) {
+          await replyText("snapshot.none");
           return true;
         }
         this.lastSnapshotListByIdentity.set(
           identity.id,
-          snapshots.map((snapshot) => snapshot.id),
+          snapshots.map((s) => s.id),
         );
-        const lines = [t("snapshot.list", lang)];
-        snapshots.forEach((snapshot, idx) => {
-          const ts = new Date(snapshot.createdAt).toISOString();
-          const note = snapshot.note ? ` (${snapshot.note})` : "";
-          lines.push(`${idx + 1}. ${snapshot.id}${note} - ${ts}`);
-        });
-        await reply(lines.join("\n"), true);
+        const formatSnapshot = (s: (typeof snapshots)[number], idx: number) => {
+          const noteText = (s.note ?? "").split("\n")[0] ?? "";
+          const noteClean = noteText.toLowerCase().startsWith("status:") ? "" : noteText.trim();
+          const noteShort = noteClean.length > 0 ? truncateText(noteClean, 200) : t("snapshot.none_label", lang);
+          const title = s.title?.trim().length ? truncateText(s.title.trim(), 120) : t("snapshot.none_label", lang);
+          const status = humanStatus(s.source_status, lang);
+          return [
+            `${idx + 1}.`,
+            `${t("snapshot.field_id", lang)} ${s.id}`,
+            `${t("snapshot.field_title", lang)} ${title}`,
+            `${t("snapshot.field_status", lang)} ${status}`,
+            `${t("snapshot.field_note", lang)} ${noteShort}`,
+            "---",
+          ].join("\n");
+        };
+        const lines = snapshots.map(formatSnapshot);
+        lines.push(t("snapshot.restore_hint", lang, { cmd: formatCmd("snapshot restore <index|snapshotId>") }));
+        await reply(lines.join("\n"));
         return true;
       }
       case "snapshot_search": {
         const cmd = opts.command as Extract<CloudCommand, { kind: "snapshot_search" }>;
-        if (!this.deps.cloudManager) {
-          await replyText("snapshot.unavailable");
+        if (!cmd.query.trim()) {
+          await replyText("snapshot.search_query_required");
           return true;
         }
         const snapshots = await this.deps.cloudManager.searchSnapshots(identity.id, cmd.query, 10);
-        if (!snapshots.length) {
-          await replyText("snapshot.none", undefined, true);
+        if (snapshots.length === 0) {
+          await replyText("snapshot.search_none");
           return true;
         }
         this.lastSnapshotListByIdentity.set(
           identity.id,
-          snapshots.map((snapshot) => snapshot.id),
+          snapshots.map((s) => s.id),
         );
-        const lines = [t("snapshot.list", lang)];
-        snapshots.forEach((snapshot, idx) => {
-          const ts = new Date(snapshot.createdAt).toISOString();
-          const note = snapshot.note ? ` (${snapshot.note})` : "";
-          lines.push(`${idx + 1}. ${snapshot.id}${note} - ${ts}`);
-        });
-        await reply(lines.join("\n"), true);
+        const formatSnapshot = (s: (typeof snapshots)[number], idx: number) => {
+          const noteText = (s.note ?? "").split("\n")[0] ?? "";
+          const noteClean = noteText.toLowerCase().startsWith("status:") ? "" : noteText.trim();
+          const noteShort = noteClean.length > 0 ? truncateText(noteClean, 200) : t("snapshot.none_label", lang);
+          const title = s.title?.trim().length ? truncateText(s.title.trim(), 120) : t("snapshot.none_label", lang);
+          const status = humanStatus(s.source_status, lang);
+          return [
+            `${idx + 1}.`,
+            `${t("snapshot.field_id", lang)} ${s.id}`,
+            `${t("snapshot.field_title", lang)} ${title}`,
+            `${t("snapshot.field_status", lang)} ${status}`,
+            `${t("snapshot.field_note", lang)} ${noteShort}`,
+            "---",
+          ].join("\n");
+        };
+        const lines = snapshots.map(formatSnapshot);
+        lines.push(t("snapshot.restore_hint", lang, { cmd: formatCmd("snapshot restore <index|snapshotId>") }));
+        await reply(lines.join("\n"));
         return true;
       }
       case "snapshot_restore": {
         const cmd = opts.command as Extract<CloudCommand, { kind: "snapshot_restore" }>;
-        if (!this.deps.cloudManager) {
-          await replyText("snapshot.unavailable");
-          return true;
-        }
-        let snapshotId = cmd.snapshotId;
-        if (!snapshotId && cmd.snapshotIndex) {
+        let snapshotId = cmd.target.trim();
+        const idx = Number(snapshotId);
+        if (Number.isInteger(idx)) {
           const last = this.lastSnapshotListByIdentity.get(identity.id);
-          if (!last || cmd.snapshotIndex < 1 || cmd.snapshotIndex > last.length) {
-            await replyText("snapshot.index_invalid", { index: cmd.snapshotIndex });
+          if (!last || idx < 1 || idx > last.length) {
+            await replyText("snapshot.invalid_index");
             return true;
           }
-          snapshotId = last[cmd.snapshotIndex - 1];
+          snapshotId = last[idx - 1]!;
         }
-        if (!snapshotId) {
-          await replyText("snapshot.restore_missing");
-          return true;
-        }
-        const agent = cmd.agent ?? this.deps.config.cloud?.default_agent ?? "codex";
+        const agent = cloud.default_agent === "claude_code" ? "claude_code" : "codex";
         if (agent === "claude_code" && !this.deps.config.claude_code) {
-          await replyText("session.agent_disabled", { agent: "claude_code" });
+          await replyText("agent.claude_code.not_configured");
           return true;
         }
         try {
           const result = await this.deps.cloudManager.restoreSnapshot({
             identityId: identity.id,
             snapshotId,
+            platform: opts.platform,
+            workspaceId: opts.workspaceId,
+            chatId: opts.chatId,
+            spaceId: opts.spaceId,
+            userId: opts.userId,
             agent,
           });
           const link = this.buildCloudUiLink(result.runId, identity.id, opts.isDirect);
           const vscodeUrl = await this.deps.cloudManager.getVscodeUrl(result.sessionId);
+          const text = t("snapshot.restored", lang, { snapshotId, runId: result.runId });
           await this.sendCloudRunStartedMessage({
             platform: opts.platform,
             chatId: opts.chatId,
             userId: opts.userId,
             workspaceId: opts.workspaceId,
-            text: t("snapshot.restored", lang, { id: snapshotId, runId: result.runId }),
+            text,
             sessionId: result.sessionId,
             runId: result.runId,
             viewUrl: link,
@@ -1121,191 +1154,289 @@ export class CloudHandler {
             slackThreadTs: opts.slackThreadTs,
           });
         } catch (e) {
-          await replyText("snapshot.restore_failed", { error: redactText(String(e)) });
+          await replyText("snapshot.restore_failed", { error: String(e) });
         }
         return true;
       }
       case "snapshot_clear": {
-        if (!this.deps.cloudManager) {
-          await replyText("snapshot.unavailable");
-          return true;
+        try {
+          const count = await this.deps.cloudManager.clearSnapshots(identity.id);
+          await replyText("snapshot.clear_success", { count });
+        } catch (e) {
+          await replyText("snapshot.clear_failed", { error: String(e) });
         }
-        const count = await this.deps.cloudManager.clearSnapshots(identity.id);
-        await replyText("snapshot.cleared", { count }, true);
         return true;
       }
-      case "run": {
-        if (!identity.active_repo_id) {
-          await replyText("repo.select_first");
-          return true;
+      case "action_run": {
+        const cmd = opts.command as Extract<CloudCommand, { kind: "action_run" }>;
+        let repoIds = cmd.repoIds;
+        let playground = false;
+        if (repoIds.length === 0) {
+          if (isPlaygroundRepoId(identity.active_repo_id)) {
+            playground = true;
+          } else if (identity.active_repo_id) {
+            repoIds = [identity.active_repo_id];
+          } else {
+            const conns = await listConnections(this.deps.db, identity.id);
+            const hasGithub = conns.some((conn) => conn.type === "github_app" || conn.type === "github_oauth");
+            if (!hasGithub) {
+              playground = true;
+            } else {
+              await replyText("run.no_active_repo_or_repos", {
+                select: formatCmd("repo select <number>"),
+                playground: formatCmd("repo select playground"),
+              });
+              return true;
+            }
+          }
         }
-        const agent = opts.command.agent ?? this.deps.config.cloud?.default_agent ?? "codex";
+        if (!playground) {
+          const repos = await listReposForIdentity(this.deps.db, identity.id);
+          const repoIdSet = new Set(repos.map((r) => r.id));
+          for (const id of repoIds) {
+            if (!repoIdSet.has(id)) {
+              await replyText("repo.not_found_or_accessible", { id });
+              return true;
+            }
+          }
+          if (!opts.isDirect) {
+            const shared = await listSharedRepos(this.deps.db, { platform: opts.platform, workspaceId: opts.workspaceId, chatId: opts.chatId });
+            const sharedIds = new Set(shared.map((s) => s.repo_id));
+            for (const id of repoIds) {
+              if (!sharedIds.has(id)) {
+                await replyText("repo.not_shared_in_chat", { id });
+                return true;
+              }
+            }
+          }
+        }
+        const agent = cloud.default_agent === "claude_code" ? "claude_code" : "codex";
         if (agent === "claude_code" && !this.deps.config.claude_code) {
-          await replyText("session.agent_disabled", { agent: "claude_code" });
+          await replyText("agent.claude_code.not_configured");
           return true;
         }
-        const result = await this.deps.cloudManager.startRun({
-          identityId: identity.id,
-          repoId: identity.active_repo_id,
-          message: opts.command.prompt,
-          sharedRepoToken: opts.command.sharedRepo,
-          agent,
-        });
-        const link = this.buildCloudUiLink(result.runId, identity.id, opts.isDirect);
-        const vscodeUrl = await this.deps.cloudManager.getVscodeUrl(result.sessionId);
-        await this.sendCloudRunStartedMessage({
-          platform: opts.platform,
-          chatId: opts.chatId,
-          userId: opts.userId,
-          workspaceId: opts.workspaceId,
-          text: t("run.started", lang, { id: result.runId }),
-          sessionId: result.sessionId,
-          runId: result.runId,
-          viewUrl: link,
-          vscodeUrl,
-          replyToMessageId: opts.replyToMessageId,
-          messageThreadId: opts.messageThreadId,
-          slackThreadTs: opts.slackThreadTs,
-        });
+        const prompt = cmd.prompt.trim();
+        if (!prompt) {
+          await replyText("run.prompt_required");
+          return true;
+        }
+        try {
+          const result = await this.deps.cloudManager.startRun({
+            identityId: identity.id,
+            platform: opts.platform,
+            workspaceId: opts.workspaceId,
+            chatId: opts.chatId,
+            spaceId: opts.spaceId,
+            userId: opts.userId,
+            prompt,
+            repoIds,
+            agent,
+            playground,
+          });
+          const link = this.buildCloudUiLink(result.runId, identity.id, opts.isDirect);
+          const vscodeUrl = await this.deps.cloudManager.getVscodeUrl(result.sessionId);
+          const text = t("run.started", lang, { id: result.runId });
+          await this.sendCloudRunStartedMessage({
+            platform: opts.platform,
+            chatId: opts.chatId,
+            userId: opts.userId,
+            workspaceId: opts.workspaceId,
+            text,
+            sessionId: result.sessionId,
+            runId: result.runId,
+            viewUrl: link,
+            vscodeUrl,
+            replyToMessageId: opts.replyToMessageId,
+            messageThreadId: opts.messageThreadId,
+            slackThreadTs: opts.slackThreadTs,
+          });
+        } catch (e) {
+          const msg = String(e);
+          if (/ChatGPT auth missing or expired/i.test(msg) || /ChatGPT token unavailable/i.test(msg) || msg.includes("CHATGPT_AUTH_ERROR_PREFIX")) {
+            await replyText("run.failed_auth", { cmd: formatCmd("connect chatgpt") });
+          } else {
+            await replyText("run.failed", { error: msg });
+          }
+        }
         return true;
       }
-      case "setup": {
-        const cmd = opts.command as Extract<CloudCommand, { kind: "setup" }>;
+      case "setup_status": {
+        if (isPlaygroundRepoId(identity.active_repo_id)) {
+          await replyText("setup.playground_no_repo_manage");
+          return true;
+        }
         if (!identity.active_repo_id) {
-          await replyText("repo.select_first");
+          await replyText("repo.none_active_simple");
           return true;
         }
         const spec = await getLatestSetupSpec(this.deps.db, identity.active_repo_id);
-        if (spec && !cmd.force) {
-          await replyText("setup.exists", undefined, true);
+        if (!spec) {
+          await replyText("setup.no_spec", { cmd: formatCmd("setup lift") });
           return true;
         }
-        const repo = await this.deps.db
-          .selectFrom("repos")
-          .selectAll()
-          .where("id", "=", identity.active_repo_id)
-          .executeTakeFirstOrThrow();
-        const conn = await this.deps.db
-          .selectFrom("connections")
-          .selectAll()
-          .where("id", "=", repo.connection_id)
-          .executeTakeFirstOrThrow();
-        const provider = new LocalCloudProvider(cloud.workspaces_dir, this.deps.logger);
-        const workspace = await provider.getWorkspace({
-          runId: `setup-${Date.now()}`,
-          identityId: identity.id,
-        });
-        const clone = await buildCloneUrl({
-          db: this.deps.db,
-          connection: conn,
-        });
-        await runGitClone({ url: clone.url, cwd: workspace.rootPath, targetDir: path.join(workspace.rootPath, "repo"), logger: this.deps.logger });
-        const specResult = await generateSetupSpecFromPath(path.join(workspace.rootPath, "repo"));
-        const yml = stringifySetupSpec(specResult.spec);
-        const hash = hashSetupSpec(yml);
-        await putSetupSpec(this.deps.db, { repoId: repo.id, ymlBlob: yml, hash });
-        const urlBase = cloud.public_base_url ?? `http://localhost:${this.deps.config.bot.port}`;
-        const url = `${urlBase}/cloud/setup/${repo.id}`;
-        await replyText("setup.ready", { url }, true);
+        await replyText("setup.configured");
         return true;
       }
-      case "secrets_list": {
-        const secrets = await listSecrets(this.deps.db, identity.id);
-        if (!secrets.length) {
-          await replyText("secrets.none", undefined, true);
+      case "setup_lift": {
+        if (isPlaygroundRepoId(identity.active_repo_id)) {
+          await replyText("setup.playground_no_repo_lift");
           return true;
         }
-        const lines = [t("secrets.list", lang)];
-        secrets.forEach((secret) => {
-          const createdAt = new Date(secret.created_at).toISOString();
-          const updatedAt = new Date(secret.updated_at).toISOString();
-          lines.push(`- ${secret.name} (created ${createdAt}, updated ${updatedAt})`);
-        });
+        if (!identity.active_repo_id) {
+          await replyText("repo.none_active_simple");
+          return true;
+        }
+        try {
+          const repo = await this.deps.db.selectFrom("repos").selectAll().where("id", "=", identity.active_repo_id).executeTakeFirstOrThrow();
+          const conn = await this.deps.db.selectFrom("connections").selectAll().where("id", "=", repo.connection_id).executeTakeFirstOrThrow();
+          const provider = new LocalCloudProvider(cloud.workspaces_dir, this.deps.logger);
+          const workspace = await provider.createWorkspace({ prefix: "lift" });
+          let cloneToken = conn.access_token;
+          let cloneUser: string | undefined;
+          if (conn.type === "github_app" && cloud.github_app) {
+            const token = await ensureGithubAppToken({
+              db: this.deps.db,
+              config: cloud.github_app,
+              secretKey: cloud.secrets_key,
+              connection: conn,
+            });
+            cloneToken = token.token;
+            cloneUser = "x-access-token";
+          }
+          const clone = buildCloneUrl(repo.url, cloneToken, cloneUser ? { username: cloneUser } : undefined);
+          await runGitClone({ url: clone.url, cwd: workspace.rootPath, targetDir: path.join(workspace.rootPath, "repo"), logger: this.deps.logger });
+          const spec = await generateSetupSpecFromPath(path.join(workspace.rootPath, "repo"));
+          const yml = stringifySetupSpec(spec);
+          const hash = hashSetupSpec(yml);
+          await putSetupSpec(this.deps.db, { repoId: repo.id, ymlBlob: yml, hash });
+          await provider.terminateWorkspace(workspace);
+          await replyText("setup.lift_saved");
+        } catch (e) {
+          await replyText("setup.lift_failed", { error: String(e) });
+        }
+        return true;
+      }
+      case "tinc_token": {
+        if (!opts.isDirect) {
+          await replyText("command.dm_only", { cmd: formatCmd("tinc token") });
+          return true;
+        }
+        const ui = cloud.ui;
+        if (!ui || !ui.token_secret) {
+          await replyText("cloud.ui_token_missing");
+          return true;
+        }
+        const token = createUiToken(ui, { scope: "identity", identity_id: identity.id });
+        const baseRaw =
+          cloud.public_base_url && cloud.public_base_url.trim().length > 0
+            ? cloud.public_base_url
+            : `http://localhost:${this.deps.config.bot.port}`;
+        const baseUrl = baseRaw.replace(/\/+$/g, "");
+        const ttlMs = ui.token_ttl_ms;
+        const ttl =
+          typeof ttlMs === "number" && Number.isFinite(ttlMs) && ttlMs > 0
+            ? ttlMs >= 60 * 60 * 1000
+              ? `${(ttlMs / (60 * 60 * 1000)).toFixed(1)}h`
+              : `${Math.max(1, Math.round(ttlMs / (60 * 1000)))}m`
+            : null;
+        const lines = [
+          t("tinc.token.title", lang),
+          "`" + token + "`",
+          "",
+          t("tinc.token.env_vars", lang),
+          "`TINC_URL=" + baseUrl + "`",
+          "`TINC_TOKEN=<token>`",
+          "",
+          t("tinc.token.example", lang),
+          "`TINC_URL=" + baseUrl + " TINC_TOKEN=<token> tinc pull --run <id>`",
+          ttl ? t("tinc.token.ttl", lang, { ttl }) : null,
+        ].filter((line): line is string => Boolean(line));
         await reply(lines.join("\n"), true);
         return true;
       }
+      case "secrets_set": {
+        if (!opts.isDirect) {
+          await replyText("command.dm_only", { cmd: formatCmd("secrets set") });
+          return true;
+        }
+        const cmd = opts.command as Extract<CloudCommand, { kind: "secrets_set" }>;
+        if (!cmd.value) {
+          await replyText("secrets.usage_set", { cmd: formatCmd("secrets set NAME VALUE") });
+          return true;
+        }
+        try {
+          const encrypted = encryptSecret(cmd.value, cloud.secrets_key);
+          await setSecret(this.deps.db, { identityId: identity.id, name: cmd.name, encryptedValue: encrypted });
+          await replyText("secrets.saved", { name: cmd.name });
+        } catch (e) {
+          await replyText("secrets.save_failed", { error: String(e) });
+        }
+        return true;
+      }
       case "secrets_create": {
+        if (!opts.isDirect) {
+          await replyText("command.dm_only", { cmd: formatCmd("secrets create") });
+          return true;
+        }
         const cmd = opts.command as Extract<CloudCommand, { kind: "secrets_create" }>;
-        if (!cmd.name || !cmd.value) {
-          await replyText("secrets.create_missing");
+        if (!cmd.value) {
+          await replyText("secrets.usage_create", { cmd: formatCmd("secrets create NAME VALUE") });
           return true;
         }
         const existing = await listSecrets(this.deps.db, identity.id);
         if (this.findSecretMetaByName(existing, cmd.name)) {
-          await replyText("secrets.exists", { name: cmd.name });
+          await replyText("secrets.exists", { name: cmd.name, cmd: formatCmd("secrets update") });
           return true;
         }
-        const encrypted = encryptSecret({
-          secret: cmd.value,
-          key: cloud.secrets_key ?? "",
-        });
-        await setSecret(this.deps.db, { identityId: identity.id, name: cmd.name, encryptedValue: encrypted });
-        await replyText("secrets.created", { name: cmd.name }, true);
+        try {
+          const encrypted = encryptSecret(cmd.value, cloud.secrets_key);
+          await setSecret(this.deps.db, { identityId: identity.id, name: cmd.name, encryptedValue: encrypted });
+          await replyText("secrets.created", { name: cmd.name });
+        } catch (e) {
+          await replyText("secrets.create_failed", { error: String(e) });
+        }
         return true;
       }
       case "secrets_update": {
+        if (!opts.isDirect) {
+          await replyText("command.dm_only", { cmd: formatCmd("secrets update") });
+          return true;
+        }
         const cmd = opts.command as Extract<CloudCommand, { kind: "secrets_update" }>;
-        if (!cmd.name || !cmd.value) {
-          await replyText("secrets.update_missing");
+        if (!cmd.value) {
+          await replyText("secrets.usage_update", { cmd: formatCmd("secrets update NAME VALUE") });
           return true;
         }
         const existing = await listSecrets(this.deps.db, identity.id);
         if (!this.findSecretMetaByName(existing, cmd.name)) {
-          await replyText("secrets.not_found", { name: cmd.name });
+          await replyText("secrets.not_found_use_create", { name: cmd.name, cmd: formatCmd("secrets create") });
           return true;
         }
-        const encrypted = encryptSecret({
-          secret: cmd.value,
-          key: cloud.secrets_key ?? "",
-        });
-        await setSecret(this.deps.db, { identityId: identity.id, name: cmd.name, encryptedValue: encrypted });
-        await replyText("secrets.updated", { name: cmd.name }, true);
+        try {
+          const encrypted = encryptSecret(cmd.value, cloud.secrets_key);
+          await setSecret(this.deps.db, { identityId: identity.id, name: cmd.name, encryptedValue: encrypted });
+          await replyText("secrets.updated", { name: cmd.name });
+        } catch (e) {
+          await replyText("secrets.update_failed", { error: String(e) });
+        }
+        return true;
+      }
+      case "secrets_list": {
+        const secrets = await listSecrets(this.deps.db, identity.id);
+        if (secrets.length === 0) {
+          await replyText("secrets.none");
+          return true;
+        }
+        await reply(secrets.map((s) => `- \`${s.name}\``).join("\n"));
         return true;
       }
       case "secrets_delete": {
         const cmd = opts.command as Extract<CloudCommand, { kind: "secrets_delete" }>;
-        if (!cmd.name) {
-          await replyText("secrets.delete_missing");
-          return true;
-        }
-        const existing = await listSecrets(this.deps.db, identity.id);
-        if (!this.findSecretMetaByName(existing, cmd.name)) {
-          await replyText("secrets.not_found", { name: cmd.name });
-          return true;
-        }
-        await deleteSecret(this.deps.db, { identityId: identity.id, name: cmd.name });
-        await replyText("secrets.deleted", { name: cmd.name }, true);
-        return true;
-      }
-      case "repo_list_shared": {
-        const repos = await listSharedRepos(this.deps.db, {
-          platform: opts.platform,
-          workspaceId: opts.workspaceId,
-          chatId: opts.chatId,
-        });
-        if (!repos.length) {
-          await replyText("repo.shared.none", undefined, true);
-          return true;
-        }
-        const lines = [t("repo.shared.title", lang)];
-        repos.forEach((repo) => {
-          lines.push(`- ${repo.name}`);
-        });
-        await reply(lines.join("\n"), true);
-        return true;
-      }
-      case "help": {
-        await this.sendCloudHelp({
-          platform: opts.platform,
-          chatId: opts.chatId,
-          userId: opts.userId,
-          workspaceId: opts.workspaceId,
-          replyToMessageId: opts.replyToMessageId,
-          messageThreadId: opts.messageThreadId,
-          slackThreadTs: opts.slackThreadTs,
-        });
+        const ok = await deleteSecret(this.deps.db, identity.id, cmd.name);
+        await reply(ok ? t("secrets.deleted", lang, { name: cmd.name }) : t("secrets.delete_not_found", lang));
         return true;
       }
     }
+    return false;
   }
 }

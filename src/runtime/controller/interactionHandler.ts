@@ -80,7 +80,7 @@ export class InteractionHandler {
     interactionId?: string;
     replyToMessageId?: number;
     messageThreadId?: number;
-    isDirect: boolean;
+    isDirect?: boolean;
   }): Promise<boolean> {
     const actorLang = await this.deps.resolveUserLanguage(opts.platform, opts.userId);
     const respond = async (text: string) => {

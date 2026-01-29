@@ -65,7 +65,8 @@ export class SlackHandler {
   constructor(private readonly deps: SlackHandlerDeps) {}
 
   async handleSlackEvent(body: any): Promise<void> {
-    if (!this.deps.slack) return;
+    const slack = this.deps.slack;
+    if (!slack) return;
     if (body?.type !== "event_callback" || !body.event) return;
 
     const ev = body.event;
@@ -224,7 +225,7 @@ export class SlackHandler {
     const fallbackLang = await this.deps.resolveUserLanguage("slack", opts.userId);
     const access = this.deps.slackAccessDecision(opts.teamId, opts.channelId, opts.userId);
     if (!access.allowed) {
-      await this.deps.slack.postEphemeral({
+      await slack.postEphemeral({
         channel: opts.channelId,
         user: opts.userId,
         text: t("error.not_authorized", fallbackLang),
@@ -236,7 +237,7 @@ export class SlackHandler {
     const cmdHint = opts.isDirect ? "lang en" : "@bot lang en";
     const requested = raw ? this.normalizeLanguageToken(raw) : null;
     const sendText = async (text: string) => {
-      await this.deps.slack.postMessageDetailed({
+      await slack.postMessageDetailed({
         channel: opts.channelId,
         text,
         blocksOnLastChunk: false,

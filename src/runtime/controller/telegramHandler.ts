@@ -1130,11 +1130,7 @@ export class TelegramHandler {
       adapter.requireConfig(this.deps.config);
       const title = truncateText(`${agentShortName(opts.agent)}: ${opts.projectName}`, maxTitleChars);
       const nextName = clipForumTopicName(`${emojiPrefix}${title}`);
-      await this.deps.telegram.editForumTopic({
-        chatId: opts.chatId,
-        messageThreadId: opts.topicId,
-        name: nextName,
-      });
+      await this.deps.telegram.editForumTopic(opts.chatId, opts.topicId, nextName);
     } catch (e) {
       this.deps.logger.debug(`[tg] editForumTopic failed: ${String(e)}`);
     }
