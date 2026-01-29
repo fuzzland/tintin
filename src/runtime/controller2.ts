@@ -895,7 +895,7 @@ export class BotController {
       await (opts.platform as SlackClient).sendMessage({
         chatId: opts.chatId,
         text: opts.text,
-        threadId,
+        threadId: undefined,
         replyToMessageId,
         markup: opts.markup,
         priority,
@@ -3291,7 +3291,6 @@ export class BotController {
           chatId: channelId,
           userId,
           workspaceId: teamId,
-          slackThreadTs: cmdSpaceId,
         });
         return;
       }
@@ -3319,7 +3318,6 @@ export class BotController {
           userId,
           isDirect: channelId.startsWith("D"),
           spaceId: cmdSpaceId,
-          slackThreadTs: cmdSpaceId,
         });
         return;
       }
