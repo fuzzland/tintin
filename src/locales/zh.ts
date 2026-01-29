@@ -124,6 +124,8 @@ export const zh = {
   "run.no_active_repo_or_repos": "未选择活动仓库。请使用 {select} 或 {list}。",
   "run.diff_none": "暂无 diff 概要。",
   "run.diff_summary": "运行 {id} diff 概要：\n{summary}\n本地拉取：`{cmd}`。{view}",
+  "run.none_recent": "暂无最近运行记录。",
+  "run.list.title": "最近的运行：",
 
   "sandbox.stop_unavailable": "无法停止沙箱。",
   "sandbox.stopping": "正在停止沙箱…",
@@ -261,6 +263,7 @@ export const zh = {
   "repo.active_label": "当前活动仓库：{label}。",
   "repo.active_detail": "当前活动仓库：{name}（{id}）。",
   "repo.active_not_found": "未找到活动仓库。请使用 {cmd}。",
+  "repo.none": "未发现仓库。请使用 {cmd} 连接。",
   "repo.none_active": "未选择活动仓库。请使用 {select} 或 {playground}。",
   "repo.none_active_simple": "未选择活动仓库。",
   "repo.not_found_use_repos": "未找到仓库。请使用 {cmd} 查看列表。",

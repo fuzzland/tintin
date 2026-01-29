@@ -877,11 +877,16 @@ export class CloudHandler {
           return true;
         }
         this.lastRepoListByIdentity.set(identity.id, repos.map((r) => r.id));
-        const lines = [t("repo.list.title", lang)];
+        const lines = [t("repos.title", lang)];
         for (const repo of repos) {
           lines.push(`- ${repo.name} (${repo.id})`);
         }
-        lines.push(t("repo.list.select", lang, { cmd: formatCmd("repo select <index|repo-id>") }));
+        lines.push(
+          t("repos.select_hint", lang, {
+            cmd: formatCmd("repo select <index>"),
+            cmd2: formatCmd("repo select <repo-id>"),
+          }),
+        );
         await reply(lines.join("\n"));
         return true;
       }
@@ -889,7 +894,7 @@ export class CloudHandler {
         const cmd = opts.command as Extract<CloudCommand, { kind: "repo_select" }>;
         if (isPlaygroundTarget(cmd.target)) {
           await setIdentityActiveRepo(this.deps.db, identity.id, PLAYGROUND_REPO_ID);
-          await replyText("repo.selected_playground");
+          await replyText("repo.active_set_playground", { label: t("repo.playground_label", lang) });
           return true;
         }
         const repos = await listReposForIdentity(this.deps.db, identity.id);
@@ -903,16 +908,23 @@ export class CloudHandler {
           return true;
         }
         await setIdentityActiveRepo(this.deps.db, identity.id, repo.id);
-        await replyText("repo.selected", { name: repo.name });
+        await reply(t("repo.active_set", lang, { name: repo.name, id: repo.id }));
         return true;
       }
       case "repo_current": {
         if (isPlaygroundRepoId(identity.active_repo_id)) {
-          await replyText("repo.current_playground");
+          await reply(
+            t("repo.active_label", lang, {
+              label: t("repo.playground_label", lang),
+            }),
+          );
           return true;
         }
         if (!identity.active_repo_id) {
-          await replyText("repo.none_active", { cmd: formatCmd("repo select") });
+          await replyText("repo.none_active", {
+            select: formatCmd("repo select"),
+            playground: formatCmd("repo select playground"),
+          });
           return true;
         }
         const repo = await this.deps.db
@@ -921,22 +933,29 @@ export class CloudHandler {
           .where("id", "=", identity.active_repo_id)
           .executeTakeFirst();
         if (!repo) {
-          await replyText("repo.none_active", { cmd: formatCmd("repo select") });
+          await replyText("repo.active_not_found", { cmd: formatCmd("repo select") });
           return true;
         }
-        await replyText("repo.current", { name: repo.name });
+        await reply(t("repo.active_detail", lang, { name: repo.name, id: repo.id }));
         return true;
       }
       case "repo_share": {
         if (!opts.isDirect) {
-          await replyText("repo.share.dm_only");
+          await replyText("repo.share_dm_only", { cmd: formatCmd("repo share") });
           return true;
         }
-        const cmd = opts.command as Extract<CloudCommand, { kind: "repo_share" }>;
         if (!identity.active_repo_id || isPlaygroundRepoId(identity.active_repo_id)) {
-          await replyText("repo.share.no_active_repo", { cmd: formatCmd("repo select") });
+          await replyText("repo.none_active", {
+            select: formatCmd("repo select"),
+            playground: formatCmd("repo select playground"),
+          });
           return true;
         }
+        const repo = await this.deps.db
+          .selectFrom("repos")
+          .selectAll()
+          .where("id", "=", identity.active_repo_id)
+          .executeTakeFirst();
         const shared = await shareRepo(this.deps.db, {
           platform: opts.platform,
           workspaceId: opts.workspaceId,
@@ -944,26 +963,41 @@ export class CloudHandler {
           repoId: identity.active_repo_id,
           sharedByIdentityId: identity.id,
         });
-        await replyText(shared.alreadyShared ? "repo.share.already" : "repo.share.success");
+        if (shared.alreadyShared) {
+          await replyText("repo.already_shared");
+          return true;
+        }
+        await replyText("repo.shared", { name: repo?.name ?? identity.active_repo_id });
         return true;
       }
       case "repo_unshare": {
         if (!opts.isDirect) {
-          await replyText("repo.unshare.dm_only");
+          await replyText("repo.unshare_dm_only", { cmd: formatCmd("repo unshare") });
           return true;
         }
-        const cmd = opts.command as Extract<CloudCommand, { kind: "repo_unshare" }>;
         if (!identity.active_repo_id || isPlaygroundRepoId(identity.active_repo_id)) {
-          await replyText("repo.unshare.no_active_repo", { cmd: formatCmd("repo select") });
+          await replyText("repo.none_active", {
+            select: formatCmd("repo select"),
+            playground: formatCmd("repo select playground"),
+          });
           return true;
         }
+        const repo = await this.deps.db
+          .selectFrom("repos")
+          .selectAll()
+          .where("id", "=", identity.active_repo_id)
+          .executeTakeFirst();
         const ok = await unshareRepo(this.deps.db, {
           platform: opts.platform,
           workspaceId: opts.workspaceId,
           chatId: opts.chatId,
           repoId: identity.active_repo_id,
         });
-        await replyText(ok ? "repo.unshare.success" : "repo.unshare.not_shared");
+        if (!ok) {
+          await replyText("repo.not_shared");
+          return true;
+        }
+        await replyText("repo.unshared", { name: repo?.name ?? identity.active_repo_id });
         return true;
       }
       case "actions_list": {

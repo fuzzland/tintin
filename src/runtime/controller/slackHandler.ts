@@ -74,7 +74,7 @@ export class SlackHandler {
     const enterpriseId = typeof body.enterprise_id === "string" ? body.enterprise_id : null;
     const registerWorkspace = (channelId: string | null) => {
       if (!channelId) return;
-      this.deps.slack?.registerWorkspaceForChannel(channelId, { workspaceId: teamId, enterpriseId });
+      slack.registerWorkspaceForChannel(channelId, { workspaceId: teamId, enterpriseId });
     };
 
     if (ev.type === "app_mention") {
@@ -105,7 +105,7 @@ export class SlackHandler {
       const threadTs = typeof ev.thread_ts === "string" ? ev.thread_ts : null;
       if (threadTs && threadTs !== ev.ts) {
         const lang = await this.deps.resolveUserLanguage("slack", userId);
-        await this.deps.slack.postMessageDetailed({
+        await slack.postMessageDetailed({
           channel: channelId,
           thread_ts: threadTs,
           text: t("slack.thread_unsupported", lang),
@@ -181,7 +181,8 @@ export class SlackHandler {
   }
 
   async handleSlackInteraction(payload: any): Promise<void> {
-    if (!this.deps.slack) return;
+    const slack = this.deps.slack;
+    if (!slack) return;
     this.deps.logger.debug(`[slack] interaction received type=${String(payload?.type ?? "?")}`);
     try {
       if (payload?.type === "block_actions") {
@@ -203,7 +204,7 @@ export class SlackHandler {
       const teamId = (payload?.team?.id as string | undefined) ?? null;
       if (channel && user) {
         const lang = await this.deps.resolveUserLanguage("slack", user);
-        await this.deps.slack.postEphemeral({
+        await slack.postEphemeral({
           channel,
           user,
           text: t("error.generic", lang, { message: String(e) }),
@@ -221,7 +222,8 @@ export class SlackHandler {
     isDirect: boolean;
     rawArg: string;
   }) {
-    if (!this.deps.slack) return;
+    const slack = this.deps.slack;
+    if (!slack) return;
     const fallbackLang = await this.deps.resolveUserLanguage("slack", opts.userId);
     const access = this.deps.slackAccessDecision(opts.teamId, opts.channelId, opts.userId);
     if (!access.allowed) {
@@ -282,8 +284,9 @@ export class SlackHandler {
   }
 
   private async startSlackWizard(teamId: string | null, channelId: string, userId: string) {
-    if (!this.deps.slack) return;
-    this.deps.slack.registerWorkspaceForChannel(channelId, { workspaceId: teamId });
+    const slack = this.deps.slack;
+    if (!slack) return;
+    slack.registerWorkspaceForChannel(channelId, { workspaceId: teamId });
     const lang = await this.deps.resolveUserLanguage("slack", userId);
     await setWizardState(this.deps.db, {
       id: crypto.randomUUID(),
@@ -306,7 +309,7 @@ export class SlackHandler {
     const menuText = buildMenuText("slack", "codex", lang);
     const commandExamples = buildCommandExamples("slack", lang);
 
-    await this.deps.slack.postMessageDetailed({
+    await slack.postMessageDetailed({
       channel: channelId,
       text: menuText,
       blocks: [
@@ -331,7 +334,8 @@ export class SlackHandler {
   }
 
   private async handleSlackBlockActions(payload: any) {
-    if (!this.deps.slack) return;
+    const slack = this.deps.slack;
+    if (!slack) return;
     const action = payload.actions?.[0];
     if (!action) return;
     const actionId = action.action_id as string;
@@ -348,7 +352,7 @@ export class SlackHandler {
           : messageTs;
       const messageText = typeof payload.message?.text === "string" ? payload.message.text : undefined;
       if (!channelId || !userId) return;
-      this.deps.slack.registerWorkspaceForChannel(channelId, { workspaceId: teamId ?? null });
+      slack.registerWorkspaceForChannel(channelId, { workspaceId: teamId ?? null });
       const handled = await this.deps.handleSharedInteractionAction({
         platform: "slack",
         action: sharedAction,
@@ -371,7 +375,7 @@ export class SlackHandler {
     const userId = payload.user?.id as string | undefined;
     const teamId = payload.team?.id as string | undefined;
     if (!projectId || !triggerId || !channelId || !userId) return;
-    this.deps.slack.registerWorkspaceForChannel(channelId, { workspaceId: teamId ?? null });
+    slack.registerWorkspaceForChannel(channelId, { workspaceId: teamId ?? null });
     const lang = await this.deps.resolveUserLanguage("slack", userId);
     const access = this.deps.slackAccessDecision(teamId ?? null, channelId, userId);
     if (!access.allowed) {
@@ -396,7 +400,7 @@ export class SlackHandler {
       updated_at: nowMs(),
     });
 
-    await this.deps.slack.openModal(triggerId, this.buildSlackWizardModal({ project, channelId, userId, teamId: teamId ?? null, lang }), {
+    await slack.openModal(triggerId, this.buildSlackWizardModal({ project, channelId, userId, teamId: teamId ?? null, lang }), {
       workspaceId: teamId ?? null,
     });
   }
@@ -444,7 +448,8 @@ export class SlackHandler {
   }
 
   private async handleSlackViewSubmission(payload: any) {
-    if (!this.deps.slack) return;
+    const slack = this.deps.slack;
+    if (!slack) return;
     const metaRaw = payload.view?.private_metadata as string | undefined;
     if (!metaRaw) return;
     const meta = JSON.parse(metaRaw) as { projectId: string; channelId: string; userId: string; teamId: string | null };
@@ -465,8 +470,8 @@ export class SlackHandler {
     const resolved = await validateAndResolveProjectPath(this.deps.config, project, project.path === "*" ? customPath ?? null : null);
 
     const lang = await this.deps.resolveUserLanguage("slack", meta.userId);
-    this.deps.slack.registerWorkspaceForChannel(meta.channelId, { workspaceId: meta.teamId });
-    const rootTs = await this.deps.slack.postMessage({
+    slack.registerWorkspaceForChannel(meta.channelId, { workspaceId: meta.teamId });
+    const rootTs = await slack.postMessage({
       channel: meta.channelId,
       text: t("session.starting", lang),
       workspaceId: meta.teamId,

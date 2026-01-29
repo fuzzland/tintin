@@ -322,7 +322,7 @@ export class InteractionHandler {
           userId: opts.userId,
           workspaceId: opts.workspaceId,
           runId: opts.action.runId,
-          isDirect: opts.isDirect,
+          isDirect: opts.isDirect ?? false,
           replyToMessageId: opts.replyToMessageId,
           messageThreadId: opts.messageThreadId,
           slackThreadTs: opts.threadTs,

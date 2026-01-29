@@ -124,6 +124,8 @@ export const en = {
   "run.no_active_repo_or_repos": "No active repo selected. Use {select} or {list}.",
   "run.diff_none": "No diff summary available.",
   "run.diff_summary": "Run {id} diff summary:\n{summary}\nPull locally with `{cmd}`.{view}",
+  "run.none_recent": "No recent runs.",
+  "run.list.title": "Recent runs:",
 
   "sandbox.stop_unavailable": "Sandbox stop not available.",
   "sandbox.stopping": "Stopping sandbox…",
@@ -261,6 +263,7 @@ export const en = {
   "repo.active_label": "Active repo: {label}.",
   "repo.active_detail": "Active repo: {name} ({id}).",
   "repo.active_not_found": "Active repo not found. Use {cmd}.",
+  "repo.none": "No repos found. Use {cmd} to connect.",
   "repo.none_active": "No active repo selected. Use {select} or {playground}.",
   "repo.none_active_simple": "No active repo selected.",
   "repo.not_found_use_repos": "Repo not found. Use {cmd} to list repos.",
