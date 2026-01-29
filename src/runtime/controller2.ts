@@ -79,7 +79,7 @@ import {
   revokeChatgptAccount,
   startChatgptOAuth,
 } from "./chatgpt/oauth.js";
-import { getLanguageLabel, getOtherLanguage, isUserLanguage, t, type UserLanguage } from "../locales/index.js";
+import { getOtherLanguage, isUserLanguage, t, type UserLanguage } from "../locales/index.js";
 
 const REVIEW_PROMPT = "Run codex review";
 const COMMIT_PROMPT = "Stage all current changes and commit them with a clear, meaningful git commit message summarizing the diff.";
@@ -859,37 +859,6 @@ export class BotController {
     return await getUserLanguage(this.db, platform, userId);
   }
 
-  private buildLanguageToggleTelegram(lang: UserLanguage) {
-    const nextLang = getOtherLanguage(lang);
-    return {
-      inline_keyboard: [[{ text: getLanguageLabel(nextLang), callback_data: `lang:${nextLang}` }]],
-    };
-  }
-
-  private buildLanguageToggleSlackBlocks(lang: UserLanguage) {
-    const nextLang = getOtherLanguage(lang);
-    return [
-      {
-        type: "actions",
-        elements: [
-          {
-            type: "button",
-            text: { type: "plain_text", text: getLanguageLabel(nextLang) },
-            action_id: "switch_language",
-            value: nextLang,
-          },
-        ],
-      },
-    ];
-  }
-
-  private buildLanguageToggleMarkup(platform: "telegram" | "slack", lang: UserLanguage): InteractiveMarkup {
-    if (platform === "telegram") {
-      return { type: "inline_keyboard", payload: this.buildLanguageToggleTelegram(lang) };
-    }
-    return { type: "blocks", payload: this.buildLanguageToggleSlackBlocks(lang) };
-  }
-
   private buildRunActionMarkup(opts: {
     platform: "telegram" | "slack";
     sessionId: string;
@@ -1068,7 +1037,6 @@ export class BotController {
           text: message,
           replyToMessageId: opts.replyToMessageId,
           threadId: opts.messageThreadId,
-          markup: this.buildLanguageToggleMarkup("telegram", actorLang),
           priority: "user",
         });
         return;
@@ -1370,9 +1338,6 @@ export class BotController {
     }
   }
   private async sendSessionMessageMarkdown(session: SessionRow, text: string) {
-    const lang = this.resolveSessionLanguage(session);
-    const platform = session.platform === "slack" ? "slack" : "telegram";
-    const markup = this.buildLanguageToggleMarkup(platform, lang);
     if (session.platform === "telegram") {
       const chatId = Number(session.chat_id);
       const space = Number(session.space_id);
@@ -1383,7 +1348,6 @@ export class BotController {
         text,
         replyToMessageId: this.isTelegramTopicSession(session) ? undefined : space,
         threadId: this.isTelegramTopicSession(session) ? space : undefined,
-        markup,
         priority: "user",
       });
       return;
@@ -1395,7 +1359,6 @@ export class BotController {
         chatId: session.chat_id,
         text,
         threadId: threadTs,
-        markup,
         priority: "user",
         workspaceId: session.workspace_id ?? null,
       });
@@ -1413,8 +1376,6 @@ export class BotController {
     slackThreadTs?: string;
     ephemeral?: boolean;
   }) {
-    const lang = await this.resolveUserLanguage(opts.platform, opts.userId);
-    const markup = this.buildLanguageToggleMarkup(opts.platform, lang);
     if (opts.platform === "telegram") {
       await this.sendPlatformMessage({
         platform: this.telegram,
@@ -1422,7 +1383,6 @@ export class BotController {
         text: opts.text,
         replyToMessageId: opts.replyToMessageId,
         threadId: opts.messageThreadId,
-        markup,
         priority: "user",
       });
       return;
@@ -1446,7 +1406,6 @@ export class BotController {
       chatId: opts.chatId,
       text: opts.text,
       threadId: opts.slackThreadTs,
-      markup,
       priority: "user",
       workspaceId: opts.workspaceId,
     });
@@ -2944,7 +2903,6 @@ export class BotController {
         messageThreadId: ctx.messageThreadId,
         replyToMessageId: ctx.replyToMessageId,
         text: t("wizard.choose_project_buttons", lang),
-        replyMarkup: this.buildLanguageToggleTelegram(lang),
         priority: "user",
       });
       return;
@@ -2957,7 +2915,6 @@ export class BotController {
         messageThreadId: ctx.messageThreadId,
         replyToMessageId: ctx.replyToMessageId,
         text: t("wizard.expired", lang),
-        replyMarkup: this.buildLanguageToggleTelegram(lang),
         priority: "user",
       });
       return;
@@ -2979,7 +2936,6 @@ export class BotController {
         messageThreadId: ctx.messageThreadId,
         replyToMessageId: ctx.replyToMessageId,
         text: t("wizard.path_accepted", lang),
-        replyMarkup: this.buildLanguageToggleTelegram(lang),
         priority: "user",
       });
       return;
@@ -3106,7 +3062,6 @@ export class BotController {
             messageThreadId: ctx.messageThreadId,
             replyToMessageId: ctx.replyToMessageId,
             text: announceText,
-            replyMarkup: this.buildLanguageToggleTelegram(lang),
             priority: "user",
           });
         }
@@ -3328,6 +3283,24 @@ export class BotController {
           safeSnippet(text),
         )}`,
       );
+      if (isSlackHelpCommand(text)) {
+        const spaceId =
+          this.config.slack?.session_mode === "thread"
+            ? typeof ev.thread_ts === "string"
+              ? ev.thread_ts
+              : typeof ev.ts === "string"
+                ? ev.ts
+                : channelId
+            : channelId;
+        await this.sendCloudHelp({
+          platform: "slack",
+          chatId: channelId,
+          userId,
+          workspaceId: teamId,
+          slackThreadTs: spaceId,
+        });
+        return;
+      }
       const listIntent = parseListSessionsIntentFromSlack(text);
       if (listIntent) {
         const sessionPage = await listSessionsForChat({
@@ -3343,7 +3316,6 @@ export class BotController {
           channel: channelId,
           user: userId,
           text: formatSessionList("slack", lang, { ...sessionPage, filterLabel: formatSessionFilterLabel(listIntent.statuses) }),
-          blocks: this.buildLanguageToggleSlackBlocks(lang),
           workspaceId: teamId,
         });
         return;
@@ -3367,7 +3339,6 @@ export class BotController {
             channel: channelId,
             user: userId,
             text: result,
-            blocks: this.buildLanguageToggleSlackBlocks(lang),
             workspaceId: teamId,
           });
           return;
@@ -3394,7 +3365,6 @@ export class BotController {
           channel: channelId,
           user: userId,
           text: result,
-          blocks: this.buildLanguageToggleSlackBlocks(lang),
           workspaceId: teamId,
         });
         return;
@@ -3474,6 +3444,17 @@ export class BotController {
         )}`,
       );
 
+      if (isSlackHelpCommand(text)) {
+        await this.sendCloudHelp({
+          platform: "slack",
+          chatId: channelId,
+          userId,
+          workspaceId: teamId,
+          slackThreadTs: cmdSpaceId,
+        });
+        return;
+      }
+
       const languageCmd = parseLanguageCommandFromSlack(text);
       if (languageCmd) {
         await this.handleLanguageCommandSlack({
@@ -3552,7 +3533,6 @@ export class BotController {
           channel,
           user,
           text: t("error.generic", lang, { message: String(e) }),
-          blocks: this.buildLanguageToggleSlackBlocks(lang),
           workspaceId: teamId,
         });
       }
@@ -3748,7 +3728,6 @@ export class BotController {
     const rootTs = await this.slack.postMessage({
       channel: meta.channelId,
       text: t("session.starting", lang),
-      blocks: this.buildLanguageToggleSlackBlocks(lang),
       workspaceId: meta.teamId,
     });
     if (!rootTs) throw new Error("Failed to create Slack thread");
@@ -3979,6 +3958,13 @@ function parseLanguageCommandFromSlack(text: string): LanguageCommand | null {
   const head = tokens.shift()!.toLowerCase();
   if (head !== "lang" && head !== "language") return null;
   return { raw: tokens.join(" ").trim() };
+}
+
+function isSlackHelpCommand(text: string): boolean {
+  const normalized = normalizeCloudText(text);
+  if (!normalized) return false;
+  const trimmed = normalized.trim().toLowerCase();
+  return trimmed === "help" || trimmed === "/help";
 }
 
 type CloudCommand =
