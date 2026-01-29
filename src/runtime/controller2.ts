@@ -3849,6 +3849,10 @@ type CloudCommand =
 
 function normalizeCloudText(text: string): string {
   let out = text.trim();
+  // Unwrap Slack link markup: <url|text> or <url>
+  out = out.replace(/<([^>|]+)\|[^>]+>/g, "$1").replace(/<([^>]+)>/g, "$1");
+  // Decode common HTML entities Slack may inject in URLs.
+  out = out.replace(/&amp;/g, "&");
   out = out.replace(/<@[^>]+>/g, "").trim();
   if (out.startsWith("/")) {
     const parts = out.slice(1).split(/\s+/);
