@@ -79,7 +79,7 @@ import {
   revokeChatgptAccount,
   startChatgptOAuth,
 } from "./chatgpt/oauth.js";
-import { getOtherLanguage, isUserLanguage, t, type UserLanguage } from "../locales/index.js";
+import { getLanguageLabel, getOtherLanguage, isUserLanguage, t, type UserLanguage } from "../locales/index.js";
 
 const REVIEW_PROMPT = "Run codex review";
 const COMMIT_PROMPT = "Stage all current changes and commit them with a clear, meaningful git commit message summarizing the diff.";

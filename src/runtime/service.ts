@@ -74,7 +74,7 @@ import { createWriteStream } from "node:fs";
 import { spawn } from "node:child_process";
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
-import { isUserLanguage, t, type UserLanguage } from "../locales/index.js";
+import { getLanguageLabel, getOtherLanguage, isUserLanguage, t, type UserLanguage } from "../locales/index.js";
 import { WebSocketManager } from "./websocket/manager.js";
 import { WebSocketHandler } from "./websocket/handler.js";
 import type { ServerMessage } from "./websocket/types.js";

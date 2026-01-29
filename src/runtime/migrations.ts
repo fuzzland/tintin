@@ -48,7 +48,6 @@ const provider = {
       "0020_user_preferences": userPreferences0020,
       "0021_session_language": sessionLanguage0021,
       "0022_deploy_registry": deployRegistry0022,
-      "0022_deploy_registry": deployRegistry0022,
       "0023_slack_installations": slackInstallations0023,
     };
   },

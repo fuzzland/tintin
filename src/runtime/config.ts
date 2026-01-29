@@ -1215,7 +1215,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
 
   // At least one platform/interface must be enabled
   const telegramEnabled = telegramSection?.enabled ?? false;
-  const slackEnabled = slackSection?.enabled ?? false;
+  const slackEnabled = !!slackSection;
   const websocketEnabled = websocket?.enabled ?? false;
   assert(
     telegramEnabled || slackEnabled || websocketEnabled,
