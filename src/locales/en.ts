@@ -193,7 +193,8 @@ export const en = {
   "cloud.help.note_group": "- In group chats, share repos with {cmd} first.",
   "cloud.help.note_disconnect": "- Use {cmd} to disconnect a GitHub App.",
   "cloud.help.note_lang": "- Use {cmd} to switch language for the current session.",
-  "cloud.help.note_slack_mention": "- In Slack channels, mention the bot to issue commands.",
+  "cloud.help.note_slack_dm": "- Use DM with the app; channel mentions are not supported.",
+  "cloud.help.note_slack_slash": "- Slack treats messages starting with '/' as slash commands; use plain text in DM.",
 
   "connect.dm_only": "Please run {cmd} in a direct message.",
   "connect.failed": "Connect failed: {error}",

@@ -3256,153 +3256,7 @@ export class BotController {
     };
 
     if (ev.type === "app_mention") {
-      const channelId = ev.channel as string | undefined;
-      const userId = ev.user as string | undefined;
-      if (!channelId || !userId) return;
-      registerWorkspace(channelId);
-      const access = this.slackAccessDecision(teamId, channelId, userId);
-      if (!access.allowed) {
-        this.logger.warn(`[slack] rejected app_mention channel=${channelId} user=${userId} reason=${access.reason ?? "-"}`);
-        return;
-      }
-      const lang = await this.resolveUserLanguage("slack", userId);
-
-      const text = typeof ev.text === "string" ? ev.text : "";
-      this.logger.debug(
-        `[slack] app_mention received workspace=${String(teamId ?? "-")} channel=${channelId} user=${userId} text=${JSON.stringify(
-          safeSnippet(text),
-        )}`,
-      );
-      if (isSlackHelpCommand(text)) {
-        const spaceId =
-          this.config.slack?.session_mode === "thread"
-            ? typeof ev.thread_ts === "string"
-              ? ev.thread_ts
-              : typeof ev.ts === "string"
-                ? ev.ts
-                : channelId
-            : channelId;
-        await this.sendCloudHelp({
-          platform: "slack",
-          chatId: channelId,
-          userId,
-          workspaceId: teamId,
-          slackThreadTs: spaceId,
-        });
-        return;
-      }
-      const listIntent = parseListSessionsIntentFromSlack(text);
-      if (listIntent) {
-        const sessionPage = await listSessionsForChat({
-          db: this.db,
-          platform: "slack",
-          workspaceId: teamId,
-          chatId: channelId,
-          statuses: listIntent.statuses,
-          limit: SESSION_LIST_PAGE_SIZE,
-          page: listIntent.page,
-        });
-        await this.slack.postEphemeral({
-          channel: channelId,
-          user: userId,
-          text: formatSessionList("slack", lang, { ...sessionPage, filterLabel: formatSessionFilterLabel(listIntent.statuses) }),
-          workspaceId: teamId,
-        });
-        return;
-      }
-
-      const settingsIntent = parseSettingsIntentFromSlack(text);
-      if (settingsIntent) {
-        const identity = await getOrCreateIdentity(this.db, { platform: "slack", workspaceId: teamId ?? null, userId });
-        if (settingsIntent.cmd.kind === "list") {
-          let cloudKeyStatus: { openai: boolean; anthropic: boolean } | null = null;
-          if (this.config.cloud?.enabled) {
-            const secrets = await listSecrets(this.db, identity.id);
-            const names = new Set(secrets.map((s) => s.name));
-            cloudKeyStatus = {
-              openai: names.has("OPENAI_API_KEY"),
-              anthropic: names.has("ANTHROPIC_API_KEY"),
-            };
-          }
-          const result = formatSettingsSummary(this.config, settingsIntent.defaultAgent, "slack", lang, identity, cloudKeyStatus);
-          await this.slack.postEphemeral({
-            channel: channelId,
-            user: userId,
-            text: result,
-            workspaceId: teamId,
-          });
-          return;
-        }
-        const cloudResult = await applyCloudSettingsCommand({
-          config: this.config,
-          db: this.db,
-          cmd: settingsIntent.cmd,
-          identityId: identity.id,
-          lang,
-        });
-        const identityResult = await applyIdentitySettingsCommand({
-          config: this.config,
-          db: this.db,
-          cmd: settingsIntent.cmd,
-          identityId: identity.id,
-          lang,
-        });
-        const result =
-          identityResult ??
-          cloudResult ??
-          applySettingsCommand(this.config, settingsIntent.cmd, settingsIntent.defaultAgent, "slack", lang);
-        await this.slack.postEphemeral({
-          channel: channelId,
-          user: userId,
-          text: result,
-          workspaceId: teamId,
-        });
-        return;
-      }
-
-      const languageCmd = parseLanguageCommandFromSlack(text);
-      if (languageCmd) {
-        const spaceId =
-          this.config.slack?.session_mode === "thread"
-            ? typeof ev.thread_ts === "string"
-              ? ev.thread_ts
-              : typeof ev.ts === "string"
-                ? ev.ts
-                : channelId
-            : channelId;
-        await this.handleLanguageCommandSlack({
-          channelId,
-          userId,
-          teamId,
-          spaceId,
-          isDirect: channelId.startsWith("D"),
-          rawArg: languageCmd.raw,
-        });
-        return;
-      }
-
-      const cloudCmd = parseCloudCommand(text);
-      if (cloudCmd) {
-        const spaceId =
-          this.config.slack?.session_mode === "thread"
-            ? typeof ev.ts === "string"
-              ? ev.ts
-              : channelId
-            : channelId;
-        await this.handleCloudCommand({
-          platform: "slack",
-          command: cloudCmd,
-          chatId: channelId,
-          workspaceId: teamId,
-          userId,
-          isDirect: channelId.startsWith("D"),
-          spaceId,
-          slackThreadTs: spaceId,
-        });
-        return;
-      }
-
-      await this.startSlackWizard(teamId, channelId, userId);
+      this.logger.debug("[slack] ignore app_mention (DM-only mode)");
       return;
     }
 
@@ -3412,8 +3266,8 @@ export class BotController {
       const userId = ev.user as string | undefined;
       const text = typeof ev.text === "string" ? ev.text.trim() : "";
       if (!channelId || !userId || !text) return;
-      if (!channelId.startsWith("D") && text.includes("<@")) {
-        this.logger.debug(`[slack] skip message mention (handled by app_mention) channel=${channelId} user=${userId}`);
+      if (!channelId.startsWith("D")) {
+        this.logger.debug(`[slack] ignore channel message (DM-only mode) channel=${channelId} user=${userId}`);
         return;
       }
       registerWorkspace(channelId);
@@ -3487,7 +3341,8 @@ export class BotController {
 
       const session = await getSessionBySpace(this.db, "slack", channelId, spaceId);
       if (!session) {
-        this.logger.debug(`[slack] no session for space=${spaceId} channel=${channelId}`);
+        this.logger.debug(`[slack] no session for space=${spaceId} channel=${channelId}; starting wizard`);
+        await this.startSlackWizard(teamId, channelId, userId);
         return;
       }
       this.logger.debug(
@@ -3558,11 +3413,9 @@ export class BotController {
     const menuText = buildMenuText("slack", "codex", lang);
     const commandExamples = buildCommandExamples("slack", lang);
 
-    await this.slack.postEphemeral({
+    await this.slack.postMessageDetailed({
       channel: channelId,
-      user: userId,
       text: menuText,
-      workspaceId: teamId,
       blocks: [
         {
           type: "section",
@@ -3579,6 +3432,8 @@ export class BotController {
           text: { type: "mrkdwn", text: commandExamples },
         },
       ],
+      blocksOnLastChunk: false,
+      workspaceId: teamId,
     });
   }
 
@@ -4392,7 +4247,8 @@ function buildCloudHelpText(platform: "telegram" | "slack", lang: UserLanguage):
   notes.push(t("cloud.help.note_disconnect", lang, { cmd: `\`${cmd("disconnect github")}\`` }));
   notes.push(t("cloud.help.note_lang", lang, { cmd: `\`${cmd("lang zh")}\`` }));
   if (platform === "slack") {
-    notes.push(t("cloud.help.note_slack_mention", lang));
+    notes.push(t("cloud.help.note_slack_dm", lang));
+    notes.push(t("cloud.help.note_slack_slash", lang));
   }
   const lines = [
     title,

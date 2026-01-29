@@ -193,7 +193,8 @@ export const zh = {
   "cloud.help.note_group": "- 群聊中先用 {cmd} 共享仓库。",
   "cloud.help.note_disconnect": "- 使用 {cmd} 断开 GitHub App。",
   "cloud.help.note_lang": "- 使用 {cmd} 切换当前会话语言。",
-  "cloud.help.note_slack_mention": "- Slack 频道中需要 @ 机器人执行命令。",
+  "cloud.help.note_slack_dm": "- 只支持与应用 DM，频道 @ 不再支持。",
+  "cloud.help.note_slack_slash": "- Slack 中以 \"/\" 开头会被当作 Slash Command，请在 DM 中直接输入命令。",
 
   "connect.dm_only": "请在私聊中使用 {cmd}。",
   "connect.failed": "连接失败：{error}",

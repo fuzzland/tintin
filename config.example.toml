@@ -74,14 +74,18 @@ state_secret = "env:SLACK_STATE_SECRET"
 signing_secret = "env:SLACK_SIGNING_SECRET"
 # Bot scopes required by Tintin's current Slack API usage.
 scopes = [
-  "chat:write",
-  "conversations.connect:write",
-  "conversations.connect:read",
-  "users:read",
-  "reactions:write",
-  "files:write",
   "app_mentions:read",
+  "channels:history",
+  "chat:write",
+  "conversations.connect:read",
+  "conversations.connect:write",
+  "files:write",
+  "groups:history",
+  "im:history",
   "im:read",
+  "im:write",
+  "reactions:write",
+  "users:read",
 ]
 # Optional user scopes (leave empty unless you explicitly use user tokens).
 # user_scopes = []
