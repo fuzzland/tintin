@@ -40,8 +40,8 @@ export const en = {
   "menu.intro": "Choose a project to start a {agent} session.",
   "menu.sessions_hint_tg": "- /sessions - list recent sessions (add 'active' to filter, 'page 2' for older ones)",
   "menu.settings_hint_tg": "- /settings - list/tweak runtime settings (agent + MCP)",
-  "menu.sessions_hint_slack": "- Mention me with \"sessions\" to list recent sessions (add \"active\" or \"page 2\")",
-  "menu.settings_hint_slack": "- Mention me with \"settings\" to list/tweak runtime settings (agent + MCP)",
+  "menu.sessions_hint_slack": "- `sessions` - list recent sessions (add \"active\" or \"page 2\")",
+  "menu.settings_hint_slack": "- `settings` - list/tweak runtime settings (agent + MCP)",
   "menu.examples": "Examples:",
 
   // Actions

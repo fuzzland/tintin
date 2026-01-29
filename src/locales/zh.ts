@@ -40,8 +40,8 @@ export const zh = {
   "menu.intro": "选择一个项目来启动 {agent} 会话。",
   "menu.sessions_hint_tg": "- /sessions - 列出最近的会话（添加 'active' 过滤，'page 2' 查看更早的）",
   "menu.settings_hint_tg": "- /settings - 列出/调整运行时设置（agent + MCP）",
-  "menu.sessions_hint_slack": "- 提及我并说 \"sessions\" 来列出最近的会话（添加 \"active\" 或 \"page 2\"）",
-  "menu.settings_hint_slack": "- 提及我并说 \"settings\" 来列出/调整运行时设置（agent + MCP）",
+  "menu.sessions_hint_slack": "- `sessions` 列出最近会话（添加 \"active\" 或 \"page 2\"）",
+  "menu.settings_hint_slack": "- `settings` 列出/调整运行时设置（agent + MCP）",
   "menu.examples": "示例：",
 
   // Actions

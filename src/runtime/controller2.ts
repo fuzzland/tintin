@@ -3262,6 +3262,10 @@ export class BotController {
 
     if (ev.type === "message") {
       if (ev.subtype) return;
+      if (typeof ev.bot_id === "string" || ev.bot_profile) {
+        this.logger.debug("[slack] ignore bot message");
+        return;
+      }
       const channelId = ev.channel as string | undefined;
       const userId = ev.user as string | undefined;
       const text = typeof ev.text === "string" ? ev.text.trim() : "";
@@ -4299,10 +4303,10 @@ function buildCloudHelpText(platform: "telegram" | "slack", lang: UserLanguage):
 }
 
 function buildCommandExamples(platform: "telegram" | "slack", lang: UserLanguage): string {
-  const sessions = platform === "telegram" ? "/sessions active" : "@bot sessions active";
-  const sessionsPage = platform === "telegram" ? "/sessions page 2" : "@bot sessions page 2";
-  const settings = platform === "telegram" ? "/settings" : "@bot settings";
-  const prefix = platform === "telegram" ? "/" : "@bot ";
+  const sessions = platform === "telegram" ? "/sessions active" : "sessions active";
+  const sessionsPage = platform === "telegram" ? "/sessions page 2" : "sessions page 2";
+  const settings = platform === "telegram" ? "/settings" : "settings";
+  const prefix = platform === "telegram" ? "/" : "";
   const envSet = `${prefix}settings set mcp.SEARCH http://localhost:3000`;
   const envUnset = `${prefix}settings unset mcp.SEARCH`;
   return [
