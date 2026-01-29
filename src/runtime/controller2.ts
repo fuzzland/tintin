@@ -64,6 +64,7 @@ import {
   enqueuePendingMessage,
   getUserLanguage,
   getSessionBySpace,
+  getLatestSessionForChat,
   getWizardState,
   listSessionsForChat,
   setUserLanguage,
@@ -791,7 +792,7 @@ export class BotController {
       return;
     }
 
-    const session = await getSessionBySpace(this.db, "slack", opts.channelId, opts.spaceId);
+    const session = await getLatestSessionForChat(this.db, "slack", opts.channelId, ["starting", "running"]);
     if (!session) {
       const nextLang = requested ?? getOtherLanguage(fallbackLang);
       await setUserLanguage(this.db, "slack", opts.userId, nextLang);
@@ -3326,6 +3327,7 @@ export class BotController {
 
       const cloudCmd = parseCloudCommand(text);
       if (cloudCmd) {
+        const spaceId = cloudCmd.kind === "action_run" ? `run:${crypto.randomUUID()}` : cmdSpaceId;
         await this.handleCloudCommand({
           platform: "slack",
           command: cloudCmd,
@@ -3333,7 +3335,7 @@ export class BotController {
           workspaceId: teamId,
           userId,
           isDirect: channelId.startsWith("D"),
-          spaceId: cmdSpaceId,
+          spaceId,
         });
         return;
       }
@@ -3341,7 +3343,7 @@ export class BotController {
       const spaceId = channelId;
       if (!spaceId) return;
 
-      const session = await getSessionBySpace(this.db, "slack", channelId, spaceId);
+      const session = await getLatestSessionForChat(this.db, "slack", channelId, ["starting", "running"]);
       if (!session) {
         this.logger.debug(`[slack] no session for space=${spaceId} channel=${channelId}; starting wizard`);
         await this.startSlackWizard(teamId, channelId, userId);

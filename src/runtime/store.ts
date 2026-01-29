@@ -141,6 +141,23 @@ export async function getSessionBySpace(db: Db, platform: string, chatId: string
     .executeTakeFirst();
 }
 
+export async function getLatestSessionForChat(
+  db: Db,
+  platform: string,
+  chatId: string,
+  statuses?: SessionStatus[],
+) {
+  let q = db
+    .selectFrom("sessions")
+    .selectAll()
+    .where("platform", "=", platform)
+    .where("chat_id", "=", chatId);
+  if (statuses && statuses.length > 0) {
+    q = q.where("status", "in", statuses);
+  }
+  return q.orderBy("updated_at", "desc").executeTakeFirst();
+}
+
 export async function countSessionsForChat(db: Db, platform: string, chatId: string) {
   const row = await db
     .selectFrom("sessions")
