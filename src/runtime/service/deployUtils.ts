@@ -10,6 +10,6 @@ export function buildNginxServerBlock(host: string, rootPath: string): string {
 }
 
 export function buildLocalSiteUrl(port: number, sitePath: string): string {
-  const pathNormalized = sitePath.replace(/^\\/+/, "");
+  const pathNormalized = sitePath.replace(/^\/+/, "");
   return `http://localhost:${port}/${pathNormalized}`;
 }
