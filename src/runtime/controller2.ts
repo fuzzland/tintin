@@ -3280,6 +3280,18 @@ export class BotController {
         this.logger.warn(`[slack] rejected message channel=${channelId} user=${userId} reason=${access.reason ?? "-"}`);
         return;
       }
+      const threadTs = typeof ev.thread_ts === "string" ? ev.thread_ts : null;
+      if (threadTs && threadTs !== ev.ts) {
+        const lang = await this.resolveUserLanguage("slack", userId);
+        await this.slack.postMessageDetailed({
+          channel: channelId,
+          thread_ts: threadTs,
+          text: t("slack.thread_unsupported", lang),
+          blocksOnLastChunk: false,
+          workspaceId: teamId,
+        });
+        return;
+      }
 
       const cmdSpaceId = channelId;
 

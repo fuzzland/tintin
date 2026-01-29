@@ -58,6 +58,7 @@ export const en = {
   // Errors
   "error.not_authorized": "Not authorized.",
   "error.generic": "Error: {message}",
+  "slack.thread_unsupported": "Thread replies are not supported. Please send commands in the main DM.",
   "error.path_required": "Path is required.",
   "error.path_not_directory": "Path must be an existing directory.",
   "error.path_not_allowed": "Path is not within allowed roots.",

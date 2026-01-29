@@ -58,6 +58,7 @@ export const zh = {
   // Errors
   "error.not_authorized": "未授权。",
   "error.generic": "错误：{message}",
+  "slack.thread_unsupported": "不支持在 Slack 线程中回复，请在主 DM 里发送命令。",
   "error.path_required": "路径是必需的。",
   "error.path_not_directory": "路径必须是一个存在的目录。",
   "error.path_not_allowed": "路径不在允许的根目录范围内。",
