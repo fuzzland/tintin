@@ -393,6 +393,7 @@ function parseCloudConnectMetadata(metadataJson: string | null): CloudConnectMet
 
 export async function createBotService(deps: BotServiceDeps) {
   const { config, db, logger } = deps;
+  const slackEventStartTs = Math.floor(Date.now() / 1000);
 
   /**
    * Determines whether a session is a Telegram forum topic session.
@@ -3113,6 +3114,14 @@ export async function createBotService(deps: BotServiceDeps) {
           return;
         }
         const evType = body?.event?.type ?? body?.type ?? "?";
+        const eventTime = typeof body?.event_time === "number" ? body.event_time : null;
+        if (eventTime !== null && eventTime < slackEventStartTs) {
+          logger.info(
+            `[slack] drop stale event type=${String(evType)} event_time=${eventTime} started_at=${slackEventStartTs}`,
+          );
+          sendText(res, 200, "ok");
+          return;
+        }
         logger.debug(`[slack] events type=${String(evType)}`);
         queue.enqueue(async () => {
           try {
