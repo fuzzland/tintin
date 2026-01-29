@@ -33,7 +33,8 @@ const normalizeScopes = (scopes: string[]): string[] => {
 
 const buildSlackInstallUrlOptions = (config: AppConfig): InstallURLOptions => {
   if (!config.slack) throw new Error("Slack not configured");
-  const base = config.slack.public_base_url.replace(/\/+$/g, "");
+  const base = config.cloud?.public_base_url?.replace(/\/+$/g, "");
+  if (!base) throw new Error("cloud.public_base_url is required for Slack OAuth");
   const redirectUri = `${base}${SLACK_OAUTH_REDIRECT_PATH}`;
   const scopes = normalizeScopes(config.slack.scopes);
   const userScopes = normalizeScopes(config.slack.user_scopes);

@@ -199,7 +199,6 @@ export interface SlackSection {
   client_id: string;
   client_secret: string;
   state_secret: string;
-  public_base_url: string;
   signing_secret: string;
   events_path: string;
   interactions_path: string;
@@ -1167,7 +1166,6 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
       client_id: typeof (s as any).client_id === "string" ? (s as any).client_id : "",
       client_secret: typeof (s as any).client_secret === "string" ? (s as any).client_secret : "",
       state_secret: typeof (s as any).state_secret === "string" ? (s as any).state_secret : "",
-      public_base_url: typeof (s as any).public_base_url === "string" ? (s as any).public_base_url : "",
       signing_secret: typeof s.signing_secret === "string" ? s.signing_secret : "",
       events_path: normalizeHttpPath(typeof s.events_path === "string" ? s.events_path : "/slack/events", "[slack].events_path"),
       interactions_path: normalizeHttpPath(
@@ -1185,8 +1183,6 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     assert(slackSection.client_id.length > 0, "[slack].client_id is required");
     assert(slackSection.client_secret.length > 0, "[slack].client_secret is required");
     assert(slackSection.state_secret.length > 0, "[slack].state_secret is required");
-    assert(slackSection.public_base_url.length > 0, "[slack].public_base_url is required");
-    slackSection.public_base_url = normalizeUrl(slackSection.public_base_url, "[slack].public_base_url");
     assert(slackSection.signing_secret.length > 0, "[slack].signing_secret is required");
     assert(slackSection.scopes.length > 0, "[slack].scopes must include at least one scope");
     assert(slackSection.message_queue_interval_ms >= 0, "[slack].message_queue_interval_ms must be >= 0");
@@ -1211,6 +1207,9 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     assert(cloud.proxy.shared_secret.length > 0, "[cloud].proxy.shared_secret is required when proxy is enabled");
     cloud.proxy.openai_base_url = normalizeUrl(cloud.proxy.openai_base_url, "[cloud].proxy.openai_base_url");
     cloud.proxy.anthropic_base_url = normalizeUrl(cloud.proxy.anthropic_base_url, "[cloud].proxy.anthropic_base_url");
+  }
+  if (slackSection) {
+    assert(cloud?.public_base_url && cloud.public_base_url.length > 0, "[cloud].public_base_url is required when slack is enabled");
   }
 
   // At least one platform/interface must be enabled
