@@ -878,8 +878,8 @@ export class CloudHandler {
         }
         this.lastRepoListByIdentity.set(identity.id, repos.map((r) => r.id));
         const lines = [t("repos.title", lang)];
-        for (const repo of repos) {
-          lines.push(`- ${repo.name} (${repo.id})`);
+        for (const [index, repo] of repos.entries()) {
+          lines.push(`${index + 1}. ${repo.name} (${repo.id})`);
         }
         lines.push(
           t("repos.select_hint", lang, {
