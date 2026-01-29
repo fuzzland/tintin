@@ -2170,8 +2170,8 @@ export class BotController {
         this.lastRepoListByIdentity.set(identity.id, repos.map((r) => r.id));
         const title = t("repos.title", lang);
         const selectHint = t("repos.select_hint", lang, {
-          select: formatCmd("repo select <number>"),
-          playground: formatCmd("repo select playground"),
+          cmd: formatCmd("repo select <number>"),
+          cmd2: formatCmd("repo select playground"),
         });
         if (repos.length === 0) {
           const lines = [title, playgroundLine, "", selectHint];
