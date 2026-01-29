@@ -91,7 +91,6 @@ scopes = [
 # user_scopes = []
 events_path = "/slack/events"
 interactions_path = "/slack/interactions"
-session_mode = "thread"
 max_chars = 3000
 rate_limit_msgs_per_sec = 1.0
 message_queue_interval_ms = 1000

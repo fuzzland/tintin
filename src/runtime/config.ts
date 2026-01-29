@@ -202,7 +202,6 @@ export interface SlackSection {
   signing_secret: string;
   events_path: string;
   interactions_path: string;
-  session_mode: SlackSessionMode;
   max_chars: number;
   rate_limit_msgs_per_sec: number;
   message_queue_interval_ms: number;
@@ -1160,8 +1159,6 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
         ? [(s as any).user_scopes]
         : [];
     const userScopes = userScopesRaw.filter((v: unknown): v is string => typeof v === "string" && v.trim().length > 0);
-    const mode = typeof s.session_mode === "string" ? s.session_mode : "thread";
-    assert(mode === "thread" || mode === "channel", "[slack].session_mode must be 'thread' or 'channel'");
     slackSection = {
       client_id: typeof (s as any).client_id === "string" ? (s as any).client_id : "",
       client_secret: typeof (s as any).client_secret === "string" ? (s as any).client_secret : "",
@@ -1172,7 +1169,6 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
         typeof s.interactions_path === "string" ? s.interactions_path : "/slack/interactions",
         "[slack].interactions_path",
       ),
-      session_mode: mode,
       max_chars: typeof s.max_chars === "number" ? s.max_chars : 3000,
       rate_limit_msgs_per_sec: typeof s.rate_limit_msgs_per_sec === "number" ? s.rate_limit_msgs_per_sec : 1.0,
       message_queue_interval_ms:

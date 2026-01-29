@@ -937,7 +937,7 @@ export async function createBotService(deps: BotServiceDeps) {
 
     if (opts.pending.platform === "slack") {
       if (!slack) return;
-      const threadTs = config.slack?.session_mode === "thread" ? opts.pending.spaceId : undefined;
+      const threadTs = undefined;
       await slack.postMessageDetailed({
         channel: opts.pending.chatId,
         thread_ts: threadTs,
@@ -969,7 +969,7 @@ export async function createBotService(deps: BotServiceDeps) {
     }
     if (pending.platform === "slack") {
       if (!slack) return;
-      const threadTs = config.slack?.session_mode === "thread" ? pending.spaceId : undefined;
+      const threadTs = undefined;
       await slack.postMessageDetailed({
         channel: pending.chatId,
         thread_ts: threadTs,
@@ -1078,13 +1078,7 @@ export async function createBotService(deps: BotServiceDeps) {
 
     const isTelegram = opts.session.platform === "telegram";
     const workspaceId = opts.session.workspace_id ?? null;
-    const threadId = isTelegram
-      ? opts.telegramTopicSession
-        ? opts.session.space_id
-        : undefined
-      : config.slack?.session_mode === "thread"
-        ? opts.session.space_id
-        : undefined;
+    const threadId = isTelegram ? (opts.telegramTopicSession ? opts.session.space_id : undefined) : undefined;
     const replyToMessageId = isTelegram && !opts.telegramTopicSession ? opts.session.space_id : undefined;
     const uploadOpts = {
       chatId: opts.session.chat_id,
@@ -1212,7 +1206,7 @@ export async function createBotService(deps: BotServiceDeps) {
     if (session.platform === "slack") {
       if (!slack) return;
       const channel = session.chat_id;
-      const threadTs = config.slack?.session_mode === "thread" ? session.space_id : undefined;
+      const threadTs = undefined;
       const workspaceId = session.workspace_id ?? null;
         const markup = buildSessionActionMarkup("slack", {
           sessionId,
@@ -1421,7 +1415,7 @@ export async function createBotService(deps: BotServiceDeps) {
     if (session.platform === "slack") {
       if (!slack) return;
       const channel = session.chat_id;
-      const threadTs = config.slack?.session_mode === "thread" ? session.space_id : undefined;
+      const threadTs = undefined;
       const workspaceId = session.workspace_id ?? null;
       const text = formatPlanMessageSlack({ plan, explanation, lang });
       const existing = planSlackMessageTs.get(sessionId);
@@ -1621,7 +1615,7 @@ export async function createBotService(deps: BotServiceDeps) {
       if (session.platform === "slack") {
         if (!slack) return;
         const channel = session.chat_id;
-        const threadTs = config.slack?.session_mode === "thread" ? session.space_id : undefined;
+        const threadTs = undefined;
         const workspaceId = session.workspace_id ?? null;
         const priority = message.priority ?? "background";
         const markup = buildSessionActionMarkup("slack", {

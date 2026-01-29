@@ -774,7 +774,7 @@ export class BotController {
     const raw = opts.rawArg.trim();
     const cmdHint = opts.isDirect ? "lang en" : "@bot lang en";
     const requested = raw ? normalizeLanguageToken(raw) : null;
-    const threadTs = this.config.slack?.session_mode === "thread" ? opts.spaceId : undefined;
+    const threadTs = undefined;
     const sendText = async (text: string) => {
       await slack.postMessageDetailed({
         channel: opts.channelId,
@@ -1345,7 +1345,7 @@ export class BotController {
       return;
     }
     if (session.platform === "slack") {
-      const threadTs = this.config.slack?.session_mode === "thread" ? session.space_id : undefined;
+      const threadTs = undefined;
       await this.sendPlatformMessage({
         platform: this.slack,
         chatId: session.chat_id,
@@ -3277,14 +3277,7 @@ export class BotController {
         return;
       }
 
-      const cmdSpaceId =
-        this.config.slack?.session_mode === "thread"
-          ? typeof ev.thread_ts === "string"
-            ? ev.thread_ts
-            : typeof ev.ts === "string"
-              ? ev.ts
-              : channelId
-          : channelId;
+      const cmdSpaceId = channelId;
 
       this.logger.debug(
         `[slack] message received workspace=${String(teamId ?? "-")} channel=${channelId} user=${userId} space=${cmdSpaceId} text=${JSON.stringify(
@@ -3331,22 +3324,11 @@ export class BotController {
         return;
       }
 
-      const spaceId =
-        this.config.slack?.session_mode === "thread"
-          ? typeof ev.thread_ts === "string"
-            ? ev.thread_ts
-            : null
-          : channelId;
+      const spaceId = channelId;
       if (!spaceId) return;
 
       const session = await getSessionBySpace(this.db, "slack", channelId, spaceId);
       if (!session) {
-        if (this.config.slack?.session_mode === "thread" && typeof ev.thread_ts === "string") {
-          this.logger.debug(
-            `[slack] no session for thread=${spaceId} channel=${channelId}; ignoring thread message`,
-          );
-          return;
-        }
         this.logger.debug(`[slack] no session for space=${spaceId} channel=${channelId}; starting wizard`);
         await this.startSlackWizard(teamId, channelId, userId);
         return;
