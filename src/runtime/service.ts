@@ -1636,7 +1636,7 @@ export async function createBotService(deps: BotServiceDeps) {
           priority,
           workspaceId,
         });
-        if (posted.lastTs && posted.lastText !== null) {
+        if (isFinal && posted.lastTs && posted.lastText !== null) {
           lastSlackMessage.set(sessionId, { ts: posted.lastTs, text: posted.lastText });
         }
         messageSent = true;
