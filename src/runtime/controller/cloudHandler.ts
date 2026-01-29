@@ -97,11 +97,11 @@ export class CloudHandler {
     const cloud = this.deps.config.cloud;
     const ui = cloud?.ui;
     if (!cloud?.enabled || !ui || !ui.token_secret || !cloud.public_base_url) return null;
-    const base = cloud.public_base_url.replace(/\\/+$/g, \"\");
-    const path = ui.path.startsWith(\"/\") ? ui.path : `/${ui.path}`;
+    const base = cloud.public_base_url.replace(/\/+$/g, "");
+    const path = ui.path.startsWith("/") ? ui.path : `/${ui.path}`;
     const token = isDirect
-      ? createUiToken(ui, { scope: \"identity\", identity_id: identityId })
-      : createUiToken(ui, { scope: \"run\", run_id: runId });
+      ? createUiToken(ui, { scope: "identity", identity_id: identityId })
+      : createUiToken(ui, { scope: "run", run_id: runId });
     return `${base}${path}/${runId}?token=${encodeURIComponent(token)}`;
   }
 
