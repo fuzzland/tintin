@@ -776,20 +776,12 @@ export class BotController {
     const requested = raw ? normalizeLanguageToken(raw) : null;
     const threadTs = this.config.slack?.session_mode === "thread" ? opts.spaceId : undefined;
     const sendText = async (text: string) => {
-      if (opts.isDirect) {
-        await slack.postMessageDetailed({
-          channel: opts.channelId,
-          thread_ts: threadTs,
-          text,
-          blocksOnLastChunk: false,
-        });
-        return;
-      }
-      await slack.postEphemeral({
+      await slack.postMessageDetailed({
         channel: opts.channelId,
-        user: opts.userId,
         text,
         thread_ts: threadTs,
+        blocksOnLastChunk: false,
+        workspaceId: opts.teamId ?? null,
       });
     };
 
