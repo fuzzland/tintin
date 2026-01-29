@@ -316,7 +316,7 @@ export class CloudHandler {
         if (match) return match;
       }
     }
-    return repos.find((r) => r.id === target || r.name === target) ?? null;
+    return repos.find((r) => r.name === target) ?? null;
   }
 
   private findSecretMetaByName(secrets: { name: string; created_at: number; updated_at: number }[], name: string) {
@@ -883,9 +883,10 @@ export class CloudHandler {
           lines.push(`${index + 1}. \`${repo.name}\``);
         }
         lines.push(
-          t("repos.select_hint", lang, {
+          t("repos.select_hint_targets", lang, {
             cmd: formatCmd("repo select <index>"),
-            cmd2: formatCmd("repo select <repo-id>"),
+            cmd2: formatCmd("repo select <repo-name>"),
+            cmd3: formatCmd("repo select 0"),
           }),
         );
         await reply(lines.join("\n"));

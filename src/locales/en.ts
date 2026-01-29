@@ -256,6 +256,7 @@ export const en = {
   // Repos
   "repos.title": "Repositories:",
   "repos.select_hint": "Select with {cmd} (or {cmd2}).",
+  "repos.select_hint_targets": "Select with {cmd} or {cmd2}. Playground: {cmd3}.",
   "repos.playground_line": "0. {label}",
   "repo.playground_label": "Playground",
   "repo.active_set_playground": "Active repo set to {label}.",

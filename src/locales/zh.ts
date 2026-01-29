@@ -256,6 +256,7 @@ export const zh = {
   // Repos
   "repos.title": "仓库列表：",
   "repos.select_hint": "使用 {cmd} 选择（或 {cmd2}）。",
+  "repos.select_hint_targets": "使用 {cmd} 或 {cmd2} 选择。Playground：{cmd3}。",
   "repos.playground_line": "0. {label}",
   "repo.playground_label": "Playground",
   "repo.active_set_playground": "已将活动仓库设置为 {label}。",
