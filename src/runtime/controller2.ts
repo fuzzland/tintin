@@ -1391,12 +1391,10 @@ export class BotController {
     const isDm = opts.chatId.startsWith("D");
     const ephemeral = opts.ephemeral ?? !isDm;
     if (ephemeral && !isDm) {
-      const blocks = markup.type === "blocks" ? (markup.payload as unknown[]) : undefined;
       await this.slack.postEphemeral({
         channel: opts.chatId,
         user: opts.userId,
         text: opts.text,
-        blocks,
         workspaceId: opts.workspaceId,
       });
       return;
