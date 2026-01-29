@@ -3341,6 +3341,12 @@ export class BotController {
 
       const session = await getSessionBySpace(this.db, "slack", channelId, spaceId);
       if (!session) {
+        if (this.config.slack?.session_mode === "thread" && typeof ev.thread_ts === "string") {
+          this.logger.debug(
+            `[slack] no session for thread=${spaceId} channel=${channelId}; ignoring thread message`,
+          );
+          return;
+        }
         this.logger.debug(`[slack] no session for space=${spaceId} channel=${channelId}; starting wizard`);
         await this.startSlackWizard(teamId, channelId, userId);
         return;
