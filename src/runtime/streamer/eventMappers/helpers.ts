@@ -39,6 +39,32 @@ export function truncateLogLine(text: string, maxLen: number): string {
   return `${text.slice(0, limit)}...`;
 }
 
+export function formatCommitJsonMessage(raw: string, lang: UserLanguage): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  let candidate = trimmed;
+  const fence = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  if (fence && fence[1]) candidate = fence[1].trim();
+  const jsonMatch = candidate.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return null;
+  try {
+    const parsed = JSON.parse(jsonMatch[0]);
+    const commitMessage = String(parsed.commit_message ?? parsed.commitMessage ?? "").trim();
+    const branchName = String(parsed.branch_name ?? parsed.branchName ?? "").trim();
+    const summary = String(parsed.summary ?? parsed.description ?? "").trim();
+    if (!commitMessage || !branchName) return null;
+    const summaryLine = summary ? summary : t("commit.proposal.summary_empty", lang);
+    return [
+      t("commit.proposal.title", lang),
+      t("commit.proposal.branch", lang, { branch: branchName }),
+      t("commit.proposal.commit", lang, { message: commitMessage }),
+      t("commit.proposal.summary", lang, { summary: summaryLine }),
+    ].join("\n");
+  } catch {
+    return null;
+  }
+}
+
 export function normalizeMessageVerbosity(value: unknown): MessageVerbosity {
   if (value === 1) return 1;
   if (value === 2) return 2;

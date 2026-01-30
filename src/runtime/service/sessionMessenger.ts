@@ -9,6 +9,7 @@ import type { SessionRow } from "../store.js";
 import type { WebSocketManager } from "../websocket/manager.js";
 import type { ServerMessage } from "../websocket/types.js";
 import { t, type UserLanguage } from "../../locales/index.js";
+import { mergeTextIntoSlackBlocks } from "../message/slack.js";
 
 type SessionLanguageResolver = (session: { language?: string | null }) => UserLanguage;
 
@@ -337,12 +338,7 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
   };
 
   const buildSlackBlocksWithText = (text: string, blocks?: unknown[]): unknown[] | undefined => {
-    if (!blocks || blocks.length === 0) return blocks;
-    const trimmed = text.trim();
-    if (!trimmed) return blocks;
-    const maxLen = 3000;
-    const sectionText = trimmed.length > maxLen ? `${trimmed.slice(0, maxLen - 3)}...` : trimmed;
-    return [{ type: "section", text: { type: "mrkdwn", text: sectionText } }, ...blocks];
+    return mergeTextIntoSlackBlocks(text, blocks);
   };
 
   const normalizePlanStatus = (raw: string): "pending" | "in_progress" | "completed" => {
@@ -715,21 +711,6 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
           currentLang: lang,
         });
         const blocks = buildSlackBlocksWithText(text, deps.getSlackBlocks(markup));
-        if (isFinal) {
-          const last = lastSlackMessage.get(sessionId);
-          if (last) {
-            try {
-              await deps.slack.updateMessage({ channel, ts: last.ts, text, blocks, workspaceId });
-              lastSlackMessage.set(sessionId, { ts: last.ts, text });
-              deps.logger.debug(`[session][slack] updated final message session=${sessionId} ts=${last.ts}`);
-              messageSent = true;
-              return;
-            } catch (e) {
-              deps.logger.warn(`[session][slack] update failed session=${sessionId}: ${String(e)}`);
-              // Fall back to a new message.
-            }
-          }
-        }
         try {
           const posted = await deps.slack.postMessageDetailed({
             channel,

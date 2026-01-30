@@ -6,6 +6,7 @@ import {
   normalizeMessageVerbosity,
   formatTitledText,
   normalizeAgentMessage,
+  formatCommitJsonMessage,
   extractMcpResultText,
   extractCommandFromToolArgs,
   truncateJson,
@@ -140,7 +141,9 @@ export function mapCodexEventToFragments(
     const detailsType = typeof (item as { type?: unknown }).type === "string" ? (item as { type: string }).type : "";
     if (detailsType === "agent_message") {
       const text = normalizeAgentMessage(item);
-      return text ? [{ kind: "text", text, separate: true }] : [];
+      const formatted = text ? formatCommitJsonMessage(text, lang) : null;
+      const output = formatted ?? text;
+      return output ? [{ kind: "text", text: output, separate: true }] : [];
     }
     if (detailsType === "reasoning") {
       if (!includeReasoning) return [];

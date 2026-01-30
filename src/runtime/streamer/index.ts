@@ -17,6 +17,7 @@ export {
   extractPlaywrightInlineScreenshotFromClaudeToolResult,
   type ExtractedScreenshot,
 } from "./PlaywrightScreenshotManager.js";
+export { JsonlStreamer } from "./JsonlStreamer.js";
 
 export type {
   StreamFragment,

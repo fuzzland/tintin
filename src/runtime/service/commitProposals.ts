@@ -8,6 +8,7 @@ import type { SlackClient } from "../platform/slack.js";
 import type { CommitProposal, CommitProposalStore } from "../controller/types.js";
 import type { InteractiveMarkup } from "../platform/base.js";
 import { isUserLanguage, t, type UserLanguage } from "../../locales/index.js";
+import { mergeTextIntoSlackBlocks } from "../message/slack.js";
 
 export type PendingCommitProposal = {
   sessionId: string;
@@ -183,7 +184,10 @@ export function createCommitProposalRuntime(deps: {
         channel: opts.pending.chatId,
         thread_ts: threadTs,
         text: opts.text,
-        blocks: deps.getSlackBlocks(buildCommitProposalMarkup("slack", opts.proposalId, opts.lang)),
+        blocks: mergeTextIntoSlackBlocks(
+          opts.text,
+          deps.getSlackBlocks(buildCommitProposalMarkup("slack", opts.proposalId, opts.lang)),
+        ),
         blocksOnLastChunk: false,
         priority: "user",
         workspaceId: opts.pending.workspaceId,
@@ -215,6 +219,7 @@ export function createCommitProposalRuntime(deps: {
         channel: pending.chatId,
         thread_ts: threadTs,
         text,
+        blocks: mergeTextIntoSlackBlocks(text, undefined),
         blocksOnLastChunk: false,
         priority: "user",
         workspaceId: pending.workspaceId,

@@ -15,6 +15,7 @@ import type { SessionRow } from "./store.js";
 import { isUserLanguage, t, type UserLanguage } from "../locales/index.js";
 import { telegramChatIdMatchesAllowlist } from "./controller/utils.js";
 import type { CommitProposalStore } from "./controller/types.js";
+import { mergeTextIntoSlackBlocks } from "./message/slack.js";
 import { TelegramHandler } from "./controller/telegramHandler.js";
 import { SlackHandler } from "./controller/slackHandler.js";
 import { CloudHandler } from "./controller/cloudHandler.js";
@@ -266,15 +267,10 @@ export class BotController {
     if (opts.platform.platformName === "slack") {
       let markup = opts.markup;
       if (markup?.type === "blocks" && Array.isArray(markup.payload)) {
-        const trimmed = opts.text.trim();
-        if (trimmed.length > 0) {
-          const maxLen = 3000;
-          const sectionText = trimmed.length > maxLen ? `${trimmed.slice(0, maxLen - 3)}...` : trimmed;
-          markup = {
-            type: "blocks",
-            payload: [{ type: "section", text: { type: "mrkdwn", text: sectionText } }, ...markup.payload],
-          };
-        }
+        markup = {
+          type: "blocks",
+          payload: mergeTextIntoSlackBlocks(opts.text, markup.payload),
+        };
       }
       await (opts.platform as SlackClient).sendMessage({
         chatId: opts.chatId,

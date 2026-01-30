@@ -22,6 +22,7 @@ import {
   formatTurnAbortReason,
   formatEnteredReview,
   formatExitedReview,
+  formatCommitJsonMessage,
 } from "./helpers.js";
 
 /**
@@ -72,7 +73,8 @@ export function mapEventMsgPayload(
       return [];
     case "agent_message": {
       const msg = normalizeAgentMessage(payload);
-      return text(msg, false, true);
+      const formatted = msg ? formatCommitJsonMessage(msg, lang) : null;
+      return text(formatted ?? msg, false, true);
     }
     case "user_message":
       return includeUserMessages

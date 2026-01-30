@@ -14,6 +14,7 @@ export {
   formatTitledText,
   truncateJson,
   truncateLogLine,
+  formatCommitJsonMessage,
   formatToolPairMessage,
   normalizeAgentMessage,
   extractMcpResultText,

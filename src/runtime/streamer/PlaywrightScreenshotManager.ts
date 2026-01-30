@@ -63,6 +63,42 @@ export class PlaywrightScreenshotManager {
   }
 
   /**
+   * Clear all tracked state for a session.
+   */
+  clear(sessionId: string): void {
+    this.playwrightCallIds.delete(sessionId);
+    this.playwrightCapturedCallIds.delete(sessionId);
+    this.playwrightScreenshotPendingTurn.delete(sessionId);
+    this.playwrightScreenshotSendingTurn.delete(sessionId);
+    this.playwrightScreenshotSentTurn.delete(sessionId);
+    this.playwrightCloudSessions.delete(sessionId);
+  }
+
+  /**
+   * Clear all sessions except those in the keep set.
+   */
+  clearExcept(keepIds: Set<string>): void {
+    for (const id of this.playwrightCallIds.keys()) {
+      if (!keepIds.has(id)) this.clear(id);
+    }
+    for (const id of this.playwrightCapturedCallIds.keys()) {
+      if (!keepIds.has(id)) this.clear(id);
+    }
+    for (const id of this.playwrightScreenshotPendingTurn.keys()) {
+      if (!keepIds.has(id)) this.clear(id);
+    }
+    for (const id of this.playwrightScreenshotSendingTurn.keys()) {
+      if (!keepIds.has(id)) this.clear(id);
+    }
+    for (const id of this.playwrightScreenshotSentTurn.keys()) {
+      if (!keepIds.has(id)) this.clear(id);
+    }
+    for (const id of this.playwrightCloudSessions.keys()) {
+      if (!keepIds.has(id)) this.clear(id);
+    }
+  }
+
+  /**
    * Remember a Playwright tool call by its call ID.
    */
   rememberPlaywrightCall(sessionId: string, callId: string, tool: string): void {
@@ -161,13 +197,13 @@ export class PlaywrightScreenshotManager {
   /**
    * Send a pending screenshot if one is queued for this turn.
    */
-  async maybeSendPendingScreenshot(sessionId: string, lang: UserLanguage, turnKey: number | null): Promise<void> {
-    if (!this.playwrightMcp) return;
-    if (this.playwrightCloudSessions.has(sessionId)) return;
-    if (turnKey === null) return;
-    if (this.playwrightScreenshotSentTurn.get(sessionId) === turnKey) return;
-    if (this.playwrightScreenshotSendingTurn.get(sessionId) === turnKey) return;
-    if (this.playwrightScreenshotPendingTurn.get(sessionId) !== turnKey) return;
+  async maybeSendPendingScreenshot(sessionId: string, lang: UserLanguage, turnKey: number | null): Promise<boolean> {
+    if (!this.playwrightMcp) return false;
+    if (this.playwrightCloudSessions.has(sessionId)) return false;
+    if (turnKey === null) return false;
+    if (this.playwrightScreenshotSentTurn.get(sessionId) === turnKey) return false;
+    if (this.playwrightScreenshotSendingTurn.get(sessionId) === turnKey) return false;
+    if (this.playwrightScreenshotPendingTurn.get(sessionId) !== turnKey) return false;
 
     this.playwrightScreenshotSendingTurn.set(sessionId, turnKey);
     try {
@@ -175,7 +211,9 @@ export class PlaywrightScreenshotManager {
       if (ok) {
         this.playwrightScreenshotSentTurn.set(sessionId, turnKey);
         this.playwrightScreenshotPendingTurn.delete(sessionId);
+        return true;
       }
+      return false;
     } finally {
       this.playwrightScreenshotSendingTurn.delete(sessionId);
     }
@@ -214,41 +252,6 @@ export class PlaywrightScreenshotManager {
     }
   }
 
-  /**
-   * Clear all state for a session.
-   */
-  clear(sessionId: string): void {
-    this.playwrightCallIds.delete(sessionId);
-    this.playwrightCapturedCallIds.delete(sessionId);
-    this.playwrightScreenshotPendingTurn.delete(sessionId);
-    this.playwrightScreenshotSendingTurn.delete(sessionId);
-    this.playwrightScreenshotSentTurn.delete(sessionId);
-    this.playwrightCloudSessions.delete(sessionId);
-  }
-
-  /**
-   * Clear all sessions except those in the keep set.
-   */
-  clearExcept(keepIds: Set<string>): void {
-    for (const id of this.playwrightCallIds.keys()) {
-      if (!keepIds.has(id)) this.clear(id);
-    }
-    for (const id of this.playwrightCapturedCallIds.keys()) {
-      if (!keepIds.has(id)) this.clear(id);
-    }
-    for (const id of this.playwrightScreenshotPendingTurn.keys()) {
-      if (!keepIds.has(id)) this.clear(id);
-    }
-    for (const id of this.playwrightScreenshotSendingTurn.keys()) {
-      if (!keepIds.has(id)) this.clear(id);
-    }
-    for (const id of this.playwrightScreenshotSentTurn.keys()) {
-      if (!keepIds.has(id)) this.clear(id);
-    }
-    for (const id of this.playwrightCloudSessions) {
-      if (!keepIds.has(id)) this.playwrightCloudSessions.delete(id);
-    }
-  }
 }
 
 // Helper functions for extracting screenshots from tool output
