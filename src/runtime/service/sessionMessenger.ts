@@ -185,7 +185,8 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
       const chatId = Number(opts.session.chat_id);
       const messageId = Number(result.messageId);
       if (Number.isFinite(chatId) && Number.isFinite(messageId)) {
-        trackTelegramMessage(opts.sessionId, chatId, messageId);
+        // Do not update last text message pointer for media messages.
+        telegramMessageToSession.set(telegramMessageKey(chatId, messageId), opts.sessionId);
       }
     }
   };
@@ -428,7 +429,8 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
         );
         if (sent) {
           planTelegramMessageId.set(sessionId, sent.message_id);
-          trackTelegramMessage(sessionId, chatId, sent.message_id);
+          // Do not update last text message pointer for plan updates.
+          telegramMessageToSession.set(telegramMessageKey(chatId, sent.message_id), sessionId);
         }
       } catch {
         // Ignore plan send failures.
