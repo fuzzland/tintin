@@ -44,6 +44,9 @@ export class JsonlStreamer {
   private readonly playwrightScreenshotSendingTurn = new Map<string, number>();
   private readonly playwrightScreenshotSentTurn = new Map<string, number>();
   private readonly playwrightCloudSessions = new Set<string>();
+  private readonly lastTurnKeySeen = new Map<string, number>();
+  private readonly turnHasUserFacingOutput = new Map<string, number>();
+  private readonly lastTurnFallbackText = new Map<string, { turnKey: number; text: string }>();
   private readonly pendingUserPriority = new Map<string, number>();
   private readonly lastUserMessageAtSeen = new Map<string, number | null>();
   private readonly chatgptAuthWarned = new Set<string>();
@@ -137,6 +140,7 @@ export class JsonlStreamer {
       if (isCloudProjectId(session.project_id)) this.playwrightCloudSessions.add(session.id);
       else this.playwrightCloudSessions.delete(session.id);
       this.noteUserActivity(session.id, session.last_user_message_at, session.created_at);
+      this.ensureTurnState(session.id);
       if (!session.codex_session_id) continue;
       const messageVerbosity = await this.resolveMessageVerbosity(session);
       const adapter = getAgentAdapter(session.agent);
@@ -205,6 +209,8 @@ export class JsonlStreamer {
             if (shellCommand) {
               await this.maybeWarnSearchFallback(session, shellCommand);
             }
+            const fallbackText = this.extractFallbackText(obj, lang);
+            if (fallbackText) this.recordFallbackText(session.id, fallbackText);
 
             const planFragment = this.parsePlanUpdate(obj, session.id);
             if (planFragment) {
@@ -241,6 +247,7 @@ export class JsonlStreamer {
               explanation: frag.explanation,
               priority: "user",
             });
+            this.markUserFacingOutput(session.id);
             continue;
           }
 
@@ -272,11 +279,22 @@ export class JsonlStreamer {
               maxMessageChars: maxChars,
             });
             await this.sendToSession(session.id, { text: msg, priority: this.takeSendPriority(session.id) });
+            this.markUserFacingOutput(session.id);
           }
         }
       }
 
       if (finalize) {
+        const turnKey = this.currentTurnKey(session.id);
+        const hasUserOutput = turnKey !== null && this.turnHasUserFacingOutput.get(session.id) === turnKey;
+        const buffered = (this.buffers.get(session.id)?.text ?? "").trim().length > 0;
+        if (!hasUserOutput && !buffered && turnKey !== null) {
+          const fallback = this.lastTurnFallbackText.get(session.id);
+          if (fallback && fallback.turnKey === turnKey && fallback.text.trim().length > 0) {
+            await this.sendToSession(session.id, { text: fallback.text.trim(), priority: "user" });
+            this.markUserFacingOutput(session.id);
+          }
+        }
         await this.maybeSendPendingPlaywrightScreenshot(session.id, lang);
         await this.flushIfNeeded(session.id, true, { final: true });
       } else {
@@ -299,6 +317,67 @@ export class JsonlStreamer {
     this.buffers.set(sessionId, { ...s, text: next });
   }
 
+  private ensureTurnState(sessionId: string) {
+    const turnKey = this.currentTurnKey(sessionId);
+    if (turnKey === null) return;
+    const prev = this.lastTurnKeySeen.get(sessionId);
+    if (prev === turnKey) return;
+    this.lastTurnKeySeen.set(sessionId, turnKey);
+    this.turnHasUserFacingOutput.delete(sessionId);
+    this.lastTurnFallbackText.delete(sessionId);
+  }
+
+  private markUserFacingOutput(sessionId: string) {
+    const turnKey = this.currentTurnKey(sessionId);
+    if (turnKey === null) return;
+    this.turnHasUserFacingOutput.set(sessionId, turnKey);
+  }
+
+  private recordFallbackText(sessionId: string, text: string) {
+    const turnKey = this.currentTurnKey(sessionId);
+    if (turnKey === null) return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    this.lastTurnFallbackText.set(sessionId, { turnKey, text: truncateLogLine(trimmed, 4000) });
+  }
+
+  private extractFallbackText(obj: unknown, lang: UserLanguage): string | null {
+    if (!obj || typeof obj !== "object") return null;
+    const type = stringOrEmpty((obj as { type?: unknown }).type);
+    const payload = (obj as { payload?: unknown }).payload;
+
+    if (type === "event_msg" && payload && typeof payload === "object") {
+      const evType = stringOrEmpty((payload as { type?: unknown }).type);
+      if (evType === "agent_message") {
+        return normalizeAgentMessage(payload);
+      }
+    }
+
+    if (typeof type === "string" && type.startsWith("item.") && (obj as { item?: unknown }).item) {
+      const item = (obj as { item: unknown }).item;
+      if (!item || typeof item !== "object") return null;
+      const detailsType = stringOrEmpty((item as { type?: unknown }).type);
+      if (detailsType === "agent_message") {
+        return normalizeAgentMessage(item);
+      }
+      if (detailsType === "command_execution") {
+        const output = stringOrEmpty((item as { aggregated_output?: unknown }).aggregated_output);
+        if (output) return output;
+        const exit = numberOrNull((item as { exit_code?: unknown }).exit_code);
+        if (exit !== null) return t("streamer.command_exit", lang, { code: exit });
+      }
+      if (detailsType === "mcp_tool_call") {
+        const output = extractMcpResultText((item as { result?: unknown }).result);
+        const err = stringOrEmpty((item as { error?: unknown }).error);
+        if (output && err) return `${output}\n${t("streamer.error", lang)}: ${err}`;
+        if (output) return output;
+        if (err) return `${t("streamer.error", lang)}: ${err}`;
+      }
+    }
+
+    return null;
+  }
+
   private async maybeHandleChatgptAuthError(session: SessionRow, obj: Record<string, unknown>) {
     if (this.chatgptAuthWarned.has(session.id)) return;
     const message = stringOrEmpty((obj as { message?: unknown }).message) || stringOrEmpty((obj as { error?: unknown }).error);
@@ -318,6 +397,7 @@ export class JsonlStreamer {
         text: t("chatgpt.auth_failed", lang, { cmd: `\`${cmd}\`` }),
         priority: "user",
       });
+      this.markUserFacingOutput(session.id);
     } catch {
       /* ignore */
     }
@@ -338,6 +418,7 @@ export class JsonlStreamer {
         text: t("search.policy_warning", lang),
         priority: "user",
       });
+      this.markUserFacingOutput(session.id);
     } catch {
       /* ignore */
     }
@@ -556,6 +637,7 @@ export class JsonlStreamer {
           caption,
           priority: "user",
         });
+        this.markUserFacingOutput(sessionId);
         return true;
       }
     } catch (e) {
@@ -618,6 +700,7 @@ export class JsonlStreamer {
         caption: t("image.playwright_screenshot", lang),
         priority: "user",
       });
+      this.markUserFacingOutput(sessionId);
       this.playwrightScreenshotSentTurn.set(sessionId, turnKey);
       this.playwrightScreenshotPendingTurn.delete(sessionId);
       return true;
@@ -647,6 +730,7 @@ export class JsonlStreamer {
       final: isFinal,
       priority: isFinal ? "user" : this.takeSendPriority(sessionId),
     });
+    this.markUserFacingOutput(sessionId);
   }
 
   private noteUserActivity(sessionId: string, lastUserMessageAt: number | null, createdAt: number) {
@@ -688,6 +772,9 @@ export class JsonlStreamer {
       this.playwrightScreenshotSendingTurn.delete(id);
       this.playwrightScreenshotSentTurn.delete(id);
       this.playwrightCloudSessions.delete(id);
+      this.lastTurnKeySeen.delete(id);
+      this.turnHasUserFacingOutput.delete(id);
+      this.lastTurnFallbackText.delete(id);
     }
   }
 
