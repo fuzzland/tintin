@@ -40,6 +40,7 @@ export function createCommitProposalRuntime(deps: {
   getSlackBlocks: (markup?: InteractiveMarkup) => unknown[] | undefined;
 }) : CommitProposalRuntime {
   const pendingCommitProposals = new Map<string, PendingCommitProposal>();
+  const suppressCommitProposalOutputForSession = new Set<string>();
   const suppressFinalizeForSession = new Set<string>();
   const commitProposals = new Map<string, CommitProposal>();
 
@@ -300,6 +301,13 @@ export function createCommitProposalRuntime(deps: {
   };
 
   const maybeHandleCommitProposalMessage = async (sessionId: string, message: SessionMessage) => {
+    if (suppressCommitProposalOutputForSession.has(sessionId)) {
+      if (message.type === "finalize") {
+        suppressCommitProposalOutputForSession.delete(sessionId);
+        suppressFinalizeForSession.add(sessionId);
+      }
+      return true;
+    }
     const pending = pendingCommitProposals.get(sessionId);
     if (!pending) return false;
     if (message.type === "finalize") return false;
@@ -320,6 +328,7 @@ export function createCommitProposalRuntime(deps: {
       }
       if (parsed) {
         pendingCommitProposals.delete(sessionId);
+        suppressCommitProposalOutputForSession.add(sessionId);
         suppressFinalizeForSession.add(sessionId);
         const proposal: CommitProposal = {
           id: crypto.randomUUID(),

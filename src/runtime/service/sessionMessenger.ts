@@ -222,50 +222,8 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
         currentLang: lang,
       });
       const replyMarkup = deps.getTelegramReplyMarkup(markup);
-      const sendFallback = async () => {
-        if (Number.isFinite(space)) {
-          try {
-            const sent = await deps.telegram!.sendMessageSingleStrict(
-              deps.isTelegramTopicSession(session)
-                ? {
-                    chatId,
-                    messageThreadId: space,
-                    text,
-                    replyMarkup,
-                    priority: "user",
-                    forcePrimary: true,
-                  }
-                : {
-                    chatId,
-                    replyToMessageId: space,
-                    text,
-                    replyMarkup,
-                    priority: "user",
-                    forcePrimary: true,
-                  },
-            );
-            if (sent) trackTelegramMessage(sessionId, chatId, sent.message_id);
-            return;
-          } catch {
-            // Fall through to a plain message.
-          }
-        }
-        const sent = await deps.telegram!.sendMessage({
-          chatId,
-          text,
-          replyMarkup,
-          priority: "user",
-          forcePrimary: true,
-        });
-        if (sent) trackTelegramMessage(sessionId, chatId, sent.message_id);
-      };
       const messageId = lastTelegramMessageId.get(sessionId);
       if (!messageId) {
-        try {
-          await sendFallback();
-        } catch {
-          // Ignore failures.
-        }
         return;
       }
       try {
@@ -276,11 +234,7 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
           priority: "user",
         });
       } catch {
-        try {
-          await sendFallback();
-        } catch {
-          // Ignore failures.
-        }
+        return;
       }
       return;
     }
@@ -305,25 +259,8 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
           await deps.slack.updateMessage({ channel, ts: last.ts, text: last.text, blocks, workspaceId });
           return;
         } catch {
-          // Fall through to a new message.
+          return;
         }
-      }
-      const blocks = buildSlackBlocksWithText(text, deps.getSlackBlocks(markup));
-      try {
-        const posted = await deps.slack.postMessageDetailed({
-          channel,
-          thread_ts: threadTs,
-          text,
-          blocks,
-          blocksOnLastChunk: false,
-          priority: "user",
-          workspaceId,
-        });
-        if (posted.lastTs && posted.lastText !== null) {
-          lastSlackMessage.set(sessionId, { ts: posted.lastTs, text: posted.lastText });
-        }
-      } catch {
-        // Ignore failures.
       }
     }
   };
