@@ -144,10 +144,13 @@ export class JsonlStreamer {
         workspaceId: session.workspace_id ?? null,
         userId: session.created_by_user_id,
       });
-      if (!identity || identity.message_verbosity === null || identity.message_verbosity === undefined) return fallback;
-      return normalizeMessageVerbosity(identity.message_verbosity);
+      if (!identity || identity.message_verbosity === null || identity.message_verbosity === undefined) {
+        return session.platform === "slack" ? Math.max(fallback, 3) as MessageVerbosity : fallback;
+      }
+      const resolved = normalizeMessageVerbosity(identity.message_verbosity);
+      return session.platform === "slack" ? Math.max(resolved, 3) as MessageVerbosity : resolved;
     } catch {
-      return fallback;
+      return session.platform === "slack" ? Math.max(fallback, 3) as MessageVerbosity : fallback;
     }
   }
 

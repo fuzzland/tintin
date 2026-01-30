@@ -117,6 +117,52 @@ export function createCommitProposalRuntime(deps: {
     }
   };
 
+  const parseFormattedCommitProposal = (
+    raw: string,
+    lang: UserLanguage,
+  ): { commitMessage: string; branchName: string; summary: string } | null => {
+    const lines = raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (lines.length === 0) return null;
+
+    const normalize = (value: string) =>
+      value
+        .replace(/^[*_~`>\s]+/g, "")
+        .replace(/[*_~`]+$/g, "")
+        .trim();
+
+    const branchPrefix = normalize(t("commit.proposal.branch", lang, { branch: "" }));
+    const commitPrefix = normalize(t("commit.proposal.commit", lang, { message: "" }));
+    const summaryPrefix = normalize(t("commit.proposal.summary", lang, { summary: "" }));
+    const emptySummary = normalize(t("commit.proposal.summary_empty", lang));
+
+    let branchName = "";
+    let commitMessage = "";
+    let summary = "";
+
+    for (const line of lines) {
+      const normalized = normalize(line);
+      if (!branchName && normalized.startsWith(branchPrefix)) {
+        branchName = normalized.slice(branchPrefix.length).trim();
+        continue;
+      }
+      if (!commitMessage && normalized.startsWith(commitPrefix)) {
+        commitMessage = normalized.slice(commitPrefix.length).trim();
+        continue;
+      }
+      if (!summary && normalized.startsWith(summaryPrefix)) {
+        summary = normalized.slice(summaryPrefix.length).trim();
+        continue;
+      }
+    }
+
+    if (summary === emptySummary) summary = "";
+    if (!branchName || !commitMessage) return null;
+    return { commitMessage, branchName, summary };
+  };
+
   const resolvePendingLanguage = async (pending: PendingCommitProposal): Promise<UserLanguage> => {
     const row = await deps.db
       .selectFrom("sessions")
@@ -267,7 +313,11 @@ export function createCommitProposalRuntime(deps: {
         await sendCommitProposalError(pending, "commit.proposal.output_too_large");
         return true;
       }
-      const parsed = extractCommitProposalPayload(pending.buffer);
+      let parsed = extractCommitProposalPayload(pending.buffer);
+      const lang = await resolvePendingLanguage(pending);
+      if (!parsed) {
+        parsed = parseFormattedCommitProposal(pending.buffer, lang);
+      }
       if (parsed) {
         pendingCommitProposals.delete(sessionId);
         suppressFinalizeForSession.add(sessionId);
@@ -285,7 +335,6 @@ export function createCommitProposalRuntime(deps: {
           createdAt: Date.now(),
         };
         commitProposals.set(proposal.id, proposal);
-        const lang = await resolvePendingLanguage(pending);
         const textOut = formatCommitProposalText(proposal, lang);
         await sendCommitProposalMessage({ pending, text: textOut, proposalId: proposal.id, lang });
         return true;
