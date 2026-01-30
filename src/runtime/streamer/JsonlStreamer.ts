@@ -145,12 +145,12 @@ export class JsonlStreamer {
         userId: session.created_by_user_id,
       });
       if (!identity || identity.message_verbosity === null || identity.message_verbosity === undefined) {
-        return session.platform === "slack" ? Math.max(fallback, 3) as MessageVerbosity : fallback;
+        return fallback;
       }
       const resolved = normalizeMessageVerbosity(identity.message_verbosity);
-      return session.platform === "slack" ? Math.max(resolved, 3) as MessageVerbosity : resolved;
+      return resolved;
     } catch {
-      return session.platform === "slack" ? Math.max(fallback, 3) as MessageVerbosity : fallback;
+      return fallback;
     }
   }
 
