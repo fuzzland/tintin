@@ -711,26 +711,55 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
             try {
               await deps.slack.updateMessage({ channel, ts: last.ts, text, blocks, workspaceId });
               lastSlackMessage.set(sessionId, { ts: last.ts, text });
+              deps.logger.debug(`[session][slack] updated final message session=${sessionId} ts=${last.ts}`);
               messageSent = true;
               return;
-            } catch {
+            } catch (e) {
+              deps.logger.warn(`[session][slack] update failed session=${sessionId}: ${String(e)}`);
               // Fall back to a new message.
             }
           }
         }
-        const posted = await deps.slack.postMessageDetailed({
-          channel,
-          thread_ts: threadTs,
-          text,
-          blocks,
-          blocksOnLastChunk: false,
-          priority,
-          workspaceId,
-        });
-        if (posted.lastTs && posted.lastText !== null) {
-          lastSlackMessage.set(sessionId, { ts: posted.lastTs, text: posted.lastText });
+        try {
+          const posted = await deps.slack.postMessageDetailed({
+            channel,
+            thread_ts: threadTs,
+            text,
+            blocks,
+            blocksOnLastChunk: false,
+            priority,
+            workspaceId,
+          });
+          if (posted.lastTs && posted.lastText !== null) {
+            lastSlackMessage.set(sessionId, { ts: posted.lastTs, text: posted.lastText });
+          }
+          deps.logger.debug(`[session][slack] posted message session=${sessionId} ts=${posted.lastTs ?? "?"}`);
+          messageSent = true;
+        } catch (e) {
+          deps.logger.warn(`[session][slack] post failed session=${sessionId}: ${String(e)}`);
+          if (blocks) {
+            try {
+              const posted = await deps.slack.postMessageDetailed({
+                channel,
+                thread_ts: threadTs,
+                text,
+                blocks: undefined,
+                blocksOnLastChunk: false,
+                priority,
+                workspaceId,
+              });
+              if (posted.lastTs && posted.lastText !== null) {
+                lastSlackMessage.set(sessionId, { ts: posted.lastTs, text: posted.lastText });
+              }
+              deps.logger.debug(
+                `[session][slack] posted message without blocks session=${sessionId} ts=${posted.lastTs ?? "?"}`,
+              );
+              messageSent = true;
+            } catch (err) {
+              deps.logger.error(`[session][slack] post without blocks failed session=${sessionId}: ${String(err)}`);
+            }
+          }
         }
-        messageSent = true;
       }
     } finally {
       if (claimedFirst) {
