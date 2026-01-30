@@ -264,12 +264,24 @@ export class BotController {
           : undefined
         : opts.replyToMessageId;
     if (opts.platform.platformName === "slack") {
+      let markup = opts.markup;
+      if (markup?.type === "blocks" && Array.isArray(markup.payload)) {
+        const trimmed = opts.text.trim();
+        if (trimmed.length > 0) {
+          const maxLen = 3000;
+          const sectionText = trimmed.length > maxLen ? `${trimmed.slice(0, maxLen - 3)}...` : trimmed;
+          markup = {
+            type: "blocks",
+            payload: [{ type: "section", text: { type: "mrkdwn", text: sectionText } }, ...markup.payload],
+          };
+        }
+      }
       await (opts.platform as SlackClient).sendMessage({
         chatId: opts.chatId,
         text: opts.text,
         threadId: undefined,
         replyToMessageId,
-        markup: opts.markup,
+        markup,
         priority,
         workspaceId: opts.workspaceId,
       });

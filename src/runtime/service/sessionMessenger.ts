@@ -297,9 +297,9 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
         includeStopSandbox: !actionsDisabled && isCloudSession,
         currentLang: lang,
       });
-      const blocks = buildSlackBlocksWithText(text, deps.getSlackBlocks(markup));
       const last = lastSlackMessage.get(sessionId);
       if (last) {
+        const blocks = buildSlackBlocksWithText(last.text, deps.getSlackBlocks(markup));
         try {
           await deps.slack.updateMessage({ channel, ts: last.ts, text: last.text, blocks, workspaceId });
           return;
@@ -307,6 +307,7 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
           // Fall through to a new message.
         }
       }
+      const blocks = buildSlackBlocksWithText(text, deps.getSlackBlocks(markup));
       try {
         const posted = await deps.slack.postMessageDetailed({
           channel,
