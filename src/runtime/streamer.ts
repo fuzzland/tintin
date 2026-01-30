@@ -290,10 +290,14 @@ export class JsonlStreamer {
         const buffered = (this.buffers.get(session.id)?.text ?? "").trim().length > 0;
         if (!hasUserOutput && !buffered && turnKey !== null) {
           const fallback = this.lastTurnFallbackText.get(session.id);
-          if (fallback && fallback.turnKey === turnKey && fallback.text.trim().length > 0) {
-            await this.sendToSession(session.id, { text: fallback.text.trim(), priority: "user" });
-            this.markUserFacingOutput(session.id);
-          }
+          const fallbackText =
+            fallback && fallback.turnKey === turnKey && fallback.text.trim().length > 0 ? fallback.text.trim() : null;
+          const textToSend = fallbackText ?? t("session.complete", lang);
+          this.logger.info(
+            `[streamer][final-fallback] session=${session.id} turn=${turnKey} text_source=${fallbackText ? "fallback" : "complete"}`,
+          );
+          await this.sendToSession(session.id, { text: textToSend, final: true, priority: "user" });
+          this.markUserFacingOutput(session.id);
         }
         await this.maybeSendPendingPlaywrightScreenshot(session.id, lang);
         await this.flushIfNeeded(session.id, true, { final: true });

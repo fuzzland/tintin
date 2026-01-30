@@ -705,6 +705,19 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
           currentLang: lang,
         });
         const blocks = deps.getSlackBlocks(markup);
+        if (isFinal) {
+          const last = lastSlackMessage.get(sessionId);
+          if (last) {
+            try {
+              await deps.slack.updateMessage({ channel, ts: last.ts, text, blocks, workspaceId });
+              lastSlackMessage.set(sessionId, { ts: last.ts, text });
+              messageSent = true;
+              return;
+            } catch {
+              // Fall back to a new message.
+            }
+          }
+        }
         const posted = await deps.slack.postMessageDetailed({
           channel,
           thread_ts: threadTs,
@@ -714,7 +727,7 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
           priority,
           workspaceId,
         });
-        if (isFinal && posted.lastTs && posted.lastText !== null) {
+        if (posted.lastTs && posted.lastText !== null) {
           lastSlackMessage.set(sessionId, { ts: posted.lastTs, text: posted.lastText });
         }
         messageSent = true;
