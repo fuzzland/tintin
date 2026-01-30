@@ -691,7 +691,13 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
         } catch {
           sent = await deps.telegram.sendMessage({ chatId, text, replyMarkup, priority, forcePrimary: true });
         }
-        if (sent) trackTelegramMessage(sessionId, chatId, sent.message_id);
+        if (sent) {
+          trackTelegramMessage(sessionId, chatId, sent.message_id);
+          if (isFinal) {
+            deps.suppressFinalizeForSession.add(sessionId);
+            await sendSessionCompleteNotice({ sessionId, session, actionsDisabled });
+          }
+        }
         messageSent = true;
         return;
       }
@@ -725,6 +731,10 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
             lastSlackMessage.set(sessionId, { ts: posted.lastTs, text: posted.lastText });
           }
           deps.logger.debug(`[session][slack] posted message session=${sessionId} ts=${posted.lastTs ?? "?"}`);
+          if (isFinal) {
+            deps.suppressFinalizeForSession.add(sessionId);
+            await sendSessionCompleteNotice({ sessionId, session, actionsDisabled });
+          }
           messageSent = true;
         } catch (e) {
           deps.logger.warn(`[session][slack] post failed session=${sessionId}: ${String(e)}`);
@@ -745,6 +755,10 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
               deps.logger.debug(
                 `[session][slack] posted message without blocks session=${sessionId} ts=${posted.lastTs ?? "?"}`,
               );
+              if (isFinal) {
+                deps.suppressFinalizeForSession.add(sessionId);
+                await sendSessionCompleteNotice({ sessionId, session, actionsDisabled });
+              }
               messageSent = true;
             } catch (err) {
               deps.logger.error(`[session][slack] post without blocks failed session=${sessionId}: ${String(err)}`);
