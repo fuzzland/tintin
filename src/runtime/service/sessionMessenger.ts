@@ -297,7 +297,7 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
         includeStopSandbox: !actionsDisabled && isCloudSession,
         currentLang: lang,
       });
-      const blocks = deps.getSlackBlocks(markup);
+      const blocks = buildSlackBlocksWithText(text, deps.getSlackBlocks(markup));
       const last = lastSlackMessage.get(sessionId);
       if (last) {
         try {
@@ -333,6 +333,15 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
+  };
+
+  const buildSlackBlocksWithText = (text: string, blocks?: unknown[]): unknown[] | undefined => {
+    if (!blocks || blocks.length === 0) return blocks;
+    const trimmed = text.trim();
+    if (!trimmed) return blocks;
+    const maxLen = 3000;
+    const sectionText = trimmed.length > maxLen ? `${trimmed.slice(0, maxLen - 3)}...` : trimmed;
+    return [{ type: "section", text: { type: "mrkdwn", text: sectionText } }, ...blocks];
   };
 
   const normalizePlanStatus = (raw: string): "pending" | "in_progress" | "completed" => {
@@ -704,7 +713,7 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
           includeStopSandbox: false,
           currentLang: lang,
         });
-        const blocks = deps.getSlackBlocks(markup);
+        const blocks = buildSlackBlocksWithText(text, deps.getSlackBlocks(markup));
         if (isFinal) {
           const last = lastSlackMessage.get(sessionId);
           if (last) {
