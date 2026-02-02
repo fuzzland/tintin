@@ -76,11 +76,12 @@ RUN mkdir -p /usr/lib/code-server/lib/vscode/node_modules/vsda/rust/web \
 COPY tintin-log-agent.js /usr/local/bin/tintin-log-agent
 COPY tintin-chatgpt-proxy.js /usr/local/bin/tintin-chatgpt-proxy.js
 COPY tintin-helper-lib.js /usr/local/bin/tintin-helper-lib.js
+COPY tintin-mcp-bootstrap.js /usr/local/bin/tintin-mcp-bootstrap.js
 COPY code /usr/local/bin/code
 COPY site /usr/local/bin/site
 COPY static-deploy /usr/local/bin/static-deploy
 COPY dynamic-deploy /usr/local/bin/dynamic-deploy
-RUN chmod +x /usr/local/bin/tintin-log-agent /usr/local/bin/tintin-chatgpt-proxy.js /usr/local/bin/code /usr/local/bin/site /usr/local/bin/static-deploy /usr/local/bin/dynamic-deploy
+RUN chmod +x /usr/local/bin/tintin-log-agent /usr/local/bin/tintin-chatgpt-proxy.js /usr/local/bin/tintin-mcp-bootstrap.js /usr/local/bin/code /usr/local/bin/site /usr/local/bin/static-deploy /usr/local/bin/dynamic-deploy
 
 RUN mkdir -p /home/ubuntu/.image
 RUN chown -R ubuntu:ubuntu /home/ubuntu
@@ -282,23 +283,6 @@ step_bg "Chrome" google-chrome "${CHROME_ARGS[@]}"
 
 # Forward CDP port
 step_bg "CDP forward" socat TCP-LISTEN:9223,fork,reuseaddr TCP:127.0.0.1:9222
-
-# Start Playwright MCP connected to CDP
-PLAYWRIGHT_MCP_PORT=${PLAYWRIGHT_MCP_PORT:-11000}
-CDP_URL=""
-t_cdp_start=$SECONDS
-log "start: CDP discovery"
-for i in $(seq 1 15); do
-  CDP_URL=$(curl -s http://127.0.0.1:9222/json/version | sed -n 's/.*"webSocketDebuggerUrl"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-  if [ -n "$CDP_URL" ]; then break; fi
-  sleep 1
-done
-log "done: CDP discovery found=$([ -n "$CDP_URL" ] && echo yes || echo no) dt=$((SECONDS - t_cdp_start))s"
-if [ -n "$CDP_URL" ]; then
-  step_bg "Playwright MCP (CDP)" npx -y @playwright/mcp@latest --host 127.0.0.1 --port ${PLAYWRIGHT_MCP_PORT} --browser chromium --cdp-endpoint "$CDP_URL" --shared-browser-context
-else
-  step_bg "Playwright MCP (no CDP)" npx -y @playwright/mcp@latest --host 127.0.0.1 --port ${PLAYWRIGHT_MCP_PORT} --browser chromium --shared-browser-context
-fi
 
 if [ "$XVFB_READY" -eq 1 ] && [ "$ENABLE_VNC" = "1" ]; then
   step_bg "x11vnc" x11vnc -display "${DISPLAY}" -forever -nopw -shared >/home/ubuntu/.image/x11vnc.log 2>&1

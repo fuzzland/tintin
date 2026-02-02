@@ -13,6 +13,7 @@ import { nowMs, sleep } from "../util.js";
 import { redactText } from "../redact.js";
 import type { Sandbox } from "modal";
 import type { McpServerInfo } from "../mcp/types.js";
+import { buildMcpBootstrapConfig, encodeMcpBootstrapConfig, type McpBootstrapConfig } from "../mcp/bootstrap.js";
 import { resolvePlaywrightProvider, resolvePlaywrightProviderEntry, type McpProviderConfig } from "../mcp/config.js";
 import { resolveCodexHomeFromSessionsRoot, resolveSessionsRoot } from "../codex.js";
 import { resolveClaudeConfigDirFromSessionsRoot, resolveClaudeSessionJsonlPath } from "../claudeCode.js";
@@ -1516,6 +1517,33 @@ export class CloudManager {
     return Math.ceil(cfg.timeout_ms / 1000);
   }
 
+  private applyMcpBootstrapEnv(env: Record<string, string>, config: McpBootstrapConfig | null): Record<string, string> {
+    if (!config || this.provider.id !== "modal") return env;
+    const out = { ...env };
+    out.TINTIN_MCP_CONFIG_B64 = encodeMcpBootstrapConfig(config);
+    return out;
+  }
+
+  private buildMcpBootstrapLines(sessionId: string, config: McpBootstrapConfig | null): string[] {
+    if (!config || this.provider.id !== "modal") return [];
+    const bin = "/usr/local/bin/tintin-mcp-bootstrap.js";
+    const logPath = `/tmp/tintin-mcp-bootstrap-${sessionId}.log`;
+    return [
+      `if [ -x ${shellQuote(bin)} ]; then`,
+      '  if [ -n "${TINTIN_MCP_CONFIG_B64:-}" ] || [ -n "${TINTIN_MCP_CONFIG_PATH:-}" ]; then',
+      `    if ! ${shellQuote(bin)} >> ${shellQuote(logPath)} 2>&1; then`,
+      '      echo "[mcp] bootstrap failed" >&2',
+      `      tail -n 200 ${shellQuote(logPath)} >&2 || true`,
+      "      exit 1",
+      "    fi",
+      "  fi",
+      "else",
+      `  echo "[mcp] missing bootstrap binary: ${bin}" >&2`,
+      "  exit 1",
+      "fi",
+    ];
+  }
+
   private buildServerInfoFromConfig(name: string, provider: McpProviderConfig): McpServerInfo {
     switch (provider.type) {
       case "stdio":
@@ -1618,15 +1646,7 @@ export class CloudManager {
   }
 
   private pickRemoteMcpPort(cfg: PlaywrightMcpSection): number {
-    const preferred = cfg.port_start;
-    if (preferred === 11000) {
-      if (cfg.port_end >= 11001) {
-        this.logger.warn("[cloud][playwright] port_start=11000 conflicts with the Modal image default; using port=11001");
-        return 11001;
-      }
-      this.logger.warn("[cloud][playwright] port_start=11000 may conflict with the Modal image default (11000).");
-    }
-    return preferred;
+    return cfg.port_start;
   }
 
   private buildBrowserbaseUserMetadata(
@@ -2729,10 +2749,14 @@ AGENTS_EOF`;
       };
     }
 
+    const mcpBootstrapConfig = buildMcpBootstrapConfig(this.config.mcp ?? null);
+    env = this.applyMcpBootstrapEnv(env, mcpBootstrapConfig);
     env = this.ensureModalEnv(env);
     const chatgptLines = this.buildChatgptProxyLines(env);
+    const mcpBootstrapLines = this.buildMcpBootstrapLines(opts.sessionId, mcpBootstrapConfig);
     const combinedExtraLines = [
       ...(opts.extraBootstrapLines ?? []),
+      ...mcpBootstrapLines,
       ...(opts.playwright?.bootstrapLines ?? []),
       ...chatgptLines,
     ];
@@ -3009,10 +3033,14 @@ AGENTS_EOF`;
       };
     }
 
+    const mcpBootstrapConfig = buildMcpBootstrapConfig(this.config.mcp ?? null);
+    env = this.applyMcpBootstrapEnv(env, mcpBootstrapConfig);
     env = this.ensureModalEnv(env);
     const chatgptLines = this.buildChatgptProxyLines(env);
+    const mcpBootstrapLines = this.buildMcpBootstrapLines(opts.sessionId, mcpBootstrapConfig);
     const combinedExtraLines = [
       ...(opts.extraBootstrapLines ?? []),
+      ...mcpBootstrapLines,
       ...(opts.playwright?.bootstrapLines ?? []),
       ...chatgptLines,
     ];
