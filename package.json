@@ -26,7 +26,7 @@
     "prepare": "npm run build",
     "start": "node dist/src/main.js",
     "migrate": "node dist/src/migrate.js",
-    "test": "npm run build && node --test dist/tests",
+    "test": "npm run build && node --test \"dist/tests/**/*.test.js\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "publish:public": "npm run build && npm publish --access public",
     "tintin": "node dist/tintin.js"
@@ -49,7 +49,8 @@
     "pg": "^8.16.3",
     "picomatch": "^4.0.3",
     "undici": "^6.21.0",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "zod": "^4.2.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",

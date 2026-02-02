@@ -1,6 +1,6 @@
 import type { AppConfig } from "./config.js";
 import type { Db } from "./db.js";
-import type { Logger } from "./log.js";
+import { createLevelFilteredLogger, type Logger } from "./log.js";
 import { sleep, TaskQueue } from "./util.js";
 import { TelegramClient } from "./platform/telegram.js";
 import { SlackClient, type SlackTokenProvider } from "./platform/slack.js";
@@ -21,7 +21,7 @@ import { addCloudRunScreenshot, getCloudRunBySession } from "./cloud/store.js";
 import { uploadScreenshot } from "./cloud/s3.js";
 import { authorizeSlackWorkspace, createSlackInstallProvider } from "./slack/oauth.js";
 import http from "node:http";
-import { PlaywrightMcpManager } from "./playwrightMcp.js";
+import { McpRegistry } from "./mcp/registry.js";
 import { isUserLanguage, t, type UserLanguage } from "../locales/index.js";
 import { WebSocketManager } from "./websocket/manager.js";
 import { WebSocketHandler } from "./websocket/handler.js";
@@ -181,7 +181,13 @@ export async function createBotService(deps: BotServiceDeps) {
       }
     : null;
   const slack = slackTokenProvider ? new SlackClient(config.slack!, logger, slackTokenProvider, config.bot.log_level) : null;
-  const playwrightMcp = config.playwright_mcp?.enabled ? new PlaywrightMcpManager(config.playwright_mcp, logger) : null;
+  const mcpLogger = config.mcp ? createLevelFilteredLogger(logger, config.mcp.log_level) : logger;
+  const mcpRegistry = new McpRegistry(mcpLogger);
+  await mcpRegistry.loadFromConfig(config.mcp ?? null, {
+    logger: mcpLogger,
+    workspaceDir: process.cwd(),
+    globalConfig: config as unknown as Record<string, unknown>,
+  });
 
   const { commitProposalStore, maybeHandleCommitProposalMessage, suppressFinalizeForSession } = createCommitProposalRuntime({
     config,
@@ -221,11 +227,9 @@ export async function createBotService(deps: BotServiceDeps) {
     process.once("SIGTERM", scheduleSweep);
   }
   if (telegram) await telegram.init();
-  if (playwrightMcp) {
-    process.once("exit", () => void playwrightMcp.stop());
-    process.once("SIGINT", () => void playwrightMcp.stop());
-    process.once("SIGTERM", () => void playwrightMcp.stop());
-  }
+  process.once("exit", () => void mcpRegistry.stopAll());
+  process.once("SIGINT", () => void mcpRegistry.stopAll());
+  process.once("SIGTERM", () => void mcpRegistry.stopAll());
   if (githubWebhookEnabled) {
     scheduleGithubWebhookProcessing("startup");
     const intervalMs = githubWebhookPollIntervalMs();
@@ -351,7 +355,7 @@ export async function createBotService(deps: BotServiceDeps) {
     reviewCommitDisabled,
   });
 
-  const streamer = new JsonlStreamer(config, db, logger, sendToSession, playwrightMcp);
+  const streamer = new JsonlStreamer(config, db, logger, sendToSession, mcpRegistry);
   streamer.start();
 
   const cloudManager = config.cloud?.enabled ? new CloudManager(config, db, logger, null) : null;
@@ -361,7 +365,7 @@ export async function createBotService(deps: BotServiceDeps) {
     logger,
     sendToSession,
     async (id) => streamer.drainSession(id),
-    playwrightMcp,
+    mcpRegistry,
     cloudManager ? async (sessionId, status) => cloudManager.handleSessionFinished(sessionId, status) : undefined,
   );
   if (cloudManager) cloudManager.attachSessionManager(sessionManager);

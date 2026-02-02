@@ -49,6 +49,7 @@ test("loadConfig applies Modal defaults when provider is modal", async () => {
     configPath,
     baseConfig(`
 [cloud]
+secrets_key = "test-secrets-key"
 enabled = true
 provider = "modal"
 public_base_url = "https://cloud.example.com"
@@ -66,8 +67,8 @@ public_base_url = "https://cloud.example.com"
     assert.equal(modal?.workspace_root, "/workspace/tintin");
     assert.equal(modal?.command_timeout_ms, 60000);
     assert.equal(modal?.request_timeout_ms, 60000);
-    assert.equal(modal?.timeout_ms, 300000);
-    assert.equal(modal?.idle_timeout_ms, 300000);
+    assert.equal(modal?.timeout_ms, 86400000);
+    assert.equal(modal?.idle_timeout_ms, 86400000);
     assert.equal(modal?.block_network, false);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -81,6 +82,7 @@ test("loadConfig preserves explicit Modal settings", async () => {
     configPath,
     baseConfig(`
 [cloud]
+secrets_key = "test-secrets-key"
 enabled = true
 provider = "modal"
 public_base_url = "https://cloud.example.com"
@@ -138,6 +140,7 @@ test("loadConfig rejects proxy without public base url", async () => {
     configPath,
     baseConfig(`
 [cloud]
+secrets_key = "test-secrets-key"
 enabled = true
 provider = "modal"
 
@@ -164,6 +167,7 @@ test("loadConfig decodes base64 GitHub App private key", async () => {
     configPath,
     baseConfig(`
 [cloud]
+secrets_key = "test-secrets-key"
 enabled = true
 public_base_url = "https://cloud.example.com"
 
@@ -196,6 +200,7 @@ test("loadConfig rejects raw GitHub App private key", async () => {
     configPath,
     baseConfig(`
 [cloud]
+secrets_key = "test-secrets-key"
 enabled = true
 public_base_url = "https://cloud.example.com"
 

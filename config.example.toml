@@ -177,8 +177,13 @@ s3_region = "us-east-1"
 s3_prefix = "tintin/ui"
 s3_signed_url_ttl_ms = 300000
 
-[playwright_mcp]
+[mcp]
+global_timeout_sec = 60
+log_level = "info"
+
+[mcp.providers.playwright]
 enabled = true
+type = "playwright"
 provider = "local" # "local" | "browserbase" | "hyperbrowser"
 package = "@playwright/mcp@latest"
 browser = "chrome"
@@ -194,7 +199,7 @@ timeout_ms = 20000
 # executable_path = "/path/to/chrome"
 
 # Browserbase provider (cloud)
-[playwright_mcp.browserbase]
+[mcp.providers.playwright.browserbase]
 api_key = "env:BROWSERBASE_API_KEY"
 project_id = "env:BROWSERBASE_PROJECT_ID"
 region = "us-west-2"
@@ -206,7 +211,7 @@ context_id = ""
 # browser_settings = { timeout = 600 }
 # user_metadata = { tintin_env = "prod" }
 
-[playwright_mcp.hyperbrowser]
+[mcp.providers.playwright.hyperbrowser]
 api_key = "env:HYPERBROWSER_API_KEY"
 api_base_url = "https://api.hyperbrowser.ai"
 # session_params = { solveCaptchas = true, useStealth = true } # raw Hyperbrowser session payload

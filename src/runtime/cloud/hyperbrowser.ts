@@ -1,4 +1,4 @@
-import type { PlaywrightMcpHyperbrowserSection } from "../config.js";
+import type { PlaywrightMcpHyperbrowserSection } from "../mcp/providers/playwright/config.js";
 import { fetchWithProxy } from "../httpClient.js";
 import { isRecord, getString } from "../typeGuards.js";
 

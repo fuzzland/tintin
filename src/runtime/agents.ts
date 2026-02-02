@@ -2,7 +2,7 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { AppConfig, ClaudeCodeSection, CodexSection } from "./config.js";
 import type { SessionAgent } from "./db.js";
 import type { Logger } from "./log.js";
-import type { PlaywrightServerInfo } from "./playwrightMcp.js";
+import type { McpServerInfo } from "./mcp/types.js";
 import {
   ensureSessionsRootExists,
   findSessionJsonlFiles,
@@ -79,7 +79,7 @@ export interface AgentAdapter {
     pollMs: number;
   }): Promise<string[]>;
 
-  buildPlaywrightCliArgs(opts: { server: PlaywrightServerInfo; playwrightStartupTimeoutSec: number }): string[];
+  buildMcpCliArgs(opts: { servers: Map<string, McpServerInfo>; globalTimeout: number }): string[];
 
   generateTitle(opts: {
     config: AppConfig;
@@ -141,15 +141,28 @@ const CodexAgent: AgentAdapter = {
     });
   },
 
-  buildPlaywrightCliArgs: (opts) => {
-    return [
-      "--config",
-      `mcp_servers.playwright.url="${opts.server.url}"`,
-      "--config",
-      `mcp_servers.playwright.enabled=true`,
-      "--config",
-      `mcp_servers.playwright.startup_timeout_sec=${Math.max(1, Math.floor(opts.playwrightStartupTimeoutSec))}`,
-    ];
+  buildMcpCliArgs: (opts) => {
+    const args: string[] = [];
+    const entries = Array.from(opts.servers.entries()).sort(([a], [b]) => a.localeCompare(b));
+    for (const [name, info] of entries) {
+      const prefix = `mcp_servers.${name}`;
+      if (info.transport === "stdio") {
+        if (info.command) args.push("--config", `${prefix}.command=${JSON.stringify(info.command)}`);
+        if (info.args) args.push("--config", `${prefix}.args=${JSON.stringify(info.args)}`);
+        if (info.env) args.push("--config", `${prefix}.env=${JSON.stringify(info.env)}`);
+      } else if (info.url) {
+        args.push("--config", `${prefix}.url=${JSON.stringify(info.url)}`);
+      }
+      if (info.headers && Object.keys(info.headers).length > 0) {
+        args.push("--config", `${prefix}.headers=${JSON.stringify(info.headers)}`);
+      }
+      args.push("--config", `${prefix}.enabled=true`);
+      const timeout = info.startupTimeoutSec ?? opts.globalTimeout;
+      if (timeout && Number.isFinite(timeout)) {
+        args.push("--config", `${prefix}.startup_timeout_sec=${Math.max(1, Math.floor(timeout))}`);
+      }
+    }
+    return args;
   },
 
   generateTitle: async (opts) => {
@@ -227,15 +240,29 @@ const ClaudeCodeAgent: AgentAdapter = {
     });
   },
 
-  buildPlaywrightCliArgs: (opts) => {
-    const cfg = JSON.stringify({
-      mcpServers: {
-        playwright: {
-          type: "http",
-          url: opts.server.url,
-        },
-      },
-    });
+  buildMcpCliArgs: (opts) => {
+    const mcpServers: Record<string, Record<string, unknown>> = {};
+    for (const [name, info] of opts.servers.entries()) {
+      if (info.transport === "stdio") {
+        if (!info.command) continue;
+        mcpServers[name] = {
+          type: "stdio",
+          command: info.command,
+          args: info.args ?? [],
+          env: info.env ?? {},
+        };
+        continue;
+      }
+      if (!info.url) continue;
+      mcpServers[name] = {
+        type: info.transport,
+        url: info.url,
+      };
+      if (info.headers && Object.keys(info.headers).length > 0) {
+        mcpServers[name].headers = info.headers;
+      }
+    }
+    const cfg = JSON.stringify({ mcpServers });
     return ["--mcp-config", cfg];
   },
 

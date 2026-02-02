@@ -41,7 +41,7 @@ CONFIG_PATH=./config.toml node dist/tintin.js start
 ## Config essentials
 
 - Use `config.example.toml` as template; keep local `config.toml` out of git.
-- Important sections: `[bot]`, `[cloud]`, `[cloud.modal]`, `[playwright_mcp]`, `[security]`, `[cloud.ui]`, `[cloud.proxy]`.
+- Important sections: `[bot]`, `[cloud]`, `[cloud.modal]`, `[mcp]`, `[security]`, `[cloud.ui]`, `[cloud.proxy]`.
 - Store secrets as `env:VAR`; never commit real tokens or data dirs (`data/`, `.codex/`).
 
 ## Coding practices

@@ -2,8 +2,13 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { Logger } from "../log.js";
 import type { SendToSessionFn } from "../messaging.js";
-import type { PlaywrightMcpManager } from "../playwrightMcp.js";
+import type { McpRegistry } from "../mcp/registry.js";
+import type { McpScreenshotProvider } from "../mcp/types.js";
 import { t, type UserLanguage } from "../../locales/index.js";
+
+function isScreenshotProvider(provider: unknown): provider is McpScreenshotProvider {
+  return typeof (provider as McpScreenshotProvider).takeScreenshot === "function";
+}
 
 /**
  * Screenshot data extracted from tool output.
@@ -36,10 +41,17 @@ export class PlaywrightScreenshotManager {
   private readonly playwrightCloudSessions = new Set<string>();
 
   constructor(
-    private readonly playwrightMcp: PlaywrightMcpManager | null,
+    private readonly mcpRegistry: McpRegistry | null,
     private readonly sendToSession: SendToSessionFn,
     private readonly logger: Logger,
+    private readonly playwrightProviderName = "playwright",
   ) {}
+
+  private resolvePlaywrightProvider(): McpScreenshotProvider | null {
+    const provider = this.mcpRegistry?.getProvider(this.playwrightProviderName);
+    if (!provider) return null;
+    return isScreenshotProvider(provider) ? provider : null;
+  }
 
   /**
    * Mark a session as a cloud session (no auto-screenshots).
@@ -165,9 +177,10 @@ export class PlaywrightScreenshotManager {
     callId?: string,
     tool?: string,
   ): Promise<boolean> {
-    if (!this.playwrightMcp) return false;
+    const provider = this.resolvePlaywrightProvider();
+    if (!provider) return false;
     try {
-      const result = await this.playwrightMcp.takeScreenshot({
+      const result = await provider.takeScreenshot({
         sessionId,
         callId: callId || undefined,
         tool: tool || undefined,
@@ -198,7 +211,7 @@ export class PlaywrightScreenshotManager {
    * Send a pending screenshot if one is queued for this turn.
    */
   async maybeSendPendingScreenshot(sessionId: string, lang: UserLanguage, turnKey: number | null): Promise<boolean> {
-    if (!this.playwrightMcp) return false;
+    if (!this.resolvePlaywrightProvider()) return false;
     if (this.playwrightCloudSessions.has(sessionId)) return false;
     if (turnKey === null) return false;
     if (this.playwrightScreenshotSentTurn.get(sessionId) === turnKey) return false;

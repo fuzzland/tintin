@@ -10,7 +10,8 @@ import { nowMs, sleep } from "../util.js";
 import { listRunningSessions, listSessionOffsets, upsertSessionOffset } from "../store.js";
 import type { SessionRow } from "../store.js";
 import { getIdentity } from "../cloud/store.js";
-import { PlaywrightMcpManager } from "../playwrightMcp.js";
+import type { McpRegistry } from "../mcp/registry.js";
+import { resolvePlaywrightProviderEntry } from "../mcp/config.js";
 import { isUserLanguage, t, type UserLanguage } from "../../locales/index.js";
 import { isHyperbrowserAvailable, isShellSearchCommand, resolveSearchPolicy } from "../searchPolicy.js";
 import { PlanUpdateHandler, parsePlanUpdatePayload } from "./PlanUpdateHandler.js";
@@ -72,9 +73,11 @@ export class JsonlStreamer {
     private readonly db: Db,
     private readonly logger: Logger,
     private readonly sendToSession: SendToSessionFn,
-    private readonly playwrightMcp: PlaywrightMcpManager | null,
+    private readonly mcpRegistry: McpRegistry | null,
   ) {
-    this.playwrightScreenshots = new PlaywrightScreenshotManager(playwrightMcp, sendToSession, logger);
+    const playwrightEntry = resolvePlaywrightProviderEntry(config.mcp);
+    const providerName = playwrightEntry?.name ?? "playwright";
+    this.playwrightScreenshots = new PlaywrightScreenshotManager(mcpRegistry, sendToSession, logger, providerName);
   }
 
   private resolveSessionLanguage(session: { language?: string | null }): UserLanguage {
@@ -458,7 +461,9 @@ export class JsonlStreamer {
     obj: Record<string, unknown>,
     lang: UserLanguage,
   ) {
-    if (!this.playwrightMcp || !this.config.playwright_mcp?.enabled) return;
+    const playwrightEntry = resolvePlaywrightProviderEntry(this.config.mcp);
+    if (!playwrightEntry?.provider.enabled) return;
+    const playwrightServerName = playwrightEntry.name.toLowerCase();
     const turnKey = this.currentTurnKey(sessionId);
     const type = (obj as { type?: unknown }).type;
 
@@ -476,7 +481,7 @@ export class JsonlStreamer {
         if (type === "assistant" && blockType === "tool_use") {
           const name = stringOrEmpty((block as { name?: unknown }).name);
           const parsed = parseMcpFunctionName(name);
-          if (!parsed || parsed.server.toLowerCase() !== "playwright") continue;
+          if (!parsed || parsed.server.toLowerCase() !== playwrightServerName) continue;
           const callId = stringOrEmpty((block as { id?: unknown }).id);
           if (!callId) continue;
           this.playwrightScreenshots.rememberPlaywrightCall(sessionId, callId, parsed.tool);

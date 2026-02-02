@@ -77,11 +77,11 @@ Tintin can serve a lightweight web UI for cloud runs (events, diffs, terminal pl
 
 Tintin can run the [Playwright MCP](./references/playwright-mcp/README.md) sidecar so Codex / Claude Code can drive a real browser.
 
-- Configure `[playwright_mcp]` in `config.toml` (see `config.example.toml`). Defaults start `npx -y @playwright/mcp@latest` with Chrome, shared user data dir, and an auto-picked port > 10000.
+- Configure `[mcp.providers.playwright]` in `config.toml` (see `config.example.toml`). Defaults start `npx -y @playwright/mcp@latest` with Chrome, shared user data dir, and an auto-picked port > 10000.
 - A single shared profile (`user_data_dir`) is used across sessions; set `executable_path` if Chrome is not on PATH.
 - Codex / Claude Code sessions are automatically pointed at the running Playwright MCP server; every Playwright MCP tool call triggers a screenshot saved under the configured `output_dir` and posted to the chat.
-- For cloud runs on Modal, you can set `playwright_mcp.provider = "browserbase"` and configure `[playwright_mcp.browserbase]` to create per-session Browserbase CDP connections.
-- Hyperbrowser is also supported via `playwright_mcp.provider = "hyperbrowser"` with `[playwright_mcp.hyperbrowser]`.
+- For cloud runs on Modal, you can set `mcp.providers.playwright.provider = "browserbase"` and configure `[mcp.providers.playwright.browserbase]` to create per-session Browserbase CDP connections.
+- Hyperbrowser is also supported via `mcp.providers.playwright.provider = "hyperbrowser"` with `[mcp.providers.playwright.hyperbrowser]`.
 
 ## Chat flows
 

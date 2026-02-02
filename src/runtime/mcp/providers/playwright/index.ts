@@ -6,47 +6,46 @@ import process from "node:process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import type { PlaywrightMcpSection } from "./config.js";
-import type { Logger } from "./log.js";
+import type { PlaywrightMcpProviderConfig } from "../../config.js";
+import type { McpProviderContext, McpScreenshotProvider, McpServerInfo } from "../../types.js";
+import { BaseMcpProvider } from "../base.js";
+import type { PlaywrightServerInfo } from "./types.js";
 
 const SIGKILL_TIMEOUT_MS = 2_000;
 const MAX_SNIPPET_CHARS = 240;
-
-export interface PlaywrightServerInfo {
-  port: number;
-  url: string;
-  userDataDir: string;
-  outputDir: string;
-}
 
 interface ScreenshotResult {
   savedPath?: string;
   mimeType?: string;
 }
 
-export class PlaywrightMcpManager {
+export class PlaywrightMcpProvider
+  extends BaseMcpProvider<PlaywrightMcpProviderConfig>
+  implements McpScreenshotProvider
+{
+  readonly type = "playwright";
   private startPromise: Promise<{ info: PlaywrightServerInfo; child: ChildProcessWithoutNullStreams }> | null = null;
   private clientPromise: Promise<Client> | null = null;
+  private serverInfo: PlaywrightServerInfo | null = null;
 
-  constructor(private readonly config: PlaywrightMcpSection, private readonly logger: Logger) {}
-
-  async ensureServer(): Promise<PlaywrightServerInfo> {
-    if (this.startPromise) {
-      const started = await this.startPromise;
-      if (!started.child.killed && started.child.exitCode === null) return started.info;
-      this.startPromise = null;
-      this.clientPromise = null;
-    }
-    this.startPromise = this.startServer().catch((e) => {
-      this.startPromise = null;
-      this.clientPromise = null;
-      throw e;
-    });
-    const started = await this.startPromise;
-    return started.info;
+  constructor(name: string) {
+    super(name, { id: name, transport: "http", status: "stopped" });
   }
 
-  async stop(): Promise<void> {
+  override async init(config: PlaywrightMcpProviderConfig, context: McpProviderContext): Promise<void> {
+    await super.init(config, context);
+    this.setInfo({
+      startupTimeoutSec: config.startup_timeout_sec,
+      status: "stopped",
+    });
+  }
+
+  override async start(): Promise<McpServerInfo> {
+    await this.ensureServer();
+    return this.getServerInfo();
+  }
+
+  override async stop(): Promise<void> {
     const client = this.clientPromise ? await this.clientPromise.catch(() => null) : null;
     if (client) {
       try {
@@ -62,6 +61,10 @@ export class PlaywrightMcpManager {
         if (!proc.child.killed) proc.child.kill("SIGKILL");
       }, SIGKILL_TIMEOUT_MS);
     }
+    this.serverInfo = null;
+    this.startPromise = null;
+    this.clientPromise = null;
+    this.setInfo({ status: "stopped", url: undefined });
   }
 
   async takeScreenshot(opts: { sessionId: string; callId?: string; tool?: string }): Promise<ScreenshotResult | null> {
@@ -73,20 +76,22 @@ export class PlaywrightMcpManager {
     const expectedPath = path.join(server.outputDir, relFileName);
     await mkdir(path.dirname(expectedPath), { recursive: true });
     try {
-      const res: any = await client.callTool({
+      const res: unknown = await client.callTool({
         name: "browser_take_screenshot",
         arguments: {
           filename: relFileName,
         },
       });
-      if (res?.isError === true) {
-        const msg = typeof res?.content?.[0]?.text === "string" ? res.content[0].text : "";
+      if (isToolError(res)) {
+        const msg = toolErrorText(res);
         this.logger.debug(`[playwright-mcp] screenshot tool error: ${safeSnippet(msg)}`);
         return null;
       }
 
-      const imageBlock = Array.isArray(res?.content)
-        ? res.content.find((c: any) => c && typeof c === "object" && c.type === "image")
+      const imageBlock = Array.isArray((res as { content?: unknown }).content)
+        ? (res as { content: Array<{ type?: unknown; mimeType?: unknown; data?: unknown }> }).content.find(
+            (c) => c && typeof c === "object" && c.type === "image",
+          )
         : null;
 
       const mimeType = typeof imageBlock?.mimeType === "string" ? imageBlock.mimeType : undefined;
@@ -97,8 +102,10 @@ export class PlaywrightMcpManager {
         return { savedPath: expectedPath, mimeType };
       }
 
-      const fromText = Array.isArray(res?.content)
-        ? res.content.find((c: any) => c && typeof c === "object" && c.type === "text" && typeof c.text === "string")?.text
+      const fromText = Array.isArray((res as { content?: unknown }).content)
+        ? (res as { content: Array<{ type?: unknown; text?: unknown }> }).content.find(
+            (c) => c && typeof c === "object" && c.type === "text" && typeof c.text === "string",
+          )?.text
         : null;
       const linkedPath = typeof fromText === "string" ? extractFirstLinkedFilePath(fromText) : null;
       const candidates = [linkedPath, expectedPath].filter((p): p is string => typeof p === "string" && p.length > 0);
@@ -116,6 +123,26 @@ export class PlaywrightMcpManager {
       this.logger.debug(`[playwright-mcp] screenshot failed: ${String(e)}`);
       return null;
     }
+  }
+
+  private async ensureServer(): Promise<PlaywrightServerInfo> {
+    if (this.startPromise) {
+      const started = await this.startPromise;
+      if (!started.child.killed && started.child.exitCode === null) return started.info;
+      this.startPromise = null;
+      this.clientPromise = null;
+      this.serverInfo = null;
+    }
+    this.setInfo({ status: "starting", url: undefined });
+    this.startPromise = this.startServer().catch((e) => {
+      this.startPromise = null;
+      this.clientPromise = null;
+      this.serverInfo = null;
+      this.setInfo({ status: "error" });
+      throw e;
+    });
+    const started = await this.startPromise;
+    return started.info;
   }
 
   private async ensureClient(server: PlaywrightServerInfo): Promise<Client> {
@@ -161,6 +188,8 @@ export class PlaywrightMcpManager {
       headless: this.config.headless,
       executablePath,
       timeoutMs: this.config.timeout_ms,
+      userAgent: this.config.user_agent,
+      viewportSize: this.config.viewport_size,
     });
 
     this.logger.info(
@@ -181,10 +210,13 @@ export class PlaywrightMcpManager {
       this.logger.warn(`[playwright-mcp] exited code=${String(code)} signal=${String(signal)}`);
       this.startPromise = null;
       this.clientPromise = null;
+      this.serverInfo = null;
+      this.setInfo({ status: "stopped" });
     });
 
     try {
-      await waitForPortOpen(this.config.host, port, this.config.timeout_ms);
+      const startupTimeoutMs = Math.max(1_000, Math.floor(this.config.startup_timeout_sec * 1000));
+      await waitForPortOpen(this.config.host, port, startupTimeoutMs);
     } catch (e) {
       this.logger.error(`[playwright-mcp] failed to start on ${this.config.host}:${port}: ${String(e)}`);
       try {
@@ -199,6 +231,7 @@ export class PlaywrightMcpManager {
           // ignore
         }
       }, SIGKILL_TIMEOUT_MS);
+      this.setInfo({ status: "error" });
       throw e;
     }
     const info: PlaywrightServerInfo = {
@@ -207,6 +240,11 @@ export class PlaywrightMcpManager {
       userDataDir,
       outputDir,
     };
+    this.serverInfo = info;
+    this.setInfo({
+      url: info.url,
+      status: "running",
+    });
     return { info, child };
   }
 }
@@ -231,7 +269,7 @@ function resolveUrlHost(bindHost: string): string {
 function safeSnippet(text: string, maxChars = MAX_SNIPPET_CHARS): string {
   const clean = (text ?? "").replace(/\s+/g, " ").trim();
   if (clean.length <= maxChars) return clean;
-  return `${clean.slice(0, maxChars)}…`;
+  return `${clean.slice(0, maxChars)}...`;
 }
 
 function extractFirstLinkedFilePath(text: string): string | null {
@@ -355,4 +393,14 @@ function canConnect(host: string, port: number): Promise<boolean> {
       resolve(false);
     });
   });
+}
+
+function isToolError(res: unknown): res is { isError: true; content?: Array<{ text?: unknown }> } {
+  return Boolean(res && typeof res === "object" && (res as { isError?: unknown }).isError === true);
+}
+
+function toolErrorText(res: { content?: Array<{ text?: unknown }> }): string {
+  if (!Array.isArray(res.content)) return "";
+  const text = res.content.find((c) => c && typeof c === "object" && typeof c.text === "string")?.text;
+  return typeof text === "string" ? text : "";
 }

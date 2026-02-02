@@ -12,7 +12,7 @@ import { getAgentAdapter } from "./agents.js";
 import type { SendToSessionFn } from "./messaging.js";
 import { redactText } from "./redact.js";
 import { nowMs, sleep } from "./util.js";
-import { PlaywrightMcpManager } from "./playwrightMcp.js";
+import type { McpRegistry } from "./mcp/registry.js";
 import { buildLocalizedPrompt } from "./prompt.js";
 import {
   applySearchEnv,
@@ -78,7 +78,7 @@ export class SessionManager {
     private readonly logger: Logger,
     private readonly sendToSession: SendToSessionFn,
     private readonly onProcessExitDrain: (sessionId: string) => Promise<void>,
-    private readonly playwrightMcp: PlaywrightMcpManager | null,
+    private readonly mcpRegistry: McpRegistry | null,
     private readonly onSessionFinished?: (
       sessionId: string,
       status: SessionStatus,
@@ -353,9 +353,9 @@ export class SessionManager {
       this.logger.debug(
         `[session] spawn agent=${opts.agent} kind=exec session=${id} project=${opts.projectId} cwd=${session.codex_cwd} sessionsRoot=${sessionsRoot} home=${homeDir} search_policy=${searchPolicy.mode} search_provider=${hyperbrowserAvailable ? "hyperbrowser" : "none"} search_enforce=${enforceSearch ? "1" : "0"}`,
       );
-      const playwrightArgs = await this.playwrightCliArgs(opts.agent);
+      const mcpArgs = await this.mcpCliArgs(opts.agent);
       const cloudProxyArgs = this.buildCloudProxyCliArgs(opts.agent, envOverrides);
-      const extraArgs = [...(playwrightArgs ?? []), ...cloudProxyArgs];
+      const extraArgs = [...(mcpArgs ?? []), ...cloudProxyArgs];
       const spawnedProc = adapter.spawnExec({
         config: this.config,
         logger: this.logger,
@@ -479,9 +479,9 @@ export class SessionManager {
     const searchDirective = buildSearchDirective({ policy: searchPolicy, lang: language, hyperbrowserAvailable });
     const agentPrompt = buildLocalizedPrompt(prompt, language, { searchDirective });
     let spawned;
-    const playwrightArgs = await this.playwrightCliArgs(session.agent);
+    const mcpArgs = await this.mcpCliArgs(session.agent);
     const cloudProxyArgs = this.buildCloudProxyCliArgs(session.agent, envWithCloudProxy);
-    const extraArgs = [...(playwrightArgs ?? []), ...cloudProxyArgs];
+    const extraArgs = [...(mcpArgs ?? []), ...cloudProxyArgs];
     try {
       spawned = adapter.spawnResume({
         config: this.config,
@@ -714,12 +714,13 @@ export class SessionManager {
     await this.sendToSession(sessionId, { type: "finalize", priority: "user" });
   }
 
-  private async playwrightCliArgs(agent: SessionAgent): Promise<string[] | null> {
-    if (!this.playwrightMcp || !this.config.playwright_mcp?.enabled) return null;
-    const server = await this.playwrightMcp.ensureServer();
-    const startupSec = Math.ceil(this.config.playwright_mcp.timeout_ms / 1000);
+  private async mcpCliArgs(agent: SessionAgent): Promise<string[] | null> {
+    if (!this.mcpRegistry) return null;
+    const servers = await this.mcpRegistry.startAll();
+    if (servers.size === 0) return null;
     const adapter = getAgentAdapter(agent);
-    return adapter.buildPlaywrightCliArgs({ server, playwrightStartupTimeoutSec: startupSec });
+    const globalTimeout = this.config.mcp?.global_timeout_sec ?? 60;
+    return adapter.buildMcpCliArgs({ servers, globalTimeout });
   }
 
   private async resolveChatgptProxyBin(): Promise<string | null> {

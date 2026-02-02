@@ -1,6 +1,7 @@
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { AppConfig } from "./config.js";
+import { resolvePlaywrightProvider } from "./mcp/config.js";
 import { t, type UserLanguage } from "../locales/index.js";
 
 export type SearchPolicy = {
@@ -16,7 +17,7 @@ export function resolveSearchPolicy(config: AppConfig): SearchPolicy {
 }
 
 export function isHyperbrowserAvailable(config: AppConfig): boolean {
-  const mcp = config.playwright_mcp;
+  const mcp = resolvePlaywrightProvider(config.mcp);
   if (!mcp || !mcp.enabled) return false;
   if (mcp.provider !== "hyperbrowser") return false;
   const apiKey = mcp.hyperbrowser?.api_key ?? "";

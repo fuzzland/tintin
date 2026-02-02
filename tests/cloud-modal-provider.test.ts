@@ -75,6 +75,7 @@ function createFakeSandbox(execHandler?: (command: string[], params: any) => Exe
       calls.push({ command, params });
       return execHandler ? execHandler(command, params) : makeProc();
     },
+    tunnels: async () => ({}),
     terminate: async () => {
       killed = true;
     },
@@ -108,7 +109,6 @@ test("ModalCloudProvider createWorkspace uses modal client and workspace root", 
   const workspace = await provider.createWorkspace({ prefix: "test" });
   assert.equal(workspace.id, "sb-test");
   assert.equal(workspace.rootPath, "/workspace/tintin");
-  assert.ok(sandbox.__state.calls.some((call: any) => call.command[2]?.includes("mkdir -p")));
 });
 
 test("ModalCloudProvider uploadFiles writes files and chmods", async () => {

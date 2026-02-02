@@ -533,7 +533,7 @@ All configuration is in `config.toml` (see `config.example.toml`). Key sections:
 - `[[projects]]` - Registered project paths
 - `[telegram]` / `[slack]` - Platform credentials
 - `[cloud]` - Provider (local/modal), Modal settings, proxy, OAuth
-- `[playwright_mcp]` - Browser automation (local/browserbase/hyperbrowser)
+- `[mcp]` - MCP providers (Playwright, stdio/http, etc.)
 
 Environment variables can be referenced as `env:VAR_NAME` in config values.
 

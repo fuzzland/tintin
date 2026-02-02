@@ -3,6 +3,7 @@ import path from "node:path";
 import process from "node:process";
 import * as toml from "@iarna/toml";
 import dotenvFlow from "dotenv-flow";
+import { normalizeMcpSection, type McpConfig } from "./mcp/config.js";
 
 export type Platform = "telegram" | "slack";
 
@@ -209,51 +210,6 @@ export interface SlackSection {
   user_scopes: string[];
 }
 
-export type PlaywrightSnapshotMode = "incremental" | "full" | "none";
-export type PlaywrightImageResponseMode = "allow" | "omit";
-export type PlaywrightMcpProvider = "local" | "browserbase" | "hyperbrowser";
-export type BrowserbaseProxies = boolean | Record<string, unknown> | Array<Record<string, unknown>>;
-
-export interface PlaywrightMcpBrowserbaseSection {
-  api_key: string;
-  project_id: string;
-  region?: string;
-  keep_alive: boolean;
-  timeout_sec?: number;
-  proxies?: BrowserbaseProxies;
-  extension_id?: string | null;
-  context_id?: string | null;
-  browser_settings?: Record<string, unknown> | null;
-  user_metadata?: Record<string, unknown> | null;
-}
-
-export interface PlaywrightMcpHyperbrowserSection {
-  api_key: string;
-  api_base_url?: string;
-  session_params?: Record<string, unknown> | null;
-}
-
-export interface PlaywrightMcpSection {
-  enabled: boolean;
-  provider: PlaywrightMcpProvider;
-  browserbase?: PlaywrightMcpBrowserbaseSection | null;
-  hyperbrowser?: PlaywrightMcpHyperbrowserSection | null;
-  package: string;
-  browser: string;
-  host: string;
-  port_start: number;
-  port_end: number;
-  snapshot_mode: PlaywrightSnapshotMode;
-  image_responses: PlaywrightImageResponseMode;
-  headless: boolean;
-  user_data_dir: string;
-  output_dir: string;
-  executable_path?: string;
-  timeout_ms: number;
-  user_agent?: string;
-  viewport_size?: string;
-}
-
 export interface AppConfig {
   bot: BotSection;
   db: DbSection;
@@ -263,7 +219,7 @@ export interface AppConfig {
   projects: ProjectEntry[];
   telegram?: TelegramSection;
   slack?: SlackSection;
-  playwright_mcp?: PlaywrightMcpSection | null;
+  mcp?: McpConfig | null;
   cloud?: CloudSection | null;
   pinecone?: PineconeSection | null;
   chatgpt_oauth?: ChatgptOAuthSection | null;
@@ -359,171 +315,6 @@ function normalizeMessageVerbosity(value: unknown): 1 | 2 | 3 {
     if (value <= 2) return 2;
   }
   return 3;
-}
-
-function normalizePlaywrightSnapshotMode(value: unknown): PlaywrightSnapshotMode {
-  const raw = typeof value === "string" ? value.toLowerCase() : "";
-  if (raw === "incremental" || raw === "full" || raw === "none") return raw;
-  return "full";
-}
-
-function normalizePlaywrightImageResponse(value: unknown): PlaywrightImageResponseMode {
-  const raw = typeof value === "string" ? value.toLowerCase() : "";
-  if (raw === "omit") return "omit";
-  return "allow";
-}
-
-function normalizePlaywrightMcpProvider(value: unknown): PlaywrightMcpProvider {
-  const raw = typeof value === "string" ? value.trim().toLowerCase() : "";
-  if (raw === "browserbase") return "browserbase";
-  if (raw === "hyperbrowser") return "hyperbrowser";
-  return "local";
-}
-
-function normalizeBrowserbaseSection(value: unknown): PlaywrightMcpBrowserbaseSection | null {
-  if (value === undefined) return null;
-  if (!isRecord(value)) throw new Error("[playwright_mcp.browserbase] must be a table");
-
-  const apiKey = typeof value.api_key === "string" ? value.api_key.trim() : "";
-  const projectId = typeof value.project_id === "string" ? value.project_id.trim() : "";
-  const region = typeof value.region === "string" ? value.region.trim() : "";
-  const keepAlive = typeof value.keep_alive === "boolean" ? value.keep_alive : false;
-  const timeoutSec =
-    typeof value.timeout_sec === "number" && Number.isFinite(value.timeout_sec) ? Math.max(1, Math.floor(value.timeout_sec)) : undefined;
-
-  let proxies: BrowserbaseProxies | undefined;
-  const proxiesRaw = (value as any).proxies;
-  if (typeof proxiesRaw === "boolean") proxies = proxiesRaw;
-  else if (Array.isArray(proxiesRaw)) proxies = proxiesRaw as BrowserbaseProxies;
-  else if (isRecord(proxiesRaw)) proxies = proxiesRaw as BrowserbaseProxies;
-  else if (proxiesRaw !== undefined) throw new Error("[playwright_mcp.browserbase.proxies] must be a boolean, array, or table");
-
-  const extensionId = typeof value.extension_id === "string" ? value.extension_id.trim() : "";
-  const contextId = typeof value.context_id === "string" ? value.context_id.trim() : "";
-
-  if ((value as any).browser_settings !== undefined && !isRecord((value as any).browser_settings)) {
-    throw new Error("[playwright_mcp.browserbase.browser_settings] must be a table");
-  }
-  if ((value as any).user_metadata !== undefined && !isRecord((value as any).user_metadata)) {
-    throw new Error("[playwright_mcp.browserbase.user_metadata] must be a table");
-  }
-  const browserSettings = isRecord((value as any).browser_settings) ? ((value as any).browser_settings as Record<string, unknown>) : null;
-  const userMetadata = isRecord((value as any).user_metadata) ? ((value as any).user_metadata as Record<string, unknown>) : null;
-
-  return {
-    api_key: apiKey,
-    project_id: projectId,
-    region: region.length > 0 ? region : undefined,
-    keep_alive: keepAlive,
-    timeout_sec: timeoutSec,
-    proxies,
-    extension_id: extensionId.length > 0 ? extensionId : null,
-    context_id: contextId.length > 0 ? contextId : null,
-    browser_settings: browserSettings,
-    user_metadata: userMetadata,
-  };
-}
-
-function normalizeHyperbrowserSection(value: unknown): PlaywrightMcpHyperbrowserSection | null {
-  if (value === undefined) return null;
-  if (!isRecord(value)) throw new Error("[playwright_mcp.hyperbrowser] must be a table");
-
-  const apiKey = typeof value.api_key === "string" ? value.api_key.trim() : "";
-  const apiBaseUrl =
-    typeof value.api_base_url === "string" && value.api_base_url.trim().length > 0
-      ? value.api_base_url.trim()
-      : "https://api.hyperbrowser.ai";
-  if ((value as any).session_params !== undefined && !isRecord((value as any).session_params)) {
-    throw new Error("[playwright_mcp.hyperbrowser.session_params] must be a table");
-  }
-  const sessionParams = isRecord((value as any).session_params) ? ((value as any).session_params as Record<string, unknown>) : null;
-
-  return {
-    api_key: apiKey,
-    api_base_url: apiBaseUrl,
-    session_params: sessionParams,
-  };
-}
-
-function normalizePlaywrightMcpSection(
-  value: unknown,
-  opts: { configDir: string; dataDir: string },
-): PlaywrightMcpSection | null {
-  if (value === undefined) return null;
-  if (!isRecord(value)) throw new Error("[playwright_mcp] must be a table");
-
-  const enabled = typeof value.enabled === "boolean" ? value.enabled : true;
-  const provider = normalizePlaywrightMcpProvider((value as any).provider);
-  const browserbase = normalizeBrowserbaseSection((value as any).browserbase);
-  const hyperbrowser = normalizeHyperbrowserSection((value as any).hyperbrowser);
-  const pkg =
-    typeof value.package === "string" && value.package.trim().length > 0 ? value.package.trim() : "@playwright/mcp@latest";
-  const browser = typeof value.browser === "string" && value.browser.trim().length > 0 ? value.browser.trim() : "chrome";
-  const host = typeof value.host === "string" && value.host.trim().length > 0 ? value.host.trim() : "127.0.0.1";
-
-  let portStart = typeof value.port_start === "number" ? Math.floor(value.port_start) : 11_000;
-  if (!Number.isFinite(portStart) || portStart < 10_001) portStart = 10_001;
-  let portEnd = typeof value.port_end === "number" ? Math.floor(value.port_end) : portStart + 2000;
-  if (!Number.isFinite(portEnd) || portEnd <= portStart) portEnd = portStart + 100;
-
-  const snapshotMode = normalizePlaywrightSnapshotMode((value as any).snapshot_mode);
-  const imageResponses = normalizePlaywrightImageResponse((value as any).image_responses);
-  const headless = typeof (value as any).headless === "boolean" ? (value as any).headless : false;
-  const timeoutMs =
-    typeof (value as any).timeout_ms === "number" && Number.isFinite((value as any).timeout_ms)
-      ? Math.max(1_000, Math.floor((value as any).timeout_ms))
-      : 20_000;
-  const userAgent =
-    typeof (value as any).user_agent === "string" && (value as any).user_agent.trim().length > 0
-      ? (value as any).user_agent.trim()
-      : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36";
-  const viewportSize =
-    typeof (value as any).viewport_size === "string" && (value as any).viewport_size.trim().length > 0
-      ? (value as any).viewport_size.trim()
-      : "1366x768";
-
-  const userDataDirRaw =
-    typeof (value as any).user_data_dir === "string" && (value as any).user_data_dir.trim().length > 0
-      ? (value as any).user_data_dir
-      : path.join(opts.dataDir, "playwright", "profile");
-  const outputDirRaw =
-    typeof (value as any).output_dir === "string" && (value as any).output_dir.trim().length > 0
-      ? (value as any).output_dir
-      : path.join(opts.dataDir, "playwright", "artifacts");
-
-  const user_data_dir = path.isAbsolute(userDataDirRaw) ? userDataDirRaw : path.resolve(opts.configDir, userDataDirRaw);
-  const output_dir = path.isAbsolute(outputDirRaw) ? outputDirRaw : path.resolve(opts.configDir, outputDirRaw);
-
-  const executablePathRaw =
-    typeof (value as any).executable_path === "string" && (value as any).executable_path.trim().length > 0
-      ? (value as any).executable_path.trim()
-      : null;
-  const executable_path = executablePathRaw
-    ? path.isAbsolute(executablePathRaw)
-      ? executablePathRaw
-      : path.resolve(opts.configDir, executablePathRaw)
-    : undefined;
-
-  return {
-    enabled,
-    provider,
-    browserbase,
-    hyperbrowser,
-    package: pkg,
-    browser,
-    host,
-    port_start: portStart,
-    port_end: portEnd,
-    snapshot_mode: snapshotMode,
-    image_responses: imageResponses,
-    headless,
-    user_data_dir,
-    output_dir,
-    executable_path,
-    timeout_ms: timeoutMs,
-    user_agent: userAgent,
-    viewport_size: viewportSize,
-  };
 }
 
 function normalizeCodexSection(value: unknown, defaults: { binary: string; sessionsDir: string; env: Record<string, string> }): CodexSection {
@@ -1184,7 +975,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     assert(slackSection.message_queue_interval_ms >= 0, "[slack].message_queue_interval_ms must be >= 0");
   }
 
-  const playwrightMcp = normalizePlaywrightMcpSection((resolved as any).playwright_mcp, {
+  const mcp = normalizeMcpSection((resolved as any).mcp, {
     configDir,
     dataDir: botSection.data_dir,
   });
@@ -1226,7 +1017,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     projects: projectEntries,
     telegram: telegramSection,
     slack: slackSection,
-    playwright_mcp: playwrightMcp,
+    mcp,
     cloud,
     pinecone,
     chatgpt_oauth,

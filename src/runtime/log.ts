@@ -41,3 +41,29 @@ export function createLogger(level: string | undefined): Logger {
   };
 }
 
+export function createLevelFilteredLogger(base: Logger, level: string | undefined): Logger {
+  const resolved: LogLevel =
+    level === "debug" || level === "info" || level === "warn" || level === "error"
+      ? level
+      : "info";
+  const threshold = LEVEL_ORDER[resolved];
+
+  function enabled(l: LogLevel) {
+    return LEVEL_ORDER[l] >= threshold;
+  }
+
+  return {
+    debug: (...args) => {
+      if (enabled("debug")) base.debug(...args);
+    },
+    info: (...args) => {
+      if (enabled("info")) base.info(...args);
+    },
+    warn: (...args) => {
+      if (enabled("warn")) base.warn(...args);
+    },
+    error: (...args) => {
+      if (enabled("error")) base.error(...args);
+    },
+  };
+}
