@@ -51,7 +51,8 @@ RUN mkdir -p /tmp/.X11-unix \
 # Install Codex + Claude Code CLIs
 RUN npm i -g @openai/codex @anthropic-ai/claude-code @playwright/mcp \
   && npm cache clean --force \
-  && rm -rf /root/.npm
+  && rm -rf /root/.npm /root/.cache \
+  && rm -rf /var/lib/apt/lists/*
 
 # Install ttyd
 RUN wget -q https://github.com/tsl0922/ttyd/releases/download/1.7.3/ttyd.x86_64 -O /usr/local/bin/ttyd \
