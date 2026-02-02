@@ -4,30 +4,33 @@ import type { Logger } from "../log.js";
 export function buildCloneUrl(
   repoUrl: string,
   token: string | null,
-  opts?: { username?: string },
+  _opts?: { username?: string },
 ): { url: string; redacted: string } {
   const redacted = repoUrl.replace(/^https?:\/\//, "https://***@");
-  if (!token) return { url: repoUrl, redacted: repoUrl };
-  const encodedToken = encodeURIComponent(token.trim());
-  const encodedUser = opts?.username ? encodeURIComponent(opts.username.trim()) : null;
-  if (repoUrl.startsWith("https://")) {
-    if (encodedUser) {
-      return { url: repoUrl.replace(/^https:\/\//, `https://${encodedUser}:${encodedToken}@`), redacted };
-    }
-    return { url: repoUrl.replace(/^https:\/\//, `https://${encodedToken}@`), redacted };
-  }
-  if (repoUrl.startsWith("http://")) {
-    if (encodedUser) {
-      return { url: repoUrl.replace(/^http:\/\//, `http://${encodedUser}:${encodedToken}@`), redacted };
-    }
-    return { url: repoUrl.replace(/^http:\/\//, `http://${encodedToken}@`), redacted };
-  }
-  return { url: repoUrl, redacted: repoUrl };
+  return { url: repoUrl, redacted: token ? redacted : repoUrl };
 }
 
-export async function runGitClone(opts: { url: string; cwd: string; targetDir: string; logger: Logger }) {
+export function buildGitAuthHeader(token: string | null, username?: string | null): string | null {
+  if (!token) return null;
+  const user = (username ?? "").trim() || "x-access-token";
+  const basic = Buffer.from(`${user}:${token}`).toString("base64");
+  return `Authorization: Basic ${basic}`;
+}
+
+export async function runGitClone(opts: {
+  url: string;
+  cwd: string;
+  targetDir: string;
+  logger: Logger;
+  authHeader?: string | null;
+}) {
   await new Promise<void>((resolve, reject) => {
-    const child = spawn("git", ["clone", "--depth", "1", opts.url, opts.targetDir], {
+    const args = ["clone", "--depth", "1", opts.url, opts.targetDir];
+    if (opts.authHeader) {
+      args.unshift(`http.extraheader=${opts.authHeader}`);
+      args.unshift("-c");
+    }
+    const child = spawn("git", args, {
       cwd: opts.cwd,
       stdio: ["ignore", "pipe", "pipe"],
     });

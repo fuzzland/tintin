@@ -24,7 +24,7 @@ import { createBrowserbaseSession, releaseBrowserbaseSession } from "./browserba
 import { createHyperbrowserSession, stopHyperbrowserSession } from "./hyperbrowser.js";
 import { hashSetupSpec, parseSetupSpec } from "./setupSpec.js";
 import { decryptSecret, interpolateSecrets } from "./secrets.js";
-import { buildCloneUrl } from "./git.js";
+import { buildCloneUrl, buildGitAuthHeader } from "./git.js";
 import { createGithubPullRequest, ensureGithubAppToken } from "./githubApp.js";
 import { findRemoteJsonlFiles, getRemoteFileSize, RemoteLogSync } from "./modalLogs.js";
 import { createProxyToken } from "./proxy.js";
@@ -1007,14 +1007,14 @@ export class CloudManager {
             this.logger.info(`[cloud] keep snapshot repo state; set remote repo=${repo.name} url=${clone.redacted}`);
             await this.time(
               "repo.remoteUrl",
-              () => this.ensureRepoRemote({ workspace, absPath, cloneUrl: clone.url }),
+              () => this.ensureRepoRemote({ workspace, absPath, cloneUrl: clone.url, authHeader: clone.authHeader }),
               `repo=${repo.name}`,
             );
           } else {
             this.logger.info(`[cloud] clone repo=${repo.name} url=${clone.redacted}`);
             await this.time(
               "repo.clone",
-              () => this.cloneRepo({ workspace, absPath, cloneUrl: clone.url }),
+              () => this.cloneRepo({ workspace, absPath, cloneUrl: clone.url, authHeader: clone.authHeader }),
               `repo=${repo.name}`,
             );
           }
@@ -1400,7 +1400,9 @@ export class CloudManager {
     return this.getModalProvider();
   }
 
-  private async resolveCloneInfo(repoId: string): Promise<{ repo: any; clone: { url: string; redacted: string } }> {
+  private async resolveCloneInfo(
+    repoId: string,
+  ): Promise<{ repo: any; clone: { url: string; redacted: string; authHeader: string | null } }> {
     const repo = await this.db.selectFrom("repos").selectAll().where("id", "=", repoId).executeTakeFirstOrThrow();
     const conn = await this.db
       .selectFrom("connections")
@@ -1420,15 +1422,44 @@ export class CloudManager {
       cloneUser = "x-access-token";
     }
     const clone = buildCloneUrl(repo.url, cloneToken, cloneUser ? { username: cloneUser } : undefined);
-    return { repo, clone };
+    const authHeader = buildGitAuthHeader(cloneToken, cloneUser);
+    return { repo, clone: { ...clone, authHeader } };
   }
 
-  private async cloneRepo(opts: { workspace: CloudWorkspace; absPath: string; cloneUrl: string }) {
+  private async resolveRepoAuthHeader(repo: ReposTable): Promise<string | null> {
+    const conn = await this.db
+      .selectFrom("connections")
+      .selectAll()
+      .where("id", "=", repo.connection_id)
+      .executeTakeFirstOrThrow();
+    let token = conn.access_token;
+    let user: string | undefined;
+    if (conn.type === "github_app" && this.config.cloud?.github_app) {
+      const appToken = await ensureGithubAppToken({
+        db: this.db,
+        config: this.config.cloud.github_app,
+        secretKey: this.config.cloud.secrets_key,
+        connection: conn,
+      });
+      token = appToken.token;
+      user = "x-access-token";
+    }
+    return buildGitAuthHeader(token, user);
+  }
+
+  private async cloneRepo(opts: {
+    workspace: CloudWorkspace;
+    absPath: string;
+    cloneUrl: string;
+    authHeader: string | null;
+  }) {
     const parentDir = path.dirname(opts.absPath);
     const cwd = this.provider.id === "modal" ? "/" : opts.workspace.rootPath;
+    const authEnv = opts.authHeader ? `GIT_HTTP_EXTRAHEADER=${shellQuote(opts.authHeader)}` : "";
+    const gitAuth = opts.authHeader ? `-c http.extraheader="$GIT_HTTP_EXTRAHEADER"` : "";
     const script = [
       `mkdir -p ${shellQuote(parentDir)}`,
-      `git clone --depth 1 ${shellQuote(opts.cloneUrl)} ${shellQuote(opts.absPath)}`,
+      `${authEnv} git ${gitAuth} clone --depth 1 ${shellQuote(opts.cloneUrl)} ${shellQuote(opts.absPath)}`,
     ].join("\n");
     await this.provider.runCommands({
       workspace: opts.workspace,
@@ -1438,15 +1469,22 @@ export class CloudManager {
     });
   }
 
-  private async ensureRepoRemote(opts: { workspace: CloudWorkspace; absPath: string; cloneUrl: string }) {
+  private async ensureRepoRemote(opts: {
+    workspace: CloudWorkspace;
+    absPath: string;
+    cloneUrl: string;
+    authHeader: string | null;
+  }) {
     const parentDir = path.dirname(opts.absPath);
     const gitDir = path.join(opts.absPath, ".git");
+    const authEnv = opts.authHeader ? `GIT_HTTP_EXTRAHEADER=${shellQuote(opts.authHeader)}` : "";
+    const gitAuth = opts.authHeader ? `-c http.extraheader="$GIT_HTTP_EXTRAHEADER"` : "";
     const script = [
       `mkdir -p ${shellQuote(parentDir)}`,
       `if [ -d ${shellQuote(gitDir)} ]; then`,
       `  git -C ${shellQuote(opts.absPath)} remote set-url origin ${shellQuote(opts.cloneUrl)}`,
       "else",
-      `  git clone --depth 1 ${shellQuote(opts.cloneUrl)} ${shellQuote(opts.absPath)}`,
+      `  ${authEnv} git ${gitAuth} clone --depth 1 ${shellQuote(opts.cloneUrl)} ${shellQuote(opts.absPath)}`,
       "fi",
     ].join("\n");
     const cwd = this.provider.id === "modal" ? "/" : opts.workspace.rootPath;
@@ -1458,18 +1496,25 @@ export class CloudManager {
     });
   }
 
-  private async refreshRepo(opts: { workspace: CloudWorkspace; absPath: string; cloneUrl: string }) {
+  private async refreshRepo(opts: {
+    workspace: CloudWorkspace;
+    absPath: string;
+    cloneUrl: string;
+    authHeader: string | null;
+  }) {
     const parentDir = path.dirname(opts.absPath);
     const gitDir = path.join(opts.absPath, ".git");
+    const authEnv = opts.authHeader ? `GIT_HTTP_EXTRAHEADER=${shellQuote(opts.authHeader)}` : "";
+    const gitAuth = opts.authHeader ? `-c http.extraheader="$GIT_HTTP_EXTRAHEADER"` : "";
     const script = [
       `mkdir -p ${shellQuote(parentDir)}`,
       `if [ -d ${shellQuote(gitDir)} ]; then`,
       `  git -C ${shellQuote(opts.absPath)} remote set-url origin ${shellQuote(opts.cloneUrl)}`,
-      `  git -C ${shellQuote(opts.absPath)} fetch --depth 1 origin`,
+      `  ${authEnv} git ${gitAuth} -C ${shellQuote(opts.absPath)} fetch --depth 1 origin`,
       "  git -C " + shellQuote(opts.absPath) + " reset --hard FETCH_HEAD",
       "  git -C " + shellQuote(opts.absPath) + " clean -fdx",
       "else",
-      `  git clone --depth 1 ${shellQuote(opts.cloneUrl)} ${shellQuote(opts.absPath)}`,
+      `  ${authEnv} git ${gitAuth} clone --depth 1 ${shellQuote(opts.cloneUrl)} ${shellQuote(opts.absPath)}`,
       "fi",
     ].join("\n");
     const cwd = this.provider.id === "modal" ? "/" : opts.workspace.rootPath;
@@ -3570,14 +3615,14 @@ AGENTS_EOF`;
             this.logger.info(`[cloud] refresh repo=${repo.name} url=${clone.redacted}`);
             await this.time(
               "repo.refresh",
-              () => this.refreshRepo({ workspace, absPath: mount.absPath, cloneUrl: clone.url }),
+              () => this.refreshRepo({ workspace, absPath: mount.absPath, cloneUrl: clone.url, authHeader: clone.authHeader }),
               `repo=${repo.name}`,
             );
           } else {
             this.logger.info(`[cloud] clone repo=${repo.name} url=${clone.redacted}`);
             await this.time(
               "repo.clone",
-              () => this.cloneRepo({ workspace, absPath: mount.absPath, cloneUrl: clone.url }),
+              () => this.cloneRepo({ workspace, absPath: mount.absPath, cloneUrl: clone.url, authHeader: clone.authHeader }),
               `repo=${repo.name}`,
             );
           }
@@ -3869,6 +3914,7 @@ AGENTS_EOF`;
   }): Promise<{ runId: string; branchName: string; repo: ReposTable }> {
     this.ensureEnabled();
     const { run, repo, workspace, cwd } = await this.resolveRunRepo(opts.sessionId);
+    const authHeader = await this.resolveRepoAuthHeader(repo);
     const message = (opts.commitMessage ?? "").trim();
     if (!message) throw new Error("Commit message is empty.");
     const branchName = (opts.branchName ?? "").trim();
@@ -3876,6 +3922,33 @@ AGENTS_EOF`;
     const authorName = (opts.gitUserName ?? "").trim() || "tintin[bot]";
     const authorEmail = (opts.gitUserEmail ?? "").trim() || "tintin@fuzz.land";
     const singleLine = message.split(/\r?\n/)[0]?.trim() || message;
+    const stageScript = [
+      "const { execFileSync, execSync } = require('child_process');",
+      "const fs = require('fs');",
+      "execSync('git add -u', { stdio: 'inherit' });",
+      "const list = execSync('git ls-files --others --exclude-standard', { encoding: 'utf8' })",
+      "  .split('\\n')",
+      "  .map((l) => l.trim())",
+      "  .filter(Boolean);",
+      "let blocked = false;",
+      "for (const file of list) {",
+      "  const norm = file.replace(/\\\\/g, '/');",
+      "  if (norm === 'node_modules' || norm.startsWith('node_modules/')) continue;",
+      "  if (norm.includes('/node_modules/')) continue;",
+      "  if ((norm === 'package.json' || norm === 'package-lock.json') && fs.existsSync(file)) {",
+      "    const txt = fs.readFileSync(file, 'utf8');",
+      "    if (txt.includes('x-access-token:')) {",
+      "      console.error(`refusing to stage ${file} containing access token`);",
+      "      blocked = true;",
+      "      continue;",
+      "    }",
+      "  }",
+      "  execFileSync('git', ['add', '--', file], { stdio: 'inherit' });",
+      "}",
+      "if (blocked) process.exit(2);",
+    ].join("\n");
+    const authEnv = authHeader ? `GIT_HTTP_EXTRAHEADER=${shellQuote(authHeader)}` : "";
+    const gitAuth = authHeader ? `-c http.extraheader="$GIT_HTTP_EXTRAHEADER"` : "";
     await this.provider.runCommands({
       workspace,
       cwd,
@@ -3883,9 +3956,9 @@ AGENTS_EOF`;
         `git config user.name ${shellQuote(authorName)}`,
         `git config user.email ${shellQuote(authorEmail)}`,
         `git checkout -B ${shellQuote(branchName)}`,
-        "git add -A",
+        `node -e ${shellQuote(stageScript)}`,
         `git commit -m ${shellQuote(singleLine)}`,
-        `git push -u origin ${shellQuote(branchName)}`,
+        `${authEnv} git ${gitAuth} push -u origin ${shellQuote(branchName)}`,
       ],
     });
     return { runId: run.id, branchName, repo };

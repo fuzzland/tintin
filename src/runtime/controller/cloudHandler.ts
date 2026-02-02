@@ -15,7 +15,7 @@ import { fetchGithubInstallationRepos, fetchGithubRepos, fetchGitlabRepos } from
 import { encryptSecret } from "../cloud/secrets.js";
 import { generateSetupSpecFromPath } from "../cloud/lift.js";
 import { hashSetupSpec, stringifySetupSpec } from "../cloud/setupSpec.js";
-import { buildCloneUrl, runGitClone } from "../cloud/git.js";
+import { buildCloneUrl, buildGitAuthHeader, runGitClone } from "../cloud/git.js";
 import { LocalCloudProvider } from "../cloud/localProvider.js";
 import { createUiToken } from "../cloud/uiTokens.js";
 import {
@@ -1340,7 +1340,14 @@ export class CloudHandler {
             cloneUser = "x-access-token";
           }
           const clone = buildCloneUrl(repo.url, cloneToken, cloneUser ? { username: cloneUser } : undefined);
-          await runGitClone({ url: clone.url, cwd: workspace.rootPath, targetDir: path.join(workspace.rootPath, "repo"), logger: this.deps.logger });
+          const authHeader = buildGitAuthHeader(cloneToken, cloneUser);
+          await runGitClone({
+            url: clone.url,
+            cwd: workspace.rootPath,
+            targetDir: path.join(workspace.rootPath, "repo"),
+            logger: this.deps.logger,
+            authHeader,
+          });
           const spec = await generateSetupSpecFromPath(path.join(workspace.rootPath, "repo"));
           const yml = stringifySetupSpec(spec);
           const hash = hashSetupSpec(yml);

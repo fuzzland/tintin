@@ -193,9 +193,12 @@ export class ModalCloudProvider implements CloudProvider {
 
   async pullDiff(opts: { workspace: CloudWorkspace; cwd: string }): Promise<{ diff: string; summary: string }> {
     const sandbox = this.getSandbox(opts.workspace.id);
-    const tracked = await this.runCommand(sandbox, "git diff", { cwd: opts.cwd });
+    const tracked = await this.runCommand(sandbox, "git diff", { cwd: opts.cwd, logOutput: false });
     let diff = tracked.stdout ?? "";
-    const untracked = await this.runCommand(sandbox, "git ls-files --others --exclude-standard", { cwd: opts.cwd });
+    const untracked = await this.runCommand(sandbox, "git ls-files --others --exclude-standard", {
+      cwd: opts.cwd,
+      logOutput: false,
+    });
     const files = (untracked.stdout ?? "")
       .split("\n")
       .map((line) => line.trim())
@@ -203,6 +206,7 @@ export class ModalCloudProvider implements CloudProvider {
     for (const file of files) {
       const extra = await this.runCommand(sandbox, `git diff --no-index /dev/null ${shellQuote(file)}`, {
         cwd: opts.cwd,
+        logOutput: false,
       });
       if (extra.stdout) diff += extra.stdout;
     }
@@ -320,7 +324,7 @@ export class ModalCloudProvider implements CloudProvider {
   private async runCommand(
     sandbox: Sandbox,
     command: string,
-    opts: { cwd: string; env?: Record<string, string> },
+    opts: { cwd: string; env?: Record<string, string>; logOutput?: boolean },
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     const proc = await sandbox.exec(["/bin/sh", "-lc", command], {
       workdir: toPosix(opts.cwd),
@@ -329,8 +333,15 @@ export class ModalCloudProvider implements CloudProvider {
       mode: "text",
     });
     const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.readText(), proc.stderr.readText(), proc.wait()]);
-    if (stdout.trim()) this.logger.debug(`[cloud][modal] ${stdout.trimEnd()}`);
-    if (stderr.trim()) this.logger.debug(`[cloud][modal] ${stderr.trimEnd()}`);
+    const maxChars = 4000;
+    const trim = (input: string) => (input.length > maxChars ? `${input.slice(0, maxChars)}…` : input);
+    if (opts.logOutput) {
+      if (stdout.trim()) this.logger.debug(`[cloud][modal] ${trim(stdout.trimEnd())}`);
+      if (stderr.trim()) this.logger.debug(`[cloud][modal] ${trim(stderr.trimEnd())}`);
+    } else if (exitCode !== 0) {
+      if (stdout.trim()) this.logger.warn(`[cloud][modal] stdout: ${trim(stdout.trimEnd())}`);
+      if (stderr.trim()) this.logger.warn(`[cloud][modal] stderr: ${trim(stderr.trimEnd())}`);
+    }
     return { stdout, stderr, exitCode };
   }
 }

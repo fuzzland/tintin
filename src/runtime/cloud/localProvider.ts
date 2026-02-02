@@ -9,6 +9,7 @@ async function runCommand(opts: {
   cwd: string;
   env?: Record<string, string>;
   logger: Logger;
+  logOutput?: boolean;
 }): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const child = spawn(opts.command, {
@@ -17,12 +18,31 @@ async function runCommand(opts: {
       shell: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    child.stdout.on("data", (chunk) => opts.logger.debug(`[cloud][cmd] ${String(chunk)}`));
-    child.stderr.on("data", (chunk) => opts.logger.debug(`[cloud][cmd] ${String(chunk)}`));
+    const maxChars = 4000;
+    let stdoutBuf = "";
+    let stderrBuf = "";
+    const append = (target: "stdout" | "stderr", chunk: Buffer) => {
+      const text = chunk.toString("utf8");
+      if (opts.logOutput) {
+        opts.logger.debug(`[cloud][cmd] ${text}`);
+      } else {
+        if (target === "stdout") stdoutBuf += text;
+        else stderrBuf += text;
+        if (stdoutBuf.length > maxChars) stdoutBuf = `${stdoutBuf.slice(0, maxChars)}…`;
+        if (stderrBuf.length > maxChars) stderrBuf = `${stderrBuf.slice(0, maxChars)}…`;
+      }
+    };
+    child.stdout.on("data", (chunk) => append("stdout", Buffer.from(chunk)));
+    child.stderr.on("data", (chunk) => append("stderr", Buffer.from(chunk)));
     child.on("error", reject);
     child.on("exit", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`Command failed (${code}): ${opts.command}`));
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      if (stdoutBuf.trim()) opts.logger.warn(`[cloud][cmd] stdout: ${stdoutBuf.trimEnd()}`);
+      if (stderrBuf.trim()) opts.logger.warn(`[cloud][cmd] stderr: ${stderrBuf.trimEnd()}`);
+      reject(new Error(`Command failed (${code}): ${opts.command}`));
     });
   });
 }
