@@ -53,6 +53,7 @@ RUN npm i -g @openai/codex @anthropic-ai/claude-code @playwright/mcp \
   && npm cache clean --force \
   && rm -rf /root/.npm /root/.cache \
   && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://claude.ai/install.sh | bash
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
 # Install ttyd
