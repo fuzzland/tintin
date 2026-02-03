@@ -1244,6 +1244,9 @@ export class CloudManager {
       PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
       LANG: "C.UTF-8",
       LC_ALL: "C.UTF-8",
+      NODE_PATH: "/usr/lib/node_modules:/usr/local/lib/node_modules",
+      PLAYWRIGHT_BROWSERS_PATH: "/opt/playwright-browsers",
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
     };
     for (const [key, value] of Object.entries(base)) {
       if (!(key in env)) env[key] = value;
@@ -3938,7 +3941,7 @@ AGENTS_EOF`;
       "  if ((norm === 'package.json' || norm === 'package-lock.json') && fs.existsSync(file)) {",
       "    const txt = fs.readFileSync(file, 'utf8');",
       "    if (txt.includes('x-access-token:')) {",
-      "      console.error(`refusing to stage ${file} containing access token`);",
+      "      console.error('refusing to stage ' + file + ' containing access token');",
       "      blocked = true;",
       "      continue;",
       "    }",
@@ -3946,7 +3949,8 @@ AGENTS_EOF`;
       "  execFileSync('git', ['add', '--', file], { stdio: 'inherit' });",
       "}",
       "if (blocked) process.exit(2);",
-    ].join("\n");
+    ].join(\"\\n\");
+    const stageScriptPath = \"/tmp/tintin-stage.js\";
     const authEnv = authHeader ? `GIT_HTTP_EXTRAHEADER=${shellQuote(authHeader)}` : "";
     const gitAuth = authHeader ? `-c http.extraheader="$GIT_HTTP_EXTRAHEADER"` : "";
     await this.provider.runCommands({
@@ -3956,7 +3960,8 @@ AGENTS_EOF`;
         `git config user.name ${shellQuote(authorName)}`,
         `git config user.email ${shellQuote(authorEmail)}`,
         `git checkout -B ${shellQuote(branchName)}`,
-        `node -e ${shellQuote(stageScript)}`,
+        `cat <<'EOF' > ${shellQuote(stageScriptPath)}\n${stageScript}\nEOF`,
+        `node ${shellQuote(stageScriptPath)}`,
         `git commit -m ${shellQuote(singleLine)}`,
         `${authEnv} git ${gitAuth} push -u origin ${shellQuote(branchName)}`,
       ],
