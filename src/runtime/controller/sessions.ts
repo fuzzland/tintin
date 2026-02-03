@@ -81,7 +81,6 @@ export function buildCloudHelpText(platform: "telegram" | "slack", lang: UserLan
     t("cloud.help.cmd.run", lang, { cmd: `\`${cmd("run <prompt>")}\``, arg: "`--repos id1,id2`" }),
     "",
     t("cloud.help.step_check_results", lang),
-    t("cloud.help.cmd.mcp", lang, { cmd: `\`${cmd("mcp")}\`` }),
     `- \`${cmd("status <runId>")}\``,
     `- \`${cmd("pull <runId>")}\``,
     "",

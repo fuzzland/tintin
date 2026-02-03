@@ -191,7 +191,6 @@ export const zh = {
   "cloud.help.step_run_action": "4) 运行任务",
   "cloud.help.cmd.run": "- {cmd}（添加 {arg} 指定多个仓库）",
   "cloud.help.step_check_results": "5) 查看结果",
-  "cloud.help.cmd.mcp": "- {cmd} 查看 MCP 工具列表",
   "cloud.help.step_secrets": "6) 管理 Secrets",
   "cloud.help.step_cli": "7) CLI 访问",
   "cloud.help.cmd.tinc_token": "- {cmd} 生成 CLI token",

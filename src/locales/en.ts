@@ -191,7 +191,6 @@ export const en = {
   "cloud.help.step_run_action": "4) Run a task",
   "cloud.help.cmd.run": "- {cmd} (add {arg} to target multiple repos)",
   "cloud.help.step_check_results": "5) Check results",
-  "cloud.help.cmd.mcp": "- {cmd} list MCP tools",
   "cloud.help.step_secrets": "6) Manage secrets",
   "cloud.help.step_cli": "7) CLI access",
   "cloud.help.cmd.tinc_token": "- {cmd} generate a CLI token",
