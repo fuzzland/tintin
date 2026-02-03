@@ -3830,17 +3830,8 @@ AGENTS_EOF`;
   }
 
   private buildGitExtraHeaderArgs(repoUrl: string): string[] {
-    const args = [`-c http.extraheader="$GIT_HTTP_EXTRAHEADER"`];
-    try {
-      const parsed = new URL(repoUrl);
-      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-        const origin = parsed.origin.replace(/\/+$/, "");
-        args.push(`-c http.${origin}/.extraheader="$GIT_HTTP_EXTRAHEADER"`);
-      }
-    } catch {
-      // Ignore invalid URLs; fall back to the global extraheader.
-    }
-    return args;
+    void repoUrl;
+    return [`-c http.extraheader="$GIT_HTTP_EXTRAHEADER"`];
   }
 
   private async resolveRunRepo(sessionId: string): Promise<{
