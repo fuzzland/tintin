@@ -141,7 +141,7 @@ export class GitHubMcpProvider extends BaseMcpProvider<GitHubMcpProviderConfig> 
       headers["X-GitHub-Host"] = config.github_host;
     }
     if (config.toolsets && config.toolsets.length > 0) {
-      headers["X-GitHub-Toolsets"] = config.toolsets.join(",");
+      headers["X-MCP-Toolsets"] = config.toolsets.join(",");
     }
 
     const provider = new HttpMcpProvider(this.name, transport);

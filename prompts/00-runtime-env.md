@@ -12,6 +12,6 @@ When reporting file paths in responses, use paths relative to the current workin
 
 ## MCP Notes
 
-- Some MCP servers (e.g., GitHub MCP) may expose **tools** but no **resources**. 
-- Do **not** treat an empty `list_mcp_resources` or `list_mcp_resource_templates` response as MCP being unavailable.
-- To verify MCP availability, prefer `list_mcp_tools` and proceed if tools are present.
+- Some MCP servers (e.g., GitHub MCP) expose **tools** but may return **no resources/templates**.
+- Do **not** treat empty `list_mcp_resources` or `list_mcp_resource_templates` as MCP being unavailable.
+- If MCP is configured, proceed with the requested task; only report MCP unavailable if a direct tool call fails.

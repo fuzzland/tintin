@@ -1656,7 +1656,7 @@ export class CloudManager {
       headers["X-GitHub-Host"] = provider.github_host;
     }
     if (provider.toolsets && provider.toolsets.length > 0) {
-      headers["X-GitHub-Toolsets"] = provider.toolsets.join(",");
+      headers["X-MCP-Toolsets"] = provider.toolsets.join(",");
     }
     return {
       id: name,

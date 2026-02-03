@@ -55,7 +55,7 @@ test("GitHubMcpProvider builds remote http config", async () => {
   assert.equal(info.url, "https://api.githubcopilot.com/mcp/");
   assert.equal(info.headers?.Authorization, "Bearer token");
   assert.equal(info.headers?.["X-GitHub-Host"], "https://github.example.com");
-  assert.equal(info.headers?.["X-GitHub-Toolsets"], "repos");
+  assert.equal(info.headers?.["X-MCP-Toolsets"], "repos");
 });
 
 test("GitHubMcpProvider requires binary_path in binary mode", async () => {
