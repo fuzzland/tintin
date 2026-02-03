@@ -5,40 +5,51 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 
-# Use a fast mirror when available (Ubuntu 24.04 uses DEB822 sources).
-RUN if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then \
-      sed -i 's|http://archive.ubuntu.com/ubuntu|https://mirrors.aliyun.com/ubuntu|g; s|http://security.ubuntu.com/ubuntu|https://mirrors.aliyun.com/ubuntu|g; s|http://ports.ubuntu.com/ubuntu-ports|https://mirrors.aliyun.com/ubuntu-ports|g' /etc/apt/sources.list.d/ubuntu.sources; \
-    elif [ -f /etc/apt/sources.list ]; then \
-      sed -i 's|http://ports.ubuntu.com/ubuntu-ports|https://mirrors.aliyun.com/ubuntu-ports|g; s|http://archive.ubuntu.com/ubuntu|https://mirrors.aliyun.com/ubuntu|g' /etc/apt/sources.list; \
-    fi
+# Bootstrap CA trust store using default Ubuntu sources before switching mirrors.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates gnupg \
+  && rm -rf /var/lib/apt/lists/*
+
+# Use Aliyun mirror for Ubuntu 24.04.
+RUN rm -f /etc/apt/sources.list.d/ubuntu.sources \
+  && cat <<'EOF' > /etc/apt/sources.list
+deb https://mirrors.aliyun.com/ubuntu/ noble main restricted universe multiverse
+deb https://mirrors.aliyun.com/ubuntu/ noble-security main restricted universe multiverse
+deb https://mirrors.aliyun.com/ubuntu/ noble-updates main restricted universe multiverse
+deb https://mirrors.aliyun.com/ubuntu/ noble-backports main restricted universe multiverse
+EOF
 
 # Base OS packages: GUI stack, tooling, and runtime prerequisites.
-# Note: NodeSource setup and apt install must be in the same RUN for repo visibility.
+# Note: NodeSource repo setup and apt install must be in the same RUN for repo visibility.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
-  && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+  && apt-get install -y --no-install-recommends curl \
+  && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+  | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg \
+  && echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" \
+  > /etc/apt/sources.list.d/nodesource.list \
+  && apt-get update \
   && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-pip \
-    git \
-    nodejs \
-    xvfb \
-    x11vnc \
-    xdotool \
-    xfce4 \
-    x11-xserver-utils \
-    papirus-icon-theme \
-    arc-theme \
-    fonts-noto \
-    fonts-noto-color-emoji \
-    ripgrep \
-    build-essential \
-    dbus-x11 \
-    colord \
-    socat \
-    scrot \
-    sudo \
-    tmux \
+  python3 \
+  python3-pip \
+  git \
+  nodejs \
+  xvfb \
+  x11vnc \
+  xdotool \
+  xfce4 \
+  x11-xserver-utils \
+  papirus-icon-theme \
+  arc-theme \
+  fonts-noto \
+  fonts-noto-color-emoji \
+  ripgrep \
+  build-essential \
+  dbus-x11 \
+  colord \
+  socat \
+  scrot \
+  sudo \
+  tmux \
   && wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb \
   && apt-get install -y --no-install-recommends /tmp/chrome.deb \
   && rm -f /tmp/chrome.deb \
@@ -54,9 +65,12 @@ RUN mkdir -p /tmp/.X11-unix \
 
 # MCP toolchain: install all MCP-related npm packages at build time.
 # Extend by editing MCP_NPM_PACKAGES (no runtime installs).
-ARG MCP_NPM_PACKAGES="@playwright/mcp@latest"
+ARG PLAYWRIGHT_MCP_PACKAGE=@playwright/mcp@latest
+ARG MCP_NPM_PACKAGES="${PLAYWRIGHT_MCP_PACKAGE}"
 ENV MCP_NPM_PACKAGES=${MCP_NPM_PACKAGES}
+ENV TINTIN_PLAYWRIGHT_MCP_PACKAGE=${PLAYWRIGHT_MCP_PACKAGE}
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+# Explicit install at build time; runtime downloads disabled.
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 RUN npm config set fund false \
   && npm config set audit false \
@@ -65,8 +79,8 @@ RUN npm config set fund false \
   && NPM_ROOT="$(npm root -g)" \
   && PW_VERSION="$(NODE_PATH="${NPM_ROOT}" node -e "const pkg=require('@playwright/mcp/package.json'); const deps=pkg.dependencies || {}; process.stdout.write(deps.playwright || deps['playwright-core'] || '');")" \
   && if [ -z "${PW_VERSION}" ]; then \
-    echo "Unable to detect Playwright version from @playwright/mcp; aborting build." >&2; \
-    exit 1; \
+  echo "Unable to detect Playwright version from @playwright/mcp; aborting build." >&2; \
+  exit 1; \
   fi \
   && echo "Preinstalling Playwright browsers for ${PW_VERSION}" \
   && mkdir -p "${PLAYWRIGHT_BROWSERS_PATH}" \
