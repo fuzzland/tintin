@@ -993,16 +993,17 @@ export class CloudManager {
       if (opts.repoIds.length > 0) {
         for (let i = 0; i < opts.repoIds.length; i++) {
           const repoId = opts.repoIds[i]!;
-          const mountPath = i === 0 ? path.posix.join("repo", "main") : path.posix.join("repo", `dep${i}`);
-          const absPath = this.joinWorkspacePath(workspace.rootPath, mountPath);
-          repoMounts.push({ repoId, mountPath, absPath });
-          await addRunRepo(this.db, { runId: run.id, repoId, mountPath });
           const { repo, clone } = await this.time(
             "repo.resolve",
             () => this.resolveCloneInfo(repoId),
             `repoId=${repoId}`,
             "debug",
           );
+          const repoSlug = this.normalizeRepoMountName(repo.name);
+          const mountPath = i === 0 ? path.posix.join("repo", repoSlug) : path.posix.join("repo", `dep${i}`);
+          const absPath = this.joinWorkspacePath(workspace.rootPath, mountPath);
+          repoMounts.push({ repoId, mountPath, absPath });
+          await addRunRepo(this.db, { runId: run.id, repoId, mountPath });
           if (usedSnapshot) {
             this.logger.info(`[cloud] keep snapshot repo state; set remote repo=${repo.name} url=${clone.redacted}`);
             await this.time(
@@ -1557,6 +1558,12 @@ export class CloudManager {
 
   private resolvePlaywrightProviderName(): string {
     return resolvePlaywrightProviderEntry(this.config.mcp)?.name ?? "playwright";
+  }
+
+  private normalizeRepoMountName(name: string): string {
+    const raw = name.split("/").pop() ?? name;
+    const cleaned = raw.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+    return cleaned || "repo";
   }
 
   private resolvePlaywrightStartupTimeoutSec(cfg: PlaywrightMcpSection): number {
@@ -4231,17 +4238,17 @@ AGENTS_EOF`;
       if (opts.repoIds.length > 0) {
         for (let i = 0; i < opts.repoIds.length; i++) {
           const repoId = opts.repoIds[i]!;
-          const mountPath = i === 0 ? path.posix.join("repo", "main") : path.posix.join("repo", `dep${i}`);
-          const absPath = this.joinWorkspacePath(workspace.rootPath, mountPath);
-          repoMounts.push({ repoId, mountPath, absPath });
-          await addRunRepo(this.db, { runId: run.id, repoId, mountPath });
-
           const { repo, clone } = await this.time(
             "repo.resolve",
             () => this.resolveCloneInfo(repoId),
             `repoId=${repoId}`,
             "debug",
           );
+          const repoSlug = this.normalizeRepoMountName(repo.name);
+          const mountPath = i === 0 ? path.posix.join("repo", repoSlug) : path.posix.join("repo", `dep${i}`);
+          const absPath = this.joinWorkspacePath(workspace.rootPath, mountPath);
+          repoMounts.push({ repoId, mountPath, absPath });
+          await addRunRepo(this.db, { runId: run.id, repoId, mountPath });
 
           this.logger.info(`[cloud] clone repo=${repo.name} url=${clone.redacted}`);
           await this.time(
