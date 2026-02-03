@@ -212,6 +212,34 @@ export function mapCodexEventToFragments(
         const errorLabel = t("streamer.error", lang);
         body = body ? `${body}\n${errorLabel}: ${err}` : `${errorLabel}: ${err}`;
       }
+      if (!err && server === "github" && tool === "create_issue") {
+        const parseJson = (raw: unknown): any | null => {
+          if (!raw || typeof raw !== "string") return null;
+          try {
+            return JSON.parse(raw);
+          } catch {
+            return null;
+          }
+        };
+        const parsedArgs = typeof args === "string" ? parseJson(args) : args;
+        const owner = parsedArgs && typeof parsedArgs === "object" ? stringOrEmpty((parsedArgs as any).owner) : "";
+        const repo = parsedArgs && typeof parsedArgs === "object" ? stringOrEmpty((parsedArgs as any).repo) : "";
+        const parsedOutput = parseJson(output);
+        const issueObj =
+          parsedOutput && typeof parsedOutput === "object"
+            ? (parsedOutput as any).issue ?? (parsedOutput as any).createdIssue ?? (parsedOutput as any)
+            : null;
+        const issueNumber =
+          issueObj && typeof issueObj === "object" ? numberOrNull((issueObj as { number?: unknown }).number) : null;
+        const issueUrl =
+          issueObj && typeof issueObj === "object" ? stringOrEmpty((issueObj as { html_url?: unknown }).html_url) : "";
+        const link =
+          issueUrl ||
+          (owner && repo && issueNumber !== null ? `https://github.com/${owner}/${repo}/issues/${issueNumber}` : "");
+        if (link && !body.includes(link)) {
+          body = body ? `${body}\nIssue: ${link}` : `Issue: ${link}`;
+        }
+      }
       if (!body && (item as { result?: unknown }).result !== undefined) {
         body = truncateJson((item as { result?: unknown }).result, 800);
       }
