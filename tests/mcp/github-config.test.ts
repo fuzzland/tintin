@@ -149,7 +149,7 @@ token = "env:GITHUB_TOKEN"
   }
 });
 
-test("loadConfig rejects GitHub MCP token without env prefix", async () => {
+test("loadConfig accepts GitHub MCP token without env prefix", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "tintin-config-"));
   const configPath = path.join(dir, "config.toml");
   await writeFile(
@@ -171,7 +171,12 @@ token = "ghp_plaintext"
   );
 
   try {
-    await assert.rejects(() => loadConfig(configPath));
+    const config = await loadConfig(configPath);
+    const provider = config.mcp?.providers.github;
+    assert.ok(provider);
+    if (provider.type !== "github") throw new Error("Expected github provider");
+    assert.equal(provider.mode, "remote");
+    assert.equal(provider.token, "ghp_plaintext");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

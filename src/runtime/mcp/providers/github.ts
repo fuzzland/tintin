@@ -133,7 +133,7 @@ export class GitHubMcpProvider extends BaseMcpProvider<GitHubMcpProviderConfig> 
     token: string,
   ): { provider: HttpMcpProvider; config: Parameters<HttpMcpProvider["init"]>[0] } {
     const url = "https://api.githubcopilot.com/mcp/";
-    const transport = "sse";
+    const transport = "http";
     const headers: Record<string, string> = {
       Authorization: `Bearer ${token}`,
     };

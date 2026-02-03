@@ -51,7 +51,7 @@ test("GitHubMcpProvider builds remote http config", async () => {
   );
 
   const info = provider.getServerInfo();
-  assert.equal(info.transport, "sse");
+  assert.equal(info.transport, "http");
   assert.equal(info.url, "https://api.githubcopilot.com/mcp/");
   assert.equal(info.headers?.Authorization, "Bearer token");
   assert.equal(info.headers?.["X-GitHub-Host"], "https://github.example.com");
