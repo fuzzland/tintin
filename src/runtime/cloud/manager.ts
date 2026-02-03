@@ -1695,7 +1695,28 @@ export class CloudManager {
     if (servers.size === 0) return [];
     const adapter = getAgentAdapter(agent);
     const globalTimeout = mcp.global_timeout_sec;
+    this.logMcpServerSummary(agent, servers);
     return adapter.buildMcpCliArgs({ servers, globalTimeout });
+  }
+
+  private logMcpServerSummary(agent: SessionAgent, servers: Map<string, McpServerInfo>): void {
+    const parts: string[] = [];
+    for (const [name, info] of servers.entries()) {
+      let urlSummary = "";
+      if (info.url) {
+        try {
+          const parsed = new URL(info.url);
+          urlSummary = `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+        } catch {
+          urlSummary = info.url;
+        }
+      }
+      const headerCount = info.headers ? Object.keys(info.headers).length : 0;
+      parts.push(
+        `${name}{transport=${info.transport}${urlSummary ? `,url=${urlSummary}` : ""},headers=${headerCount}}`,
+      );
+    }
+    this.logger.info(`[cloud] mcp servers agent=${agent} ${parts.join(" ")}`);
   }
 
   private isBrowserbaseEnabled(): boolean {
