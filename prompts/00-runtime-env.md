@@ -9,3 +9,9 @@ Playwright and its browser binaries are preinstalled in the container.
 If a task requires a browser, assume Playwright is ready and avoid altering the repo or creating `node_modules`. 
 
 When reporting file paths in responses, use paths relative to the current working directory (cwd) and never expose absolute container paths like `/workspace/...`.
+
+## MCP Notes
+
+- Some MCP servers (e.g., GitHub MCP) may expose **tools** but no **resources**. 
+- Do **not** treat an empty `list_mcp_resources` or `list_mcp_resource_templates` response as MCP being unavailable.
+- To verify MCP availability, prefer `list_mcp_tools` and proceed if tools are present.
