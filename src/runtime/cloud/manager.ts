@@ -3829,6 +3829,20 @@ AGENTS_EOF`;
     return { owner: match[1]!, repo: match[2]! };
   }
 
+  private buildGitExtraHeaderArgs(repoUrl: string): string[] {
+    const args = [`-c http.extraheader="$GIT_HTTP_EXTRAHEADER"`];
+    try {
+      const parsed = new URL(repoUrl);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        const origin = parsed.origin.replace(/\/+$/, "");
+        args.push(`-c http.${origin}/.extraheader="$GIT_HTTP_EXTRAHEADER"`);
+      }
+    } catch {
+      // Ignore invalid URLs; fall back to the global extraheader.
+    }
+    return args;
+  }
+
   private async resolveRunRepo(sessionId: string): Promise<{
     run: CloudRunsTable;
     repo: ReposTable;
@@ -3958,8 +3972,9 @@ AGENTS_EOF`;
       "if (blocked) process.exit(2);",
     ].join("\n");
     const stageScriptPath = "/tmp/tintin-stage.js";
-    const authEnv = authHeader ? `GIT_HTTP_EXTRAHEADER=${shellQuote(authHeader)}` : "";
-    const gitAuth = authHeader ? `-c http.extraheader="$GIT_HTTP_EXTRAHEADER"` : "";
+    const gitAuth = authHeader ? this.buildGitExtraHeaderArgs(repo.url).join(" ") : "";
+    const env: Record<string, string> = { GIT_TERMINAL_PROMPT: "0" };
+    if (authHeader) env.GIT_HTTP_EXTRAHEADER = authHeader;
     await this.provider.runCommands({
       workspace,
       cwd,
@@ -3970,8 +3985,9 @@ AGENTS_EOF`;
         `cat <<'EOF' > ${shellQuote(stageScriptPath)}\n${stageScript}\nEOF`,
         `node ${shellQuote(stageScriptPath)}`,
         `git commit -m ${shellQuote(singleLine)}`,
-        `${authEnv} git ${gitAuth} push -u origin ${shellQuote(branchName)}`,
+        `git ${gitAuth} push -u origin ${shellQuote(branchName)}`,
       ],
+      env,
     });
     return { runId: run.id, branchName, repo };
   }
