@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { McpConfig, PlaywrightMcpProviderConfig } from "../../src/runtime/mcp/config.js";
+import type { GitHubMcpProviderConfig, McpConfig, PlaywrightMcpProviderConfig } from "../../src/runtime/mcp/config.js";
 import { buildMcpBootstrapConfig } from "../../src/runtime/mcp/bootstrap.js";
 
 function basePlaywright(overrides?: Partial<PlaywrightMcpProviderConfig>): PlaywrightMcpProviderConfig {
@@ -79,4 +79,24 @@ test("buildMcpBootstrapConfig returns null when no local providers", () => {
 
   const bootstrap = buildMcpBootstrapConfig(config);
   assert.equal(bootstrap, null);
+});
+
+test("buildMcpBootstrapConfig rejects GitHub docker mode in cloud", () => {
+  const github: GitHubMcpProviderConfig = {
+    enabled: true,
+    type: "github",
+    mode: "docker",
+    token: "token",
+    docker_image: "ghcr.io/github/github-mcp-server",
+    docker_args: [],
+  };
+  const config: McpConfig = {
+    global_timeout_sec: 60,
+    log_level: "info",
+    providers: {
+      github,
+    },
+  };
+
+  assert.throws(() => buildMcpBootstrapConfig(config));
 });

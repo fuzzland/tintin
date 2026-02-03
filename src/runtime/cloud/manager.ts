@@ -14,7 +14,12 @@ import { redactText } from "../redact.js";
 import type { Sandbox } from "modal";
 import type { McpServerInfo } from "../mcp/types.js";
 import { buildMcpBootstrapConfig, encodeMcpBootstrapConfig, type McpBootstrapConfig } from "../mcp/bootstrap.js";
-import { resolvePlaywrightProvider, resolvePlaywrightProviderEntry, type McpProviderConfig } from "../mcp/config.js";
+import {
+  resolvePlaywrightProvider,
+  resolvePlaywrightProviderEntry,
+  type GitHubMcpProviderConfig,
+  type McpProviderConfig,
+} from "../mcp/config.js";
 import { resolveCodexHomeFromSessionsRoot, resolveSessionsRoot } from "../codex.js";
 import { resolveClaudeConfigDirFromSessionsRoot, resolveClaudeSessionJsonlPath } from "../claudeCode.js";
 import { LocalCloudProvider } from "./localProvider.js";
@@ -1629,11 +1634,37 @@ export class CloudManager {
           status: "running",
           startupTimeoutSec: this.resolvePlaywrightStartupTimeoutSec(provider),
         };
+      case "github":
+        return this.buildGithubServerInfo(name, provider);
       default: {
         const unreachable: never = provider;
         throw new Error(`Unsupported MCP provider type: ${(unreachable as { type?: string }).type ?? "unknown"}`);
       }
     }
+  }
+
+  private buildGithubServerInfo(name: string, provider: GitHubMcpProviderConfig): McpServerInfo {
+    if (provider.mode !== "remote") {
+      throw new Error(`[mcp.providers.${name}] GitHub MCP in cloud mode requires mode="remote".`);
+    }
+    const url = provider.url ?? "https://api.githubcopilot.com/mcp/";
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${provider.token}`,
+    };
+    if (provider.github_host) {
+      headers["X-GitHub-Host"] = provider.github_host;
+    }
+    if (provider.toolsets && provider.toolsets.length > 0) {
+      headers["X-GitHub-Toolsets"] = provider.toolsets.join(",");
+    }
+    return {
+      id: name,
+      transport: "http",
+      url,
+      headers,
+      status: "running",
+      startupTimeoutSec: provider.startup_timeout_sec,
+    };
   }
 
   private buildRemoteMcpArgs(agent: SessionAgent, serverOverride?: McpServerInfo): string[] {

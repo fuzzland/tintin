@@ -1,4 +1,10 @@
-import type { McpConfig, McpProviderConfig, McpProviderType, PlaywrightMcpProviderConfig } from "./config.js";
+import type {
+  GitHubMcpProviderConfig,
+  McpConfig,
+  McpProviderConfig,
+  McpProviderType,
+  PlaywrightMcpProviderConfig,
+} from "./config.js";
 import type { McpLogLevel } from "./schemas.js";
 
 export interface McpBootstrapConfig {
@@ -25,6 +31,16 @@ const BOOTSTRAP_SELECTORS: Record<McpProviderType, BootstrapSelector> = {
   http: () => null,
   sse: () => null,
   playwright: selectPlaywrightBootstrap,
+  github: (name, provider) => {
+    if (provider.type !== "github") return null;
+    const cfg = provider as GitHubMcpProviderConfig;
+    if (cfg.mode !== "remote") {
+      throw new Error(
+        `[mcp.providers.${name}] GitHub MCP in cloud mode requires mode="remote". Docker and binary modes are not supported in Modal.`,
+      );
+    }
+    return null;
+  },
 };
 
 export function buildMcpBootstrapConfig(mcp: McpConfig | null | undefined): McpBootstrapConfig | null {

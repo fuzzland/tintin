@@ -29,6 +29,38 @@ export const SseMcpProviderSchema = HttpBaseSchema.extend({
   type: z.literal("sse"),
 });
 
+const GitHubMcpModeSchema = z.enum(["docker", "binary", "remote"]);
+
+const GitHubDockerModeSchema = z.object({
+  mode: z.literal("docker"),
+  docker_image: z.string().default("ghcr.io/github/github-mcp-server"),
+  docker_args: z.array(z.string()).default([]),
+});
+
+const GitHubBinaryModeSchema = z.object({
+  mode: z.literal("binary"),
+  binary_path: z.string().min(1),
+  binary_args: z.array(z.string()).default(["stdio"]),
+});
+
+const GitHubRemoteModeSchema = z.object({
+  mode: z.literal("remote"),
+  url: z.string().url().default("https://api.githubcopilot.com/mcp/"),
+});
+
+export const GitHubMcpProviderSchema = BaseMcpProviderSchema.extend({
+  type: z.literal("github"),
+  token: z.string().min(1),
+  github_host: z.string().url().optional(),
+  toolsets: z.array(z.string()).optional(),
+}).and(
+  z.discriminatedUnion("mode", [
+    GitHubDockerModeSchema,
+    GitHubBinaryModeSchema,
+    GitHubRemoteModeSchema,
+  ]),
+);
+
 const PlaywrightSnapshotModeSchema = z.enum(["incremental", "full", "none"]);
 const PlaywrightImageResponseSchema = z.enum(["allow", "omit"]);
 const PlaywrightProviderSchema = z.enum(["local", "browserbase", "hyperbrowser"]);
@@ -84,6 +116,7 @@ export const McpProviderConfigSchema = z.discriminatedUnion("type", [
   HttpMcpProviderSchema,
   SseMcpProviderSchema,
   PlaywrightMcpProviderSchema,
+  GitHubMcpProviderSchema,
 ]);
 
 export const McpConfigSchema = z.object({

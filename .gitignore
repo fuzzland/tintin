@@ -37,6 +37,7 @@ config-aws.toml
 config.e2e.toml
 .codex
 .claude
+.sisyphus
 
 # IntelliJ based IDEs
 .idea
@@ -44,7 +45,7 @@ config.e2e.toml
 # Finder (MacOS) folder config
 .DS_Store
 demo/
- 
+
 # local build artifacts
 node
 tsc

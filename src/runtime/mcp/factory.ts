@@ -1,6 +1,7 @@
 import type { McpProviderConfig, McpProviderType } from "./config.js";
 import type { IMcpProvider } from "./types.js";
 import { HttpMcpProvider } from "./providers/http.js";
+import { GitHubMcpProvider } from "./providers/github.js";
 import { PlaywrightMcpProvider } from "./providers/playwright/index.js";
 import { StdioMcpProvider } from "./providers/stdio.js";
 
@@ -11,6 +12,7 @@ const PROVIDER_FACTORIES: Record<McpProviderType, ProviderFactory> = {
   http: (name) => new HttpMcpProvider(name, "http"),
   sse: (name) => new HttpMcpProvider(name, "sse"),
   playwright: (name) => new PlaywrightMcpProvider(name),
+  github: (name) => new GitHubMcpProvider(name),
 };
 
 export function createMcpProvider(name: string, config: McpProviderConfig): IMcpProvider {

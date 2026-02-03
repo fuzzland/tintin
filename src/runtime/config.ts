@@ -270,6 +270,15 @@ function resolveEnvSecrets(
   currentPath: string[] = [],
 ): unknown {
   if (typeof value === "string") {
+    if (
+      currentPath.length >= 4 &&
+      currentPath[0] === "mcp" &&
+      currentPath[1] === "providers" &&
+      currentPath[3] === "token" &&
+      !value.startsWith("env:")
+    ) {
+      throw new Error(`[mcp.providers.${currentPath[2]}].token must use env:VAR syntax`);
+    }
     if (value.startsWith("env:")) {
       ensureDotenvLoaded(opts.configDir);  // Ensure dotenv files are loaded
       const key = value.slice("env:".length);
