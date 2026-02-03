@@ -5,11 +5,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 
-# Bootstrap CA trust store using default Ubuntu sources before switching mirrors.
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates gnupg \
-  && rm -rf /var/lib/apt/lists/*
-
 # Use Aliyun mirror for Ubuntu 24.04.
 RUN rm -f /etc/apt/sources.list.d/ubuntu.sources \
   && cat <<'EOF' > /etc/apt/sources.list
@@ -21,8 +16,9 @@ EOF
 
 # Base OS packages: GUI stack, tooling, and runtime prerequisites.
 # Note: NodeSource repo setup and apt install must be in the same RUN for repo visibility.
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends curl \
+RUN apt-get -o Acquire::https::Verify-Peer=false -o Acquire::https::Verify-Host=false update \
+  && apt-get install -y --no-install-recommends ca-certificates gnupg curl \
+  && apt-get update \
   && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
   | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg \
   && echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" \
