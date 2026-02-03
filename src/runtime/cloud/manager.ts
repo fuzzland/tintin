@@ -3956,7 +3956,7 @@ AGENTS_EOF`;
       "  execFileSync('git', ['add', '--', file], { stdio: 'inherit' });",
       "}",
       "if (blocked) process.exit(2);",
-    ].join("\\n");
+    ].join("\n");
     const stageScriptPath = "/tmp/tintin-stage.js";
     const authEnv = authHeader ? `GIT_HTTP_EXTRAHEADER=${shellQuote(authHeader)}` : "";
     const gitAuth = authHeader ? `-c http.extraheader="$GIT_HTTP_EXTRAHEADER"` : "";
