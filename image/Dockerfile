@@ -138,11 +138,12 @@ RUN chmod +x \
   /usr/local/bin/static-deploy \
   /usr/local/bin/dynamic-deploy
 
-RUN useradd -m -s /bin/bash ubuntu \
+RUN id ubuntu >/dev/null 2>&1 || useradd -m -s /bin/bash ubuntu \
   && mkdir -p /home/ubuntu/.image \
   && chown -R ubuntu:ubuntu /home/ubuntu \
   && echo "ubuntu ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/ubuntu \
-  && chmod 0440 /etc/sudoers.d/ubuntu
+  && chmod 0440 /etc/sudoers.d/ubuntu \
+  && chsh -s /bin/bash ubuntu
 
 USER ubuntu
 
