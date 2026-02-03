@@ -1,7 +1,9 @@
 FROM ubuntu:24.04
 
-# Prevent interactive prompts during package installation
+SHELL ["/bin/bash", "-euxo", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
 
 # Change source - Use Alibaba Cloud mirror (compatible with Ubuntu 24.04 DEB822 format)
 RUN if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then \
@@ -44,6 +46,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
 
+# Install Chrome.
+RUN wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends /tmp/chrome.deb \
+  && rm -f /tmp/chrome.deb \
+  && rm -rf /var/lib/apt/lists/*
+
+# Reduce image size by removing docs and caches.
+RUN rm -rf /usr/share/doc/* /usr/share/man/* /usr/share/locale/* /var/cache/apt/* /tmp/* /var/tmp/*
+
 RUN mkdir -p /tmp/.X11-unix \
   && chown root:root /tmp/.X11-unix \
   && chmod 1777 /tmp/.X11-unix
@@ -51,16 +63,16 @@ RUN mkdir -p /tmp/.X11-unix \
 # Install Codex + Claude Code CLIs
 RUN npm i -g @openai/codex @anthropic-ai/claude-code @playwright/mcp \
   && npm cache clean --force \
-  && rm -rf /root/.npm /root/.cache \
-  && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL https://claude.ai/install.sh | bash
-ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+  && rm -rf /root/.npm /root/.cache /tmp/* /var/tmp/*
 
-# Install ttyd
+# Install Claude Code (official installer).
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# Install ttyd.
 RUN wget -q https://github.com/tsl0922/ttyd/releases/download/1.7.3/ttyd.x86_64 -O /usr/local/bin/ttyd \
   && chmod +x /usr/local/bin/ttyd
 
-# Install code-server (VS Code Web)
+# Install code-server.
 RUN curl -fsSL https://code-server.dev/install.sh | sh \
   && rm -rf /root/.cache /tmp/* /var/tmp/*
 
@@ -84,12 +96,21 @@ COPY code /usr/local/bin/code
 COPY site /usr/local/bin/site
 COPY static-deploy /usr/local/bin/static-deploy
 COPY dynamic-deploy /usr/local/bin/dynamic-deploy
-RUN chmod +x /usr/local/bin/tintin-log-agent /usr/local/bin/tintin-chatgpt-proxy.js /usr/local/bin/tintin-mcp-bootstrap.js /usr/local/bin/code /usr/local/bin/site /usr/local/bin/static-deploy /usr/local/bin/dynamic-deploy
+RUN chmod +x \
+  /usr/local/bin/tintin-log-agent \
+  /usr/local/bin/tintin-chatgpt-proxy.js \
+  /usr/local/bin/tintin-mcp-bootstrap.js \
+  /usr/local/bin/code \
+  /usr/local/bin/site \
+  /usr/local/bin/static-deploy \
+  /usr/local/bin/dynamic-deploy
 
-RUN mkdir -p /home/ubuntu/.image
-RUN chown -R ubuntu:ubuntu /home/ubuntu
-RUN chown -R ubuntu:ubuntu /home/ubuntu/.image
-RUN echo "ubuntu ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/ubuntu && chmod 0440 /etc/sudoers.d/ubuntu
+RUN useradd -m -s /bin/bash ubuntu \
+  && mkdir -p /home/ubuntu/.image \
+  && chown -R ubuntu:ubuntu /home/ubuntu \
+  && echo "ubuntu ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/ubuntu \
+  && chmod 0440 /etc/sudoers.d/ubuntu
+
 USER ubuntu
 
 # Add .local/bin to PATH
