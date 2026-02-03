@@ -16,6 +16,7 @@ export class HttpMcpProvider extends BaseMcpProvider<HttpMcpProviderConfig> {
       transport: config.type,
       url: config.url,
       headers: config.headers,
+      bearerTokenEnvVar: config.bearer_token_env_var,
     });
     if (typeof config.startup_timeout_sec === "number") {
       this.setInfo({ startupTimeoutSec: config.startup_timeout_sec });

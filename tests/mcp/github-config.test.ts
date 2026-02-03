@@ -42,114 +42,7 @@ ${extra}
 `;
 }
 
-test("loadConfig parses GitHub MCP docker config", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "tintin-config-"));
-  const configPath = path.join(dir, "config.toml");
-  process.env.GITHUB_TOKEN = "test-token";
-  await writeFile(
-    configPath,
-    baseConfig(`
-[cloud]
-secrets_key = "test-secrets-key"
-
-[mcp]
-global_timeout_sec = 60
-log_level = "info"
-
-[mcp.providers.github]
-type = "github"
-mode = "docker"
-token = "env:GITHUB_TOKEN"
-`),
-    "utf8",
-  );
-
-  try {
-    const config = await loadConfig(configPath);
-    const provider = config.mcp?.providers.github;
-    assert.ok(provider);
-    if (provider.type !== "github") throw new Error("Expected github provider");
-    assert.equal(provider.mode, "docker");
-    assert.equal(provider.docker_image, "ghcr.io/github/github-mcp-server");
-    assert.deepEqual(provider.docker_args, []);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-    delete process.env.GITHUB_TOKEN;
-  }
-});
-
-test("loadConfig parses GitHub MCP binary config", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "tintin-config-"));
-  const configPath = path.join(dir, "config.toml");
-  process.env.GITHUB_TOKEN = "test-token";
-  await writeFile(
-    configPath,
-    baseConfig(`
-[cloud]
-secrets_key = "test-secrets-key"
-
-[mcp]
-global_timeout_sec = 60
-log_level = "info"
-
-[mcp.providers.github]
-type = "github"
-mode = "binary"
-token = "env:GITHUB_TOKEN"
-binary_path = "/usr/local/bin/github-mcp-server"
-`),
-    "utf8",
-  );
-
-  try {
-    const config = await loadConfig(configPath);
-    const provider = config.mcp?.providers.github;
-    assert.ok(provider);
-    if (provider.type !== "github") throw new Error("Expected github provider");
-    assert.equal(provider.mode, "binary");
-    assert.equal(provider.binary_path, "/usr/local/bin/github-mcp-server");
-    assert.deepEqual(provider.binary_args, ["stdio"]);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-    delete process.env.GITHUB_TOKEN;
-  }
-});
-
-test("loadConfig parses GitHub MCP remote config", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "tintin-config-"));
-  const configPath = path.join(dir, "config.toml");
-  process.env.GITHUB_TOKEN = "test-token";
-  await writeFile(
-    configPath,
-    baseConfig(`
-[cloud]
-secrets_key = "test-secrets-key"
-
-[mcp]
-global_timeout_sec = 60
-log_level = "info"
-
-[mcp.providers.github]
-type = "github"
-mode = "remote"
-token = "env:GITHUB_TOKEN"
-`),
-    "utf8",
-  );
-
-  try {
-    const config = await loadConfig(configPath);
-    const provider = config.mcp?.providers.github;
-    assert.ok(provider);
-    if (provider.type !== "github") throw new Error("Expected github provider");
-    assert.equal(provider.mode, "remote");
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-    delete process.env.GITHUB_TOKEN;
-  }
-});
-
-test("loadConfig accepts GitHub MCP token without env prefix", async () => {
+test("loadConfig parses GitHub MCP config", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "tintin-config-"));
   const configPath = path.join(dir, "config.toml");
   await writeFile(
@@ -164,8 +57,7 @@ log_level = "info"
 
 [mcp.providers.github]
 type = "github"
-mode = "remote"
-token = "ghp_plaintext"
+toolsets = ["repos", "issues"]
 `),
     "utf8",
   );
@@ -175,8 +67,7 @@ token = "ghp_plaintext"
     const provider = config.mcp?.providers.github;
     assert.ok(provider);
     if (provider.type !== "github") throw new Error("Expected github provider");
-    assert.equal(provider.mode, "remote");
-    assert.equal(provider.token, "ghp_plaintext");
+    assert.deepEqual(provider.toolsets, ["repos", "issues"]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -13,6 +13,9 @@ import type { SendToSessionFn } from "./messaging.js";
 import { redactText } from "./redact.js";
 import { nowMs, sleep } from "./util.js";
 import type { McpRegistry } from "./mcp/registry.js";
+import { collectMcpAgentEnv, formatMcpBearerEnvVar } from "./mcp/utils.js";
+import { getGithubMcpToken, getOrCreateIdentity } from "./cloud/store.js";
+import { decryptSecret } from "./cloud/secrets.js";
 import { buildLocalizedPrompt } from "./prompt.js";
 import {
   applySearchEnv,
@@ -353,16 +356,21 @@ export class SessionManager {
       this.logger.debug(
         `[session] spawn agent=${opts.agent} kind=exec session=${id} project=${opts.projectId} cwd=${session.codex_cwd} sessionsRoot=${sessionsRoot} home=${homeDir} search_policy=${searchPolicy.mode} search_provider=${hyperbrowserAvailable ? "hyperbrowser" : "none"} search_enforce=${enforceSearch ? "1" : "0"}`,
       );
-      const mcpArgs = await this.mcpCliArgs(opts.agent);
+      const identity = await getOrCreateIdentity(this.db, {
+        platform: opts.platform,
+        workspaceId: opts.workspaceId,
+        userId: opts.userId,
+      });
+      const mcpConfig = await this.mcpCliArgs(opts.agent, identity.id);
       const cloudProxyArgs = this.buildCloudProxyCliArgs(opts.agent, envOverrides);
-      const extraArgs = [...(mcpArgs ?? []), ...cloudProxyArgs];
+      const extraArgs = [...(mcpConfig?.args ?? []), ...cloudProxyArgs];
       const spawnedProc = adapter.spawnExec({
         config: this.config,
         logger: this.logger,
         cwd: session.codex_cwd,
         prompt: agentPrompt,
         homeDir,
-        extraEnv: envOverrides,
+        extraEnv: { ...envOverrides, ...(mcpConfig?.env ?? {}) },
         extraArgs: extraArgs.length > 0 ? extraArgs : undefined,
       });
       childToKill = spawnedProc.child;
@@ -479,9 +487,14 @@ export class SessionManager {
     const searchDirective = buildSearchDirective({ policy: searchPolicy, lang: language, hyperbrowserAvailable });
     const agentPrompt = buildLocalizedPrompt(prompt, language, { searchDirective });
     let spawned;
-    const mcpArgs = await this.mcpCliArgs(session.agent);
+    const identity = await getOrCreateIdentity(this.db, {
+      platform: session.platform,
+      workspaceId: session.workspace_id,
+      userId: session.created_by_user_id,
+    });
+    const mcpConfig = await this.mcpCliArgs(session.agent, identity.id);
     const cloudProxyArgs = this.buildCloudProxyCliArgs(session.agent, envWithCloudProxy);
-    const extraArgs = [...(mcpArgs ?? []), ...cloudProxyArgs];
+    const extraArgs = [...(mcpConfig?.args ?? []), ...cloudProxyArgs];
     try {
       spawned = adapter.spawnResume({
         config: this.config,
@@ -490,7 +503,7 @@ export class SessionManager {
         sessionId: session.codex_session_id,
         prompt: agentPrompt,
         homeDir,
-        extraEnv: envWithCloudProxy,
+        extraEnv: { ...envWithCloudProxy, ...(mcpConfig?.env ?? {}) },
         extraArgs: extraArgs.length > 0 ? extraArgs : undefined,
       });
     } catch (e) {
@@ -714,13 +727,57 @@ export class SessionManager {
     await this.sendToSession(sessionId, { type: "finalize", priority: "user" });
   }
 
-  private async mcpCliArgs(agent: SessionAgent): Promise<string[] | null> {
+  private async mcpCliArgs(
+    agent: SessionAgent,
+    identityId: string,
+  ): Promise<{ args: string[]; env: Record<string, string> } | null> {
     if (!this.mcpRegistry) return null;
     const servers = await this.mcpRegistry.startAll();
+    const mcp = this.config.mcp;
+    if (mcp) {
+      for (const [name, provider] of Object.entries(mcp.providers)) {
+        if (!provider.enabled) continue;
+        if (provider.type !== "github") continue;
+        const token = await this.requireGithubMcpToken(identityId);
+        const headers: Record<string, string> = {
+          Authorization: `Bearer ${token}`,
+        };
+        if (provider.github_host) {
+          headers["X-GitHub-Host"] = provider.github_host;
+        }
+        if (provider.toolsets && provider.toolsets.length > 0) {
+          headers["X-MCP-Toolsets"] = provider.toolsets.join(",");
+        }
+        servers.set(name, {
+          id: name,
+          transport: "http",
+          url: "https://api.githubcopilot.com/mcp/",
+          headers,
+          bearerTokenEnvVar: formatMcpBearerEnvVar(name),
+          bearerToken: token,
+          status: "running",
+          startupTimeoutSec: provider.startup_timeout_sec,
+        });
+      }
+    }
     if (servers.size === 0) return null;
     const adapter = getAgentAdapter(agent);
     const globalTimeout = this.config.mcp?.global_timeout_sec ?? 60;
-    return adapter.buildMcpCliArgs({ servers, globalTimeout });
+    const args = adapter.buildMcpCliArgs({ servers, globalTimeout });
+    const env = collectMcpAgentEnv(servers);
+    return { args, env };
+  }
+
+  private async requireGithubMcpToken(identityId: string): Promise<string> {
+    const secretKey = this.config.cloud?.secrets_key ?? "";
+    if (!secretKey) {
+      throw new Error("cloud.secrets_key is required to use GitHub MCP tokens.");
+    }
+    const row = await getGithubMcpToken(this.db, identityId);
+    if (!row?.encrypted_token) {
+      throw new Error('GitHub MCP token is not set. Use "/mcp github token set <token>".');
+    }
+    return decryptSecret(row.encrypted_token, secretKey);
   }
 
   private async resolveChatgptProxyBin(): Promise<string | null> {

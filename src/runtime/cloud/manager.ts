@@ -14,6 +14,7 @@ import { redactText } from "../redact.js";
 import type { Sandbox } from "modal";
 import type { McpServerInfo } from "../mcp/types.js";
 import { buildMcpBootstrapConfig, encodeMcpBootstrapConfig, type McpBootstrapConfig } from "../mcp/bootstrap.js";
+import { collectMcpAgentEnv, formatMcpBearerEnvVar } from "../mcp/utils.js";
 import {
   resolvePlaywrightProvider,
   resolvePlaywrightProviderEntry,
@@ -52,6 +53,7 @@ import {
   getCloudRun,
   getCloudRunBySession,
   getCloudSnapshot,
+  getGithubMcpToken,
   getLatestSetupSpec,
   getLatestRunForIdentity,
   listSecrets,
@@ -1623,6 +1625,7 @@ export class CloudManager {
           transport: provider.type,
           url: provider.url,
           headers: provider.headers,
+          bearerTokenEnvVar: provider.bearer_token_env_var,
           status: "running",
           startupTimeoutSec: provider.startup_timeout_sec,
         };
@@ -1635,7 +1638,7 @@ export class CloudManager {
           startupTimeoutSec: this.resolvePlaywrightStartupTimeoutSec(provider),
         };
       case "github":
-        return this.buildGithubServerInfo(name, provider);
+        throw new Error(`[mcp.providers.${name}] GitHub MCP requires a per-user token.`);
       default: {
         const unreachable: never = provider;
         throw new Error(`Unsupported MCP provider type: ${(unreachable as { type?: string }).type ?? "unknown"}`);
@@ -1643,14 +1646,12 @@ export class CloudManager {
     }
   }
 
-  private buildGithubServerInfo(name: string, provider: GitHubMcpProviderConfig): McpServerInfo {
-    if (provider.mode !== "remote") {
-      throw new Error(`[mcp.providers.${name}] GitHub MCP in cloud mode requires mode="remote".`);
-    }
+  private buildGithubServerInfo(name: string, provider: GitHubMcpProviderConfig, token: string): McpServerInfo {
     const url = "https://api.githubcopilot.com/mcp/";
     const transport = "http";
+    const bearerTokenEnvVar = formatMcpBearerEnvVar(name);
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${provider.token}`,
+      Authorization: `Bearer ${token}`,
     };
     if (provider.github_host) {
       headers["X-GitHub-Host"] = provider.github_host;
@@ -1663,19 +1664,30 @@ export class CloudManager {
       transport,
       url,
       headers,
+      bearerTokenEnvVar,
+      bearerToken: token,
       status: "running",
       startupTimeoutSec: provider.startup_timeout_sec,
     };
   }
 
-  private buildRemoteMcpArgs(agent: SessionAgent, serverOverride?: McpServerInfo): string[] {
-    if (this.provider.id === "local") return [];
+  private async buildRemoteMcpArgs(
+    agent: SessionAgent,
+    identityId: string,
+    serverOverride?: McpServerInfo,
+  ): Promise<{ args: string[]; env: Record<string, string> }> {
+    if (this.provider.id === "local") return { args: [], env: {} };
     const mcp = this.config.mcp;
-    if (!mcp) return [];
+    if (!mcp) return { args: [], env: {} };
     const servers = new Map<string, McpServerInfo>();
     for (const [name, provider] of Object.entries(mcp.providers)) {
       if (!provider.enabled) continue;
       if (provider.type === "playwright") continue;
+      if (provider.type === "github") {
+        const token = await this.requireGithubMcpToken(identityId);
+        servers.set(name, this.buildGithubServerInfo(name, provider, token));
+        continue;
+      }
       servers.set(name, this.buildServerInfoFromConfig(name, provider));
     }
     const entry = resolvePlaywrightProviderEntry(mcp);
@@ -1692,11 +1704,25 @@ export class CloudManager {
         : defaultServer;
       servers.set(providerName, server);
     }
-    if (servers.size === 0) return [];
+    if (servers.size === 0) return { args: [], env: {} };
     const adapter = getAgentAdapter(agent);
     const globalTimeout = mcp.global_timeout_sec;
     this.logMcpServerSummary(agent, servers);
-    return adapter.buildMcpCliArgs({ servers, globalTimeout });
+    const args = adapter.buildMcpCliArgs({ servers, globalTimeout });
+    const env = collectMcpAgentEnv(servers);
+    return { args, env };
+  }
+
+  private async requireGithubMcpToken(identityId: string): Promise<string> {
+    const secretKey = this.config.cloud?.secrets_key ?? "";
+    if (!secretKey) {
+      throw new Error("cloud.secrets_key is required to use GitHub MCP tokens.");
+    }
+    const row = await getGithubMcpToken(this.db, identityId);
+    if (!row?.encrypted_token) {
+      throw new Error('GitHub MCP token is not set. Use "/mcp github token set <token>".');
+    }
+    return decryptSecret(row.encrypted_token, secretKey);
   }
 
   private logMcpServerSummary(agent: SessionAgent, servers: Map<string, McpServerInfo>): void {
@@ -2352,6 +2378,7 @@ export class CloudManager {
             playwright: playwrightSetup,
             extraBootstrapLines: guardLines,
             language,
+            identityId: opts.identityId,
           }),
         `session=${sessionId} agent=${opts.agent}`,
       );
@@ -2793,6 +2820,7 @@ AGENTS_EOF`;
     cwd: string;
     agent: SessionAgent;
     workspace: CloudWorkspace;
+    identityId: string;
     envOverrides: Record<string, string>;
     playwright?: RemotePlaywrightSetup | null;
     extraBootstrapLines?: string[] | null;
@@ -2814,7 +2842,8 @@ AGENTS_EOF`;
     let relayLogPath: string | null = null;
     let cmd = "";
     let env: Record<string, string> = {};
-    const mcpArgs = this.buildRemoteMcpArgs(opts.agent, opts.playwright?.server);
+    const mcpConfig = await this.buildRemoteMcpArgs(opts.agent, opts.identityId, opts.playwright?.server);
+    const mcpArgs = mcpConfig.args;
     const mcpEnabled = mcpArgs.length > 0;
     const localLogPaths: string[] = [];
 
@@ -2835,6 +2864,7 @@ AGENTS_EOF`;
       env = {
         ...this.config.claude_code.env,
         ...opts.envOverrides,
+        ...mcpConfig.env,
         CLAUDE_CONFIG_DIR: toPosix(resolvedConfigDir),
       };
     } else {
@@ -2853,6 +2883,7 @@ AGENTS_EOF`;
       env = {
         ...this.config.codex.env,
         ...opts.envOverrides,
+        ...mcpConfig.env,
         CODEX_HOME: toPosix(homeDir),
       };
     }
@@ -3085,6 +3116,7 @@ AGENTS_EOF`;
     cwd: string;
     agent: SessionAgent;
     workspace: CloudWorkspace;
+    identityId: string;
     envOverrides: Record<string, string>;
     playwright?: RemotePlaywrightSetup | null;
     extraBootstrapLines?: string[] | null;
@@ -3104,7 +3136,8 @@ AGENTS_EOF`;
     let cmd = "";
     let env: Record<string, string> = {};
     const playwrightCfg = this.resolvePlaywrightConfig();
-    const mcpArgs = this.buildRemoteMcpArgs(opts.agent, opts.playwright?.server);
+    const mcpConfig = await this.buildRemoteMcpArgs(opts.agent, opts.identityId, opts.playwright?.server);
+    const mcpArgs = mcpConfig.args;
     const mcpEnabled = mcpArgs.length > 0;
 
     if (opts.agent === "claude_code") {
@@ -3124,6 +3157,7 @@ AGENTS_EOF`;
       env = {
         ...this.config.claude_code.env,
         ...opts.envOverrides,
+        ...mcpConfig.env,
         CLAUDE_CONFIG_DIR: toPosix(resolvedConfigDir),
       };
     } else {
@@ -3137,6 +3171,7 @@ AGENTS_EOF`;
       env = {
         ...this.config.codex.env,
         ...opts.envOverrides,
+        ...mcpConfig.env,
         CODEX_HOME: toPosix(homeDir),
       };
     }
@@ -3556,6 +3591,7 @@ AGENTS_EOF`;
             cwd: session.codex_cwd,
             agent: session.agent,
             workspace,
+            identityId: run.identity_id,
             envOverrides: normalizedEnv,
             playwright: playwrightSetup,
             extraBootstrapLines: guardLines,
@@ -3824,6 +3860,7 @@ AGENTS_EOF`;
             playwright: playwrightSetup,
             extraBootstrapLines: guardLines,
             language,
+            identityId: run.identity_id,
           }),
         `session=${session.id} agent=${session.agent}`,
       );

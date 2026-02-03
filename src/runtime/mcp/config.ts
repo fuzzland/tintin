@@ -20,6 +20,7 @@ export interface HttpMcpProviderConfig extends BaseMcpProviderConfig {
   type: "http" | "sse";
   url: string;
   headers: Record<string, string>;
+  bearer_token_env_var?: string;
 }
 
 export interface PlaywrightMcpProviderConfig extends BaseMcpProviderConfig, PlaywrightMcpSection {
@@ -27,18 +28,10 @@ export interface PlaywrightMcpProviderConfig extends BaseMcpProviderConfig, Play
   startup_timeout_sec: number;
 }
 
-export type GitHubMcpMode = "docker" | "binary" | "remote";
-
 export interface GitHubMcpProviderConfig extends BaseMcpProviderConfig {
   type: "github";
-  token: string;
   github_host?: string;
   toolsets?: string[];
-  mode: GitHubMcpMode;
-  docker_image?: string;
-  docker_args?: string[];
-  binary_path?: string;
-  binary_args?: string[];
 }
 
 export type McpProviderConfig =

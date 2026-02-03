@@ -157,8 +157,17 @@ const CodexAgent: AgentAdapter = {
         }
         args.push("--config", `${prefix}.url=${JSON.stringify(info.url)}`);
       }
+      if (info.bearerTokenEnvVar) {
+        args.push("--config", `${prefix}.bearer_token_env_var=${JSON.stringify(info.bearerTokenEnvVar)}`);
+      }
       if (info.headers && Object.keys(info.headers).length > 0) {
-        args.push("--config", `${prefix}.headers=${JSON.stringify(info.headers)}`);
+        const headers =
+          info.bearerTokenEnvVar
+            ? Object.fromEntries(Object.entries(info.headers).filter(([k]) => k.toLowerCase() !== "authorization"))
+            : info.headers;
+        if (Object.keys(headers).length > 0) {
+          args.push("--config", `${prefix}.headers=${JSON.stringify(headers)}`);
+        }
       }
       args.push("--config", `${prefix}.enabled=true`);
       const timeout = info.startupTimeoutSec ?? opts.globalTimeout;

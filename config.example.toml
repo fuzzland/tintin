@@ -216,12 +216,10 @@ api_key = "env:HYPERBROWSER_API_KEY"
 api_base_url = "https://api.hyperbrowser.ai"
 # session_params = { solveCaptchas = true, useStealth = true } # raw Hyperbrowser session payload
 
-# GitHub MCP (local docker mode)
+# GitHub MCP
 [mcp.providers.github]
 enabled = true
 type = "github"
-mode = "remote" # "docker" | "binary" | "remote"
-token = "env:GITHUB_TOKEN"
 toolsets = ["repos", "issues", "pull_requests"]
 
 [pinecone]

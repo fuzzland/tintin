@@ -398,6 +398,14 @@ export interface SlackInstallationsTable {
   updated_at: number;
 }
 
+export interface GithubMcpTokensTable {
+  id: string;
+  identity_id: string;
+  encrypted_token: string;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface DatabaseSchema {
   sessions: SessionsTable;
   session_stream_offsets: SessionStreamOffsetsTable;
@@ -430,6 +438,7 @@ export interface DatabaseSchema {
   chatgpt_accounts: ChatgptAccountsTable;
   chatgpt_oauth_states: ChatgptOAuthStatesTable;
   slack_installations: SlackInstallationsTable;
+  github_mcp_tokens: GithubMcpTokensTable;
 }
 
 export type Db = Kysely<DatabaseSchema>;

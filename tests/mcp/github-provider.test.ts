@@ -12,38 +12,12 @@ function baseContext() {
   };
 }
 
-test("GitHubMcpProvider builds docker stdio config", async () => {
+test("GitHubMcpProvider exposes remote config metadata", async () => {
   const provider = new GitHubMcpProvider("github");
   await provider.init(
     {
       enabled: true,
       type: "github",
-      mode: "docker",
-      token: "token",
-      docker_image: "ghcr.io/github/github-mcp-server",
-      docker_args: ["--pull", "always"],
-      toolsets: ["repos", "issues"],
-    },
-    baseContext(),
-  );
-
-  const info = provider.getServerInfo();
-  assert.equal(info.transport, "stdio");
-  assert.equal(info.command, "docker");
-  assert.ok(info.args?.includes("run"));
-  assert.ok(info.args?.includes("ghcr.io/github/github-mcp-server"));
-  assert.equal(info.env?.GITHUB_PERSONAL_ACCESS_TOKEN, "token");
-  assert.equal(info.env?.GITHUB_TOOLSETS, "repos,issues");
-});
-
-test("GitHubMcpProvider builds remote http config", async () => {
-  const provider = new GitHubMcpProvider("github");
-  await provider.init(
-    {
-      enabled: true,
-      type: "github",
-      mode: "remote",
-      token: "token",
       github_host: "https://github.example.com",
       toolsets: ["repos"],
     },
@@ -53,22 +27,18 @@ test("GitHubMcpProvider builds remote http config", async () => {
   const info = provider.getServerInfo();
   assert.equal(info.transport, "http");
   assert.equal(info.url, "https://api.githubcopilot.com/mcp/");
-  assert.equal(info.headers?.Authorization, "Bearer token");
   assert.equal(info.headers?.["X-GitHub-Host"], "https://github.example.com");
   assert.equal(info.headers?.["X-MCP-Toolsets"], "repos");
 });
 
-test("GitHubMcpProvider requires binary_path in binary mode", async () => {
+test("GitHubMcpProvider start rejects per-user token requirement", async () => {
   const provider = new GitHubMcpProvider("github");
-  await assert.rejects(() =>
-    provider.init(
-      {
-        enabled: true,
-        type: "github",
-        mode: "binary",
-        token: "token",
-      },
-      baseContext(),
-    ),
+  await provider.init(
+    {
+      enabled: true,
+      type: "github",
+    },
+    baseContext(),
   );
+  await assert.rejects(() => provider.start());
 });

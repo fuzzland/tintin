@@ -35,6 +35,7 @@ export type CloudCommand =
   | { kind: "secrets_update"; name: string; value: string | null }
   | { kind: "secrets_list" }
   | { kind: "secrets_delete"; name: string }
+  | { kind: "mcp_github_token_set"; token: string | null }
   | { kind: "snapshot_save"; note?: string }
   | { kind: "snapshot_list"; limit?: number }
   | { kind: "snapshot_search"; query: string }
@@ -414,6 +415,19 @@ export function parseCloudCommand(text: string): CloudCommand | null {
       return { kind: "secrets_update", name, value };
     }
     if (sub === "delete" && tokens.length >= 1) return { kind: "secrets_delete", name: tokens[0]! };
+  }
+  if (head === "mcp" && tokens.length >= 1) {
+    const provider = tokens.shift()!.toLowerCase();
+    if (provider === "github" && tokens.length >= 1) {
+      const sub = tokens.shift()!.toLowerCase();
+      if (sub === "token") {
+        const action = tokens.shift()?.toLowerCase() ?? "";
+        if (action === "set") {
+          const token = tokens.length > 0 ? tokens.join(" ").trim() : null;
+          return { kind: "mcp_github_token_set", token };
+        }
+      }
+    }
   }
   return null;
 }

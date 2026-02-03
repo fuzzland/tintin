@@ -65,6 +65,7 @@ env = { "FOO" = "bar" }
 type = "http"
 url = "https://example.com/mcp"
 headers = { "Authorization" = "Bearer token" }
+bearer_token_env_var = "MCP_HTTP_TOKEN"
 
 [mcp.providers.demo_playwright]
 type = "playwright"
@@ -88,6 +89,7 @@ timeout_ms = 45000
     assert.ok(http);
     if (http.type !== "http") throw new Error("Expected http provider");
     assert.equal(http.headers.Authorization, "Bearer token");
+    assert.equal(http.bearer_token_env_var, "MCP_HTTP_TOKEN");
     const playwright = mcp.providers.demo_playwright;
     assert.ok(playwright);
     if (playwright.type !== "playwright") throw new Error("Expected playwright provider");

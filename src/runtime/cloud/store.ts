@@ -527,6 +527,43 @@ export async function getSecret(db: Db, identityId: string, name: string) {
     .executeTakeFirst();
 }
 
+export async function setGithubMcpToken(db: Db, opts: { identityId: string; encryptedToken: string }) {
+  const now = nowMs();
+  const existing = await db
+    .selectFrom("github_mcp_tokens")
+    .select(["id"])
+    .where("identity_id", "=", opts.identityId)
+    .executeTakeFirst();
+  if (existing) {
+    await db
+      .updateTable("github_mcp_tokens")
+      .set({ encrypted_token: opts.encryptedToken, updated_at: now })
+      .where("id", "=", existing.id)
+      .execute();
+    return existing.id;
+  }
+  const id = crypto.randomUUID();
+  await db
+    .insertInto("github_mcp_tokens")
+    .values({
+      id,
+      identity_id: opts.identityId,
+      encrypted_token: opts.encryptedToken,
+      created_at: now,
+      updated_at: now,
+    })
+    .execute();
+  return id;
+}
+
+export async function getGithubMcpToken(db: Db, identityId: string) {
+  return await db
+    .selectFrom("github_mcp_tokens")
+    .selectAll()
+    .where("identity_id", "=", identityId)
+    .executeTakeFirst();
+}
+
 export async function putSetupSpec(db: Db, opts: { repoId: string; ymlBlob: string; hash: string }) {
   const now = nowMs();
   const existing = await db

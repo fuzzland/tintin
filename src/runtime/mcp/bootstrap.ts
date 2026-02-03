@@ -33,12 +33,6 @@ const BOOTSTRAP_SELECTORS: Record<McpProviderType, BootstrapSelector> = {
   playwright: selectPlaywrightBootstrap,
   github: (name, provider) => {
     if (provider.type !== "github") return null;
-    const cfg = provider as GitHubMcpProviderConfig;
-    if (cfg.mode !== "remote") {
-      throw new Error(
-        `[mcp.providers.${name}] GitHub MCP in cloud mode requires mode="remote". Docker and binary modes are not supported in Modal.`,
-      );
-    }
     return null;
   },
 };

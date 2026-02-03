@@ -27,6 +27,7 @@ export class McpRegistry {
 
     for (const [name, providerConfig] of Object.entries(config.providers)) {
       if (!providerConfig.enabled) continue;
+      if (providerConfig.type === "github") continue;
       const provider = createMcpProvider(name, providerConfig);
       await this.lifecycle.initProvider(provider, providerConfig, context);
       this.providers.set(name, {

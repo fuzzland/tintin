@@ -19,6 +19,7 @@ export const StdioMcpProviderSchema = BaseMcpProviderSchema.extend({
 const HttpBaseSchema = BaseMcpProviderSchema.extend({
   url: z.string().url(),
   headers: z.record(z.string(), z.string()).default({}),
+  bearer_token_env_var: z.string().min(1).optional(),
 });
 
 export const HttpMcpProviderSchema = HttpBaseSchema.extend({
@@ -31,22 +32,8 @@ export const SseMcpProviderSchema = HttpBaseSchema.extend({
 
 export const GitHubMcpProviderSchema = BaseMcpProviderSchema.extend({
   type: z.literal("github"),
-  token: z.string().min(1),
   github_host: z.string().url().optional(),
   toolsets: z.array(z.string()).optional(),
-  mode: z.enum(["docker", "binary", "remote"]),
-  docker_image: z.string().default("ghcr.io/github/github-mcp-server"),
-  docker_args: z.array(z.string()).default([]),
-  binary_path: z.string().optional(),
-  binary_args: z.array(z.string()).default(["stdio"]),
-}).superRefine((value, ctx) => {
-  if (value.mode === "binary" && (!value.binary_path || value.binary_path.trim().length === 0)) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "binary_path is required when mode is 'binary'",
-      path: ["binary_path"],
-    });
-  }
 });
 
 const PlaywrightSnapshotModeSchema = z.enum(["incremental", "full", "none"]);

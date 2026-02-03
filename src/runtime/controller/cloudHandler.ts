@@ -36,6 +36,7 @@ import {
   listSharedRepos,
   replaceGithubInstallationRepos,
   setIdentityActiveRepo,
+  setGithubMcpToken,
   setSecret,
   shareRepo,
   unshareRepo,
@@ -1477,6 +1478,29 @@ export class CloudHandler {
         const cmd = opts.command as Extract<CloudCommand, { kind: "secrets_delete" }>;
         const ok = await deleteSecret(this.deps.db, identity.id, cmd.name);
         await reply(ok ? t("secrets.deleted", lang, { name: cmd.name }) : t("secrets.delete_not_found", lang));
+        return true;
+      }
+      case "mcp_github_token_set": {
+        if (!opts.isDirect) {
+          await replyText("command.dm_only", { cmd: formatCmd("mcp github token set") });
+          return true;
+        }
+        const cmd = opts.command as Extract<CloudCommand, { kind: "mcp_github_token_set" }>;
+        if (!cmd.token) {
+          await replyText("mcp.github_token.usage_set", { cmd: formatCmd("mcp github token set <token>") });
+          return true;
+        }
+        if (!cloud.secrets_key) {
+          await replyText("cloud.secrets_missing");
+          return true;
+        }
+        try {
+          const encrypted = encryptSecret(cmd.token, cloud.secrets_key);
+          await setGithubMcpToken(this.deps.db, { identityId: identity.id, encryptedToken: encrypted });
+          await replyText("mcp.github_token.saved");
+        } catch (e) {
+          await replyText("mcp.github_token.save_failed", { error: String(e) });
+        }
         return true;
       }
     }

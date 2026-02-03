@@ -11,6 +11,8 @@ export interface McpServerInfo {
   args?: string[];
   env?: Record<string, string>;
   headers?: Record<string, string>;
+  bearerTokenEnvVar?: string;
+  bearerToken?: string;
   status: McpServerStatus;
   startupTimeoutSec?: number;
 }
