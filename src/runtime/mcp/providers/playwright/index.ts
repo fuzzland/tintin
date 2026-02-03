@@ -324,6 +324,7 @@ function buildPlaywrightArgs(opts: {
   viewportSize?: string;
 }): string[] {
   const args = [
+    "--no-install",
     "-y",
     opts.pkg,
     "--browser",
@@ -372,12 +373,13 @@ function tryPort(host: string, port: number): Promise<boolean> {
 
 async function waitForPortOpen(host: string, port: number, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  const connectHost = resolveUrlHost(host);
   while (Date.now() < deadline) {
-    const ok = await canConnect(host, port);
+    const ok = await canConnect(connectHost, port);
     if (ok) return;
     await new Promise((r) => setTimeout(r, 250));
   }
-  throw new Error(`Timed out waiting for Playwright MCP on ${host}:${port}`);
+  throw new Error(`Timed out waiting for Playwright MCP on ${connectHost}:${port}`);
 }
 
 function canConnect(host: string, port: number): Promise<boolean> {

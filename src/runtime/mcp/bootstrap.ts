@@ -12,7 +12,12 @@ type BootstrapSelector = (name: string, provider: McpProviderConfig) => McpProvi
 const selectPlaywrightBootstrap: BootstrapSelector = (_name, provider) => {
   if (provider.type !== "playwright") return null;
   const cfg = provider as PlaywrightMcpProviderConfig;
-  return cfg.provider === "local" ? cfg : null;
+  return cfg.provider === "local"
+    ? {
+        ...cfg,
+        port_end: cfg.port_start,
+      }
+    : null;
 };
 
 const BOOTSTRAP_SELECTORS: Record<McpProviderType, BootstrapSelector> = {

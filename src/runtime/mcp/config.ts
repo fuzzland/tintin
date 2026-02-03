@@ -39,6 +39,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function assertValidProviderName(name: string): void {
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error("[mcp.providers] provider name cannot be empty");
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(trimmed)) {
+    throw new Error(
+      `[mcp.providers] invalid provider name "${name}". Use only letters, numbers, "_" or "-", and start with a letter or number.`,
+    );
+  }
+}
+
 function normalizeStartupTimeout(raw: unknown, fallbackMs: number): number {
   if (typeof raw === "number" && Number.isFinite(raw)) return Math.max(1, Math.floor(raw));
   return Math.max(1, Math.ceil(fallbackMs / 1000));
@@ -73,8 +83,16 @@ export function normalizeMcpSection(
   const parsed = McpConfigSchema.parse(value);
   const providersRaw = parsed.providers as Record<string, McpProviderConfig>;
   const providers: Record<string, McpProviderConfig> = {};
+  let enabledPlaywrightProviders = 0;
   for (const [name, raw] of Object.entries(providersRaw)) {
+    assertValidProviderName(name);
     providers[name] = normalizeProviderConfig(name, raw, opts);
+    if (providers[name]?.enabled && providers[name]?.type === "playwright") {
+      enabledPlaywrightProviders += 1;
+    }
+  }
+  if (enabledPlaywrightProviders > 1) {
+    throw new Error("[mcp.providers] multiple enabled Playwright providers are not supported");
   }
 
   return {

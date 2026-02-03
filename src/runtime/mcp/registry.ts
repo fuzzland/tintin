@@ -19,7 +19,10 @@ export class McpRegistry {
   ) {}
 
   async loadFromConfig(config: McpConfig | null, context: McpProviderContext): Promise<void> {
-    this.providers.clear();
+    if (this.providers.size > 0) {
+      await this.stopAll();
+      this.providers.clear();
+    }
     if (!config) return;
 
     for (const [name, providerConfig] of Object.entries(config.providers)) {

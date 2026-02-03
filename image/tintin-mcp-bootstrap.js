@@ -57,8 +57,9 @@ function sleep(ms) {
 }
 
 function canConnect(host, port) {
+  const targetHost = resolveConnectHost(host);
   return new Promise((resolve) => {
-    const socket = net.createConnection({ host, port });
+    const socket = net.createConnection({ host: targetHost, port });
     socket.once("connect", () => {
       socket.end();
       resolve(true);
@@ -71,13 +72,19 @@ function canConnect(host, port) {
   });
 }
 
+function resolveConnectHost(bindHost) {
+  const localHosts = new Set(["127.0.0.1", "::1", "0.0.0.0", "[::]"]);
+  return localHosts.has(bindHost) ? "localhost" : bindHost;
+}
+
 async function waitForPort(host, port, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
+  const connectHost = resolveConnectHost(host);
   while (Date.now() < deadline) {
-    if (await canConnect(host, port)) return;
+    if (await canConnect(connectHost, port)) return;
     await sleep(250);
   }
-  throw new Error(`timed out waiting for ${host}:${port}`);
+  throw new Error(`timed out waiting for ${connectHost}:${port}`);
 }
 
 function httpGetJson(url) {
@@ -184,8 +191,7 @@ async function startPlaywrightProvider(name, cfg, globalTimeoutSec) {
   const pidPath = `/tmp/tintin-mcp-${name}.pid`;
 
   if (await canConnect(cfg.host, port)) {
-    log(`provider=${name} already listening on ${cfg.host}:${port}`);
-    return;
+    fail(`provider=${name} port already in use: ${cfg.host}:${port}`);
   }
 
   if (INSTALLED_PW_PACKAGE && INSTALLED_PW_PACKAGE !== cfg.package) {
