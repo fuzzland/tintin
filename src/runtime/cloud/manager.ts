@@ -4241,7 +4241,7 @@ AGENTS_EOF`;
           this.logger.info(`[cloud] clone repo=${repo.name} url=${clone.redacted}`);
           await this.time(
             "repo.clone",
-            () => this.cloneRepo({ workspace, absPath, cloneUrl: clone.url }),
+            () => this.cloneRepo({ workspace, absPath, cloneUrl: clone.url, authHeader: clone.authHeader }),
             `repo=${repo.name}`,
           );
         }
