@@ -29,37 +29,26 @@ export const SseMcpProviderSchema = HttpBaseSchema.extend({
   type: z.literal("sse"),
 });
 
-const GitHubMcpModeSchema = z.enum(["docker", "binary", "remote"]);
-
-const GitHubDockerModeSchema = z.object({
-  mode: z.literal("docker"),
-  docker_image: z.string().default("ghcr.io/github/github-mcp-server"),
-  docker_args: z.array(z.string()).default([]),
-});
-
-const GitHubBinaryModeSchema = z.object({
-  mode: z.literal("binary"),
-  binary_path: z.string().min(1),
-  binary_args: z.array(z.string()).default(["stdio"]),
-});
-
-const GitHubRemoteModeSchema = z.object({
-  mode: z.literal("remote"),
-  url: z.string().url().default("https://api.githubcopilot.com/mcp/"),
-});
-
 export const GitHubMcpProviderSchema = BaseMcpProviderSchema.extend({
   type: z.literal("github"),
   token: z.string().min(1),
   github_host: z.string().url().optional(),
   toolsets: z.array(z.string()).optional(),
-}).and(
-  z.discriminatedUnion("mode", [
-    GitHubDockerModeSchema,
-    GitHubBinaryModeSchema,
-    GitHubRemoteModeSchema,
-  ]),
-);
+  mode: z.enum(["docker", "binary", "remote"]),
+  docker_image: z.string().default("ghcr.io/github/github-mcp-server"),
+  docker_args: z.array(z.string()).default([]),
+  binary_path: z.string().optional(),
+  binary_args: z.array(z.string()).default(["stdio"]),
+  url: z.string().url().default("https://api.githubcopilot.com/mcp/"),
+}).superRefine((value, ctx) => {
+  if (value.mode === "binary" && (!value.binary_path || value.binary_path.trim().length === 0)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "binary_path is required when mode is 'binary'",
+      path: ["binary_path"],
+    });
+  }
+});
 
 const PlaywrightSnapshotModeSchema = z.enum(["incremental", "full", "none"]);
 const PlaywrightImageResponseSchema = z.enum(["allow", "omit"]);
