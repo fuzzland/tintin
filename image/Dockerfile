@@ -5,48 +5,65 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 
-# Use Aliyun mirror for Ubuntu 24.04.
-RUN rm -f /etc/apt/sources.list.d/ubuntu.sources \
-  && cat <<'EOF' > /etc/apt/sources.list
-deb https://mirrors.aliyun.com/ubuntu/ noble main restricted universe multiverse
-deb https://mirrors.aliyun.com/ubuntu/ noble-security main restricted universe multiverse
-deb https://mirrors.aliyun.com/ubuntu/ noble-updates main restricted universe multiverse
-deb https://mirrors.aliyun.com/ubuntu/ noble-backports main restricted universe multiverse
+# Configure Aliyun mirror (HTTP) for Ubuntu 24.04 using DEB822 format.
+RUN cat <<'EOF' > /etc/apt/sources.list.d/ubuntu.sources
+Types: deb
+URIs: http://mirrors.aliyun.com/ubuntu/
+Suites: noble noble-updates noble-backports
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: http://mirrors.aliyun.com/ubuntu/
+Suites: noble-security
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 EOF
 
-# Base OS packages: GUI stack, tooling, and runtime prerequisites.
-# Note: NodeSource repo setup and apt install must be in the same RUN for repo visibility.
-RUN apt-get -o Acquire::https::Verify-Peer=false -o Acquire::https::Verify-Host=false update \
-  && apt-get install -y --no-install-recommends ca-certificates gnupg curl \
-  && apt-get update \
-  && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+# Install base networking and crypto tools.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    gnupg \
+    wget \
+  && rm -rf /var/lib/apt/lists/*
+
+# Add NodeSource repository.
+RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
   | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg \
   && echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" \
-  > /etc/apt/sources.list.d/nodesource.list \
-  && apt-get update \
+  > /etc/apt/sources.list.d/nodesource.list
+
+# Base OS packages: GUI stack, tooling, and runtime prerequisites.
+RUN apt-get update \
   && apt-get install -y --no-install-recommends \
-  python3 \
-  python3-pip \
-  git \
-  nodejs \
-  xvfb \
-  x11vnc \
-  xdotool \
-  xfce4 \
-  x11-xserver-utils \
-  papirus-icon-theme \
-  arc-theme \
-  fonts-noto \
-  fonts-noto-color-emoji \
-  ripgrep \
-  build-essential \
-  dbus-x11 \
-  colord \
-  socat \
-  scrot \
-  sudo \
-  tmux \
-  && wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb \
+    python3 \
+    python3-pip \
+    git \
+    nodejs \
+    xvfb \
+    x11vnc \
+    xdotool \
+    xfce4 \
+    x11-xserver-utils \
+    papirus-icon-theme \
+    arc-theme \
+    fonts-noto \
+    fonts-noto-color-emoji \
+    ripgrep \
+    build-essential \
+    dbus-x11 \
+    colord \
+    socat \
+    scrot \
+    sudo \
+    tmux \
+  && rm -rf /var/lib/apt/lists/*
+
+# Install Chrome separately.
+RUN wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb \
+  && apt-get update \
   && apt-get install -y --no-install-recommends /tmp/chrome.deb \
   && rm -f /tmp/chrome.deb \
   && apt-get clean \
