@@ -193,7 +193,11 @@ export class ModalCloudProvider implements CloudProvider {
 
   async pullDiff(opts: { workspace: CloudWorkspace; cwd: string }): Promise<{ diff: string; summary: string }> {
     const sandbox = this.getSandbox(opts.workspace.id);
-    const tracked = await this.runCommand(sandbox, "git diff", { cwd: opts.cwd, logOutput: false });
+    const tracked = await this.runCommand(sandbox, "git diff", {
+      cwd: opts.cwd,
+      logOutput: false,
+      allowNonZero: true,
+    });
     let diff = tracked.stdout ?? "";
     const untracked = await this.runCommand(sandbox, "git ls-files --others --exclude-standard", {
       cwd: opts.cwd,
@@ -207,6 +211,7 @@ export class ModalCloudProvider implements CloudProvider {
       const extra = await this.runCommand(sandbox, `git diff --no-index /dev/null ${shellQuote(file)}`, {
         cwd: opts.cwd,
         logOutput: false,
+        allowNonZero: true,
       });
       if (extra.stdout) diff += extra.stdout;
     }
@@ -324,7 +329,12 @@ export class ModalCloudProvider implements CloudProvider {
   private async runCommand(
     sandbox: Sandbox,
     command: string,
-    opts: { cwd: string; env?: Record<string, string>; logOutput?: boolean },
+    opts: {
+      cwd: string;
+      env?: Record<string, string>;
+      logOutput?: boolean;
+      allowNonZero?: boolean;
+    },
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     const proc = await sandbox.exec(["/bin/sh", "-lc", command], {
       workdir: toPosix(opts.cwd),
@@ -338,7 +348,7 @@ export class ModalCloudProvider implements CloudProvider {
     if (opts.logOutput) {
       if (stdout.trim()) this.logger.debug(`[cloud][modal] ${trim(stdout.trimEnd())}`);
       if (stderr.trim()) this.logger.debug(`[cloud][modal] ${trim(stderr.trimEnd())}`);
-    } else if (exitCode !== 0) {
+    } else if (exitCode !== 0 && !opts.allowNonZero) {
       if (stdout.trim()) this.logger.warn(`[cloud][modal] stdout: ${trim(stdout.trimEnd())}`);
       if (stderr.trim()) this.logger.warn(`[cloud][modal] stderr: ${trim(stderr.trimEnd())}`);
     }

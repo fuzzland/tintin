@@ -83,6 +83,8 @@ ARG MCP_NPM_PACKAGES="${PLAYWRIGHT_MCP_PACKAGE}"
 ENV MCP_NPM_PACKAGES=${MCP_NPM_PACKAGES}
 ENV TINTIN_PLAYWRIGHT_MCP_PACKAGE=${PLAYWRIGHT_MCP_PACKAGE}
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+# Ensure globally installed Node modules are resolvable at runtime.
+ENV NODE_PATH=/usr/lib/node_modules:/usr/local/lib/node_modules
 # Explicit install at build time; runtime downloads disabled.
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 RUN npm config set fund false \
@@ -92,9 +94,10 @@ RUN npm config set fund false \
   && NPM_ROOT="$(npm root -g)" \
   && PW_VERSION="$(NODE_PATH="${NPM_ROOT}" node -e "const pkg=require('@playwright/mcp/package.json'); const deps=pkg.dependencies || {}; process.stdout.write(deps.playwright || deps['playwright-core'] || '');")" \
   && if [ -z "${PW_VERSION}" ]; then \
-  echo "Unable to detect Playwright version from @playwright/mcp; aborting build." >&2; \
-  exit 1; \
+    echo "Unable to detect Playwright version from @playwright/mcp; aborting build." >&2; \
+    exit 1; \
   fi \
+  && npm i -g "playwright@${PW_VERSION}" \
   && echo "Preinstalling Playwright browsers for ${PW_VERSION}" \
   && mkdir -p "${PLAYWRIGHT_BROWSERS_PATH}" \
   && PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH}" npx --yes "playwright@${PW_VERSION}" install --with-deps \
