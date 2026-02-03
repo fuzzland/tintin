@@ -132,7 +132,8 @@ export class GitHubMcpProvider extends BaseMcpProvider<GitHubMcpProviderConfig> 
     config: GitHubMcpProviderConfig,
     token: string,
   ): { provider: HttpMcpProvider; config: Parameters<HttpMcpProvider["init"]>[0] } {
-    const url = config.url ?? "https://api.githubcopilot.com/mcp/";
+    const url = "https://api.githubcopilot.com/mcp/";
+    const transport = "sse";
     const headers: Record<string, string> = {
       Authorization: `Bearer ${token}`,
     };
@@ -143,12 +144,12 @@ export class GitHubMcpProvider extends BaseMcpProvider<GitHubMcpProviderConfig> 
       headers["X-GitHub-Toolsets"] = config.toolsets.join(",");
     }
 
-    const provider = new HttpMcpProvider(this.name, "http");
+    const provider = new HttpMcpProvider(this.name, transport);
     return {
       provider,
       config: {
         enabled: config.enabled,
-        type: "http",
+        type: transport,
         url,
         headers,
         startup_timeout_sec: config.startup_timeout_sec,

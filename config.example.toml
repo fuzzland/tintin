@@ -222,7 +222,6 @@ enabled = true
 type = "github"
 mode = "remote" # "docker" | "binary" | "remote"
 token = "env:GITHUB_TOKEN"
-url = "https://api.githubcopilot.com/mcp/"
 toolsets = ["repos", "issues", "pull_requests"]
 
 [pinecone]

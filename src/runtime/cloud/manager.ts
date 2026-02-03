@@ -1647,7 +1647,8 @@ export class CloudManager {
     if (provider.mode !== "remote") {
       throw new Error(`[mcp.providers.${name}] GitHub MCP in cloud mode requires mode="remote".`);
     }
-    const url = provider.url ?? "https://api.githubcopilot.com/mcp/";
+    const url = "https://api.githubcopilot.com/mcp/";
+    const transport = "sse";
     const headers: Record<string, string> = {
       Authorization: `Bearer ${provider.token}`,
     };
@@ -1659,7 +1660,7 @@ export class CloudManager {
     }
     return {
       id: name,
-      transport: "http",
+      transport,
       url,
       headers,
       status: "running",

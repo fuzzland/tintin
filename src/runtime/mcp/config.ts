@@ -39,7 +39,6 @@ export interface GitHubMcpProviderConfig extends BaseMcpProviderConfig {
   docker_args?: string[];
   binary_path?: string;
   binary_args?: string[];
-  url?: string;
 }
 
 export type McpProviderConfig =

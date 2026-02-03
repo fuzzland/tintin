@@ -143,7 +143,6 @@ token = "env:GITHUB_TOKEN"
     assert.ok(provider);
     if (provider.type !== "github") throw new Error("Expected github provider");
     assert.equal(provider.mode, "remote");
-    assert.equal(provider.url, "https://api.githubcopilot.com/mcp/");
   } finally {
     await rm(dir, { recursive: true, force: true });
     delete process.env.GITHUB_TOKEN;

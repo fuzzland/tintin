@@ -39,7 +39,6 @@ export const GitHubMcpProviderSchema = BaseMcpProviderSchema.extend({
   docker_args: z.array(z.string()).default([]),
   binary_path: z.string().optional(),
   binary_args: z.array(z.string()).default(["stdio"]),
-  url: z.string().url().default("https://api.githubcopilot.com/mcp/"),
 }).superRefine((value, ctx) => {
   if (value.mode === "binary" && (!value.binary_path || value.binary_path.trim().length === 0)) {
     ctx.addIssue({

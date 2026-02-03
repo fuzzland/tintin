@@ -147,10 +147,14 @@ const CodexAgent: AgentAdapter = {
     for (const [name, info] of entries) {
       const prefix = `mcp_servers.${name}`;
       if (info.transport === "stdio") {
+        args.push("--config", `${prefix}.type="stdio"`);
         if (info.command) args.push("--config", `${prefix}.command=${JSON.stringify(info.command)}`);
         if (info.args) args.push("--config", `${prefix}.args=${JSON.stringify(info.args)}`);
         if (info.env) args.push("--config", `${prefix}.env=${JSON.stringify(info.env)}`);
       } else if (info.url) {
+        if (info.transport === "http" || info.transport === "sse") {
+          args.push("--config", `${prefix}.type=${JSON.stringify(info.transport)}`);
+        }
         args.push("--config", `${prefix}.url=${JSON.stringify(info.url)}`);
       }
       if (info.headers && Object.keys(info.headers).length > 0) {
