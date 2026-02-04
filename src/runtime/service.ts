@@ -266,6 +266,36 @@ export async function createBotService(deps: BotServiceDeps) {
     }
   };
 
+  const notifyNotionConnected = async (metadataJson: string | null) => {
+    const metadata = parseCloudConnectMetadata(metadataJson);
+    if (!metadata) return;
+    const lang = await resolveUserLanguage(metadata.platform, metadata.user_id);
+    const cmdPrefix = metadata.platform === "telegram" ? "/" : "";
+    const text = t("connect.notion.connected", lang, { cmd: `\`${cmdPrefix}mcp notion status\`` });
+    try {
+      if (metadata.platform === "telegram") {
+        if (!telegram) return;
+        const chatId = Number(metadata.chat_id);
+        if (!Number.isFinite(chatId)) return;
+        await telegram.sendMessage({ chatId, text, priority: "user" });
+        return;
+      }
+      if (!slack) return;
+      const workspaceId = metadata.workspace_id ?? null;
+      if (!workspaceId) {
+        logger.warn(`Slack Notion connect missing workspace_id chat=${metadata.chat_id} user=${metadata.user_id}`);
+        return;
+      }
+      let channel = metadata.chat_id;
+      if (!channel.startsWith("D")) {
+        channel = await slack.openConversation({ users: [metadata.user_id], workspaceId });
+      }
+      await slack.postMessageDetailed({ channel, text, blocksOnLastChunk: false, priority: "user", workspaceId });
+    } catch (e) {
+      logger.warn(`Failed to send Notion connect message: ${String(e)}`);
+    }
+  };
+
   /**
    * Notify WebSocket client about OAuth completion
    */
@@ -461,6 +491,7 @@ export async function createBotService(deps: BotServiceDeps) {
     resolveUserLanguage,
     resolveSessionLanguage,
     notifyGithubConnected,
+    notifyNotionConnected,
     notifyChatgptConnected,
     notifyWebSocketOAuthComplete,
   });

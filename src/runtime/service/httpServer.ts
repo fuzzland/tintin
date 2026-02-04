@@ -92,6 +92,7 @@ export type CreateHttpServerDeps = {
   resolveUserLanguage: (platform: "telegram" | "slack", userId: string) => Promise<UserLanguage>;
   resolveSessionLanguage: (session: { language?: string | null }) => UserLanguage;
   notifyGithubConnected: (metadataJson: string | null) => Promise<void>;
+  notifyNotionConnected: (metadataJson: string | null) => Promise<void>;
   notifyChatgptConnected: (metadataJson: string | null) => Promise<void>;
   notifyWebSocketOAuthComplete: (metadataJson: string | null, provider: string, identityId: string) => Promise<void>;
 };
@@ -396,7 +397,7 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
             await deps.notifyGithubConnected(result.metadataJson);
           }
           if (result.provider === "notion") {
-            // No additional notifications for now.
+            await deps.notifyNotionConnected(result.metadataJson);
           }
           sendText(res, 200, "Connected. Return to the chat.");
         } catch (e) {

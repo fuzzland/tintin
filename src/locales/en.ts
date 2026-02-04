@@ -208,6 +208,7 @@ export const en = {
   "connect.dm_only": "Please run {cmd} in a direct message.",
   "connect.failed": "Connect failed: {error}",
   "connect.github.connected": "GitHub connected. Use {cmd} to list repos.",
+  "connect.notion.connected": "Notion connected. Use {cmd} to check status.",
   "connect.chatgpt.not_configured": "ChatGPT OAuth is not configured.",
   "connect.chatgpt.none": "No ChatGPT account linked.",
   "connect.chatgpt.paste_redirect": "Paste the full redirect URL after signing in.",

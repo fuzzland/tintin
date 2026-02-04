@@ -208,6 +208,7 @@ export const zh = {
   "connect.dm_only": "请在私聊中使用 {cmd}。",
   "connect.failed": "连接失败：{error}",
   "connect.github.connected": "GitHub 已连接。使用 {cmd} 查看仓库。",
+  "connect.notion.connected": "Notion 已连接。使用 {cmd} 查看状态。",
   "connect.chatgpt.not_configured": "未配置 ChatGPT OAuth。",
   "connect.chatgpt.none": "未绑定 ChatGPT 账号。",
   "connect.chatgpt.paste_redirect": "请粘贴登录后的完整 redirect URL。",
