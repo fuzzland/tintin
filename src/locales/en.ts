@@ -229,7 +229,7 @@ export const en = {
   "oauth.authorize_link": "Authorize {provider} here: {url}",
   "notion.oauth.start_failed": "Failed to start Notion OAuth: {error}",
   "notion.oauth.not_connected": "Notion is not connected.",
-  "notion.oauth.connected": "Notion connected. Workspace: {workspace}",
+  "notion.oauth.connected": "Notion connected.",
 
   "github.already_connected.title": "GitHub App already connected.",
   "github.already_connected.account": "Account: {login} ({type})",

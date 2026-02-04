@@ -771,8 +771,7 @@ export class CloudHandler {
           await replyText("notion.oauth.not_connected");
           return true;
         }
-        const workspace = token.workspace_name ?? "";
-        await replyText("notion.oauth.connected", { workspace: workspace || "-" });
+        await replyText("notion.oauth.connected");
         return true;
       }
       case "repos": {

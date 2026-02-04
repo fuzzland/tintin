@@ -229,7 +229,7 @@ export const zh = {
   "oauth.authorize_link": "请在此授权 {provider}：{url}",
   "notion.oauth.start_failed": "Notion OAuth 启动失败：{error}",
   "notion.oauth.not_connected": "Notion 尚未连接。",
-  "notion.oauth.connected": "Notion 已连接。Workspace：{workspace}",
+  "notion.oauth.connected": "Notion 已连接。",
 
   "github.already_connected.title": "GitHub App 已连接。",
   "github.already_connected.account": "账号：{login}（{type}）",
