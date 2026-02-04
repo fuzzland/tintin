@@ -18,7 +18,7 @@ import { hashSetupSpec, stringifySetupSpec } from "../cloud/setupSpec.js";
 import { buildCloneUrl, buildGitAuthHeader, runGitClone } from "../cloud/git.js";
 import { LocalCloudProvider } from "../cloud/localProvider.js";
 import { createUiToken } from "../cloud/uiTokens.js";
-import { startNotionFlow } from "../cloud/notion/oauth.js";
+import { startNotionFlow, handleNotionCallback, parseNotionRedirectUrl } from "../cloud/notion/oauth.js";
 import {
   getCloudRun,
   getLatestSetupSpec,
@@ -740,8 +740,34 @@ export class CloudHandler {
         return true;
       }
       case "mcp_notion_connect": {
+        const cmd = opts.command as Extract<CloudCommand, { kind: "mcp_notion_connect" }>;
         if (!opts.isDirect) {
           await replyText("connect.dm_only", { cmd: formatCmd("mcp notion connect") });
+          return true;
+        }
+        if (cmd.payload) {
+          const parsed = parseNotionRedirectUrl(cmd.payload);
+          if (!parsed.code || !parsed.state) {
+            await replyText("notion.oauth.paste_redirect");
+            return true;
+          }
+          try {
+            this.deps.logger.info(
+              `[notion][oauth] manual redirect received platform=${opts.platform} chat=${opts.chatId} user=${opts.userId} identity=${identity.id} state=${parsed.state}`,
+            );
+            await handleNotionCallback({
+              db: this.deps.db,
+              config: this.deps.config,
+              code: parsed.code,
+              state: parsed.state,
+            });
+            this.deps.logger.info(
+              `[notion][oauth] linked account platform=${opts.platform} chat=${opts.chatId} identity=${identity.id} state=${parsed.state}`,
+            );
+            await replyText("notion.oauth.link_success", { cmd: formatCmd("mcp notion status") }, true);
+          } catch (e) {
+            await replyText("notion.oauth.link_failed", { error: String(e) });
+          }
           return true;
         }
         const metadataJson = JSON.stringify({
@@ -759,7 +785,15 @@ export class CloudHandler {
             metadataJson,
             logger: this.deps.logger,
           });
-          await replyText("oauth.authorize_link", { provider: "Notion", url: authorizeUrl }, true);
+          const lines = [
+            t("notion.oauth.signin.title", lang),
+            t("notion.oauth.signin.open_link", lang),
+            authorizeUrl,
+            "",
+            t("notion.oauth.signin.instructions", lang),
+            `- ${formatCmd("mcp notion connect <paste-full-redirect-url>")}`,
+          ];
+          await reply(lines.join("\n"), true);
         } catch (e) {
           await replyText("notion.oauth.start_failed", { error: String(e) });
         }

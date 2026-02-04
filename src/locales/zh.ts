@@ -229,6 +229,12 @@ export const zh = {
   "notion.oauth.start_failed": "Notion OAuth 启动失败：{error}",
   "notion.oauth.not_connected": "Notion 尚未连接。",
   "notion.oauth.connected": "Notion 已连接。Workspace：{workspace}",
+  "notion.oauth.paste_redirect": "请粘贴登录后的完整 redirect URL。",
+  "notion.oauth.link_success": "Notion 已连接！使用 {cmd} 查看状态",
+  "notion.oauth.link_failed": "Notion 连接失败：{error}",
+  "notion.oauth.signin.title": "登录 Notion",
+  "notion.oauth.signin.open_link": "打开以下链接进行授权：",
+  "notion.oauth.signin.instructions": "授权完成后，将完整 redirect URL 粘贴回这里：",
 
   "github.already_connected.title": "GitHub App 已连接。",
   "github.already_connected.account": "账号：{login}（{type}）",
