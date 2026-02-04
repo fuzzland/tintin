@@ -1251,17 +1251,7 @@ export class CloudHandler {
           } else if (identity.active_repo_id) {
             repoIds = [identity.active_repo_id];
           } else {
-            const conns = await listConnections(this.deps.db, identity.id);
-            const hasGithub = conns.some((conn) => conn.type === "github_app" || conn.type === "github_oauth");
-            if (!hasGithub) {
-              playground = true;
-            } else {
-              await replyText("run.no_active_repo_or_repos", {
-                select: formatCmd("repo select <number>"),
-                playground: formatCmd("repo select playground"),
-              });
-              return true;
-            }
+            playground = true;
           }
         }
         if (!playground) {
