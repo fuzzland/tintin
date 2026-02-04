@@ -180,6 +180,8 @@ export const zh = {
   "cloud.help.cmd.connect_chatgpt_status": "- {cmd} 查看 ChatGPT 状态",
   "cloud.help.cmd.connect_chatgpt_revoke": "- {cmd} 解除 ChatGPT 连接",
   "cloud.help.cmd.mcp_github_token": "- {cmd} 设置 GitHub MCP Token",
+  "cloud.help.cmd.mcp_notion_connect": "- {cmd} 连接 Notion MCP（OAuth）",
+  "cloud.help.cmd.mcp_notion_status": "- {cmd} 查看 Notion MCP 状态",
   "mcp.github_token.usage_set": "用法：{cmd}",
   "mcp.github_token.saved": "GitHub MCP Token 已保存。",
   "mcp.github_token.save_failed": "保存 GitHub MCP Token 失败：{error}",
@@ -224,6 +226,9 @@ export const zh = {
   "connect.chatgpt.status.workspace_none": "Workspace：（无）",
 
   "oauth.authorize_link": "请在此授权 {provider}：{url}",
+  "notion.oauth.start_failed": "Notion OAuth 启动失败：{error}",
+  "notion.oauth.not_connected": "Notion 尚未连接。",
+  "notion.oauth.connected": "Notion 已连接。Workspace：{workspace}",
 
   "github.already_connected.title": "GitHub App 已连接。",
   "github.already_connected.account": "账号：{login}（{type}）",

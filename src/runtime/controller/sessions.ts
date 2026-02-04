@@ -57,12 +57,14 @@ export function buildCloudHelpText(platform: "telegram" | "slack", lang: UserLan
     t("cloud.help.cmd.connect_chatgpt", lang, { cmd: `\`${cmd("connect chatgpt")}\`` }),
     t("cloud.help.cmd.connect_chatgpt_status", lang, { cmd: `\`${cmd("connect chatgpt status")}\`` }),
     t("cloud.help.cmd.connect_chatgpt_revoke", lang, { cmd: `\`${cmd("connect chatgpt revoke")}\`` }),
-    t("cloud.help.cmd.mcp_github_token", lang, { cmd: `\`${cmd("mcp github token set <token>")}\`` }),
     t("cloud.help.cmd.connect_github", lang, {
       cmd: `\`${cmd("connect github")}\``,
       cmd2: `\`${cmd("connect gitlab")}\``,
       cmd3: `\`${cmd("connect local")}\``,
     }),
+    t("cloud.help.cmd.mcp_github_token", lang, { cmd: `\`${cmd("mcp github token set <token>")}\`` }),
+    t("cloud.help.cmd.mcp_notion_connect", lang, { cmd: `\`${cmd("mcp notion connect")}\`` }),
+    t("cloud.help.cmd.mcp_notion_status", lang, { cmd: `\`${cmd("mcp notion status")}\`` }),
     "",
     t("cloud.help.step_pick_repos", lang),
     t("cloud.help.cmd.repos", lang, {

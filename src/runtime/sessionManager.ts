@@ -14,6 +14,7 @@ import { redactText } from "./redact.js";
 import { nowMs, sleep } from "./util.js";
 import type { McpRegistry } from "./mcp/registry.js";
 import { collectMcpAgentEnv, formatMcpBearerEnvVar } from "./mcp/utils.js";
+import { ensureNotionToken } from "./cloud/notion/token.js";
 import { getGithubMcpToken, getOrCreateIdentity } from "./cloud/store.js";
 import { decryptSecret } from "./cloud/secrets.js";
 import { buildLocalizedPrompt } from "./prompt.js";
@@ -759,6 +760,34 @@ export class SessionManager {
           startupTimeoutSec: provider.startup_timeout_sec,
         });
       }
+      for (const [name, provider] of Object.entries(mcp.providers)) {
+        if (!provider.enabled) continue;
+        if (provider.type !== "notion") continue;
+        const token = await this.requireNotionMcpToken(identityId);
+        const existing = servers.get(name);
+        const bearerTokenEnvVar =
+          existing?.bearerTokenEnvVar ?? provider.bearer_token_env_var ?? formatMcpBearerEnvVar(name);
+        const url = "https://mcp.notion.com/mcp";
+        if (existing) {
+          existing.bearerTokenEnvVar = bearerTokenEnvVar;
+          existing.bearerToken = token;
+          existing.url = existing.url ?? url;
+          existing.transport = "http";
+          existing.headers = provider.headers ?? {};
+          servers.set(name, existing);
+        } else {
+          servers.set(name, {
+            id: name,
+            transport: "http",
+            url,
+            headers: provider.headers ?? {},
+            bearerTokenEnvVar,
+            bearerToken: token,
+            status: "running",
+            startupTimeoutSec: provider.startup_timeout_sec,
+          });
+        }
+      }
     }
     if (servers.size === 0) return null;
     const adapter = getAgentAdapter(agent);
@@ -778,6 +807,14 @@ export class SessionManager {
       throw new Error('GitHub MCP token is not set. Use "/mcp github token set <token>".');
     }
     return decryptSecret(row.encrypted_token, secretKey);
+  }
+
+  private async requireNotionMcpToken(identityId: string): Promise<string> {
+    const secretKey = this.config.cloud?.secrets_key ?? "";
+    if (!secretKey) {
+      throw new Error("cloud.secrets_key is required to use Notion MCP tokens.");
+    }
+    return await ensureNotionToken({ db: this.db, identityId, secretKey, logger: this.logger });
   }
 
   private async resolveChatgptProxyBin(): Promise<string | null> {

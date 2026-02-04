@@ -35,6 +35,7 @@ const BOOTSTRAP_SELECTORS: Record<McpProviderType, BootstrapSelector> = {
     if (provider.type !== "github") return null;
     return null;
   },
+  notion: () => null,
 };
 
 export function buildMcpBootstrapConfig(mcp: McpConfig | null | undefined): McpBootstrapConfig | null {

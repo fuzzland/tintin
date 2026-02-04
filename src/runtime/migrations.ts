@@ -24,6 +24,7 @@ import * as sessionLanguage0021 from "./migrations/0021_session_language.js";
 import * as deployRegistry0022 from "./migrations/0022_deploy_registry.js";
 import * as slackInstallations0023 from "./migrations/0023_slack_installations.js";
 import * as githubMcpTokens0024 from "./migrations/0024_github_mcp_tokens.js";
+import * as notionMcp0025 from "./migrations/0025_notion_mcp.js";
 
 const provider = {
   async getMigrations() {
@@ -51,6 +52,7 @@ const provider = {
       "0022_deploy_registry": deployRegistry0022,
       "0023_slack_installations": slackInstallations0023,
       "0024_github_mcp_tokens": githubMcpTokens0024,
+      "0025_notion_mcp": notionMcp0025,
     };
   },
 };

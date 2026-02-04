@@ -124,3 +124,58 @@ command = "echo"
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("loadConfig allows notion provider without explicit type", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "tintin-config-"));
+  const configPath = path.join(dir, "config.toml");
+  await writeFile(
+    configPath,
+    baseConfig(`
+[cloud]
+secrets_key = "test-secrets-key"
+
+[mcp]
+global_timeout_sec = 60
+log_level = "info"
+
+[mcp.providers.notion]
+enabled = true
+`),
+    "utf8",
+  );
+
+  try {
+    const config = await loadConfig(configPath);
+    const provider = config.mcp?.providers.notion;
+    assert.ok(provider);
+    if (provider.type !== "notion") throw new Error("Expected notion provider");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects notion provider with wrong name", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "tintin-config-"));
+  const configPath = path.join(dir, "config.toml");
+  await writeFile(
+    configPath,
+    baseConfig(`
+[cloud]
+secrets_key = "test-secrets-key"
+
+[mcp]
+global_timeout_sec = 60
+log_level = "info"
+
+[mcp.providers.notion_alt]
+type = "notion"
+`),
+    "utf8",
+  );
+
+  try {
+    await assert.rejects(() => loadConfig(configPath));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

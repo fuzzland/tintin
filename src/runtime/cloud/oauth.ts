@@ -11,11 +11,11 @@ function base64Url(input: Buffer): string {
     .replace(/=+$/g, "");
 }
 
-function generateCodeVerifier(): string {
+export function generateCodeVerifier(): string {
   return base64Url(crypto.randomBytes(32));
 }
 
-function generateCodeChallenge(verifier: string): string {
+export function generateCodeChallenge(verifier: string): string {
   const hash = crypto.createHash("sha256").update(verifier).digest();
   return base64Url(hash);
 }

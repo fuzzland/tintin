@@ -18,6 +18,7 @@ import { hashSetupSpec, stringifySetupSpec } from "../cloud/setupSpec.js";
 import { buildCloneUrl, buildGitAuthHeader, runGitClone } from "../cloud/git.js";
 import { LocalCloudProvider } from "../cloud/localProvider.js";
 import { createUiToken } from "../cloud/uiTokens.js";
+import { startNotionFlow } from "../cloud/notion/oauth.js";
 import {
   getCloudRun,
   getLatestSetupSpec,
@@ -37,6 +38,7 @@ import {
   replaceGithubInstallationRepos,
   setIdentityActiveRepo,
   setGithubMcpToken,
+  getNotionMcpToken,
   setSecret,
   shareRepo,
   unshareRepo,
@@ -735,6 +737,42 @@ export class CloudHandler {
         }
         const lines = conns.map((c) => t("connections.item", lang, { type: c.type }));
         await reply(lines.join("\n"));
+        return true;
+      }
+      case "mcp_notion_connect": {
+        if (!opts.isDirect) {
+          await replyText("connect.dm_only", { cmd: formatCmd("mcp notion connect") });
+          return true;
+        }
+        const metadataJson = JSON.stringify({
+          platform: opts.platform,
+          chat_id: opts.chatId,
+          user_id: opts.userId,
+          space_id: opts.spaceId,
+          workspace_id: opts.workspaceId,
+        });
+        try {
+          const { authorizeUrl } = await startNotionFlow({
+            db: this.deps.db,
+            config: this.deps.config,
+            identityId: identity.id,
+            metadataJson,
+            logger: this.deps.logger,
+          });
+          await replyText("oauth.authorize_link", { provider: "Notion", url: authorizeUrl }, true);
+        } catch (e) {
+          await replyText("notion.oauth.start_failed", { error: String(e) });
+        }
+        return true;
+      }
+      case "mcp_notion_status": {
+        const token = await getNotionMcpToken(this.deps.db, identity.id);
+        if (!token) {
+          await replyText("notion.oauth.not_connected");
+          return true;
+        }
+        const workspace = token.workspace_name ?? "";
+        await replyText("notion.oauth.connected", { workspace: workspace || "-" });
         return true;
       }
       case "repos": {

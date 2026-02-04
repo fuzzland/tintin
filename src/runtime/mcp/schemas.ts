@@ -36,6 +36,12 @@ export const GitHubMcpProviderSchema = BaseMcpProviderSchema.extend({
   toolsets: z.array(z.string()).optional(),
 });
 
+export const NotionMcpProviderSchema = BaseMcpProviderSchema.extend({
+  type: z.literal("notion"),
+  headers: z.record(z.string(), z.string()).default({}),
+  bearer_token_env_var: z.string().min(1).optional(),
+});
+
 const PlaywrightSnapshotModeSchema = z.enum(["incremental", "full", "none"]);
 const PlaywrightImageResponseSchema = z.enum(["allow", "omit"]);
 const PlaywrightProviderSchema = z.enum(["local", "browserbase", "hyperbrowser"]);
@@ -92,6 +98,7 @@ export const McpProviderConfigSchema = z.discriminatedUnion("type", [
   SseMcpProviderSchema,
   PlaywrightMcpProviderSchema,
   GitHubMcpProviderSchema,
+  NotionMcpProviderSchema,
 ]);
 
 export const McpConfigSchema = z.object({

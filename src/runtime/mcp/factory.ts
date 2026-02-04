@@ -13,6 +13,7 @@ const PROVIDER_FACTORIES: Record<McpProviderType, ProviderFactory> = {
   sse: (name) => new HttpMcpProvider(name, "sse"),
   playwright: (name) => new PlaywrightMcpProvider(name),
   github: (name) => new GitHubMcpProvider(name),
+  notion: (name) => new HttpMcpProvider(name, "http"),
 };
 
 export function createMcpProvider(name: string, config: McpProviderConfig): IMcpProvider {

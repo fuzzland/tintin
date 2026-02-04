@@ -1,7 +1,7 @@
 import { McpConfigSchema, type McpLogLevel } from "./schemas.js";
 import { normalizePlaywrightMcpSection, type PlaywrightMcpSection } from "./providers/playwright/config.js";
 
-export type McpProviderType = "stdio" | "http" | "sse" | "playwright" | "github";
+export type McpProviderType = "stdio" | "http" | "sse" | "playwright" | "github" | "notion";
 
 export interface BaseMcpProviderConfig {
   enabled: boolean;
@@ -34,11 +34,18 @@ export interface GitHubMcpProviderConfig extends BaseMcpProviderConfig {
   toolsets?: string[];
 }
 
+export interface NotionMcpProviderConfig extends BaseMcpProviderConfig {
+  type: "notion";
+  headers?: Record<string, string>;
+  bearer_token_env_var?: string;
+}
+
 export type McpProviderConfig =
   | StdioMcpProviderConfig
   | HttpMcpProviderConfig
   | PlaywrightMcpProviderConfig
-  | GitHubMcpProviderConfig;
+  | GitHubMcpProviderConfig
+  | NotionMcpProviderConfig;
 
 export interface McpConfig {
   global_timeout_sec: number;
@@ -91,12 +98,31 @@ export function normalizeMcpSection(
   if (value === undefined || value === null) return null;
   if (!isRecord(value)) throw new Error("[mcp] must be a table");
 
-  const parsed = McpConfigSchema.parse(value);
+  const rawProviders = isRecord(value.providers) ? value.providers : {};
+  const providersWithDefaults: Record<string, unknown> = { ...rawProviders };
+  for (const [name, provider] of Object.entries(rawProviders)) {
+    if (name !== "notion") continue;
+    if (!isRecord(provider)) continue;
+    if (typeof provider.type === "string" && provider.type.length > 0) {
+      if (provider.type !== "notion") {
+        throw new Error(`[mcp.providers.${name}] Notion MCP does not allow type="${provider.type}".`);
+      }
+      continue;
+    }
+    providersWithDefaults[name] = { ...provider, type: "notion" };
+  }
+  const parsed = McpConfigSchema.parse({
+    ...value,
+    providers: providersWithDefaults,
+  });
   const providersRaw = parsed.providers as Record<string, McpProviderConfig>;
   const providers: Record<string, McpProviderConfig> = {};
   let enabledPlaywrightProviders = 0;
   for (const [name, raw] of Object.entries(providersRaw)) {
     assertValidProviderName(name);
+    if (raw.type === "notion" && name !== "notion") {
+      throw new Error(`[mcp.providers.${name}] Notion MCP must be named "notion".`);
+    }
     providers[name] = normalizeProviderConfig(name, raw, opts);
     if (providers[name]?.enabled && providers[name]?.type === "playwright") {
       enabledPlaywrightProviders += 1;

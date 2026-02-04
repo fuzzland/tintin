@@ -406,6 +406,31 @@ export interface GithubMcpTokensTable {
   updated_at: number;
 }
 
+export interface NotionMcpClientsTable {
+  id: string;
+  client_id: string;
+  client_secret: string;
+  registration_uri: string | null;
+  auth_endpoint: string;
+  token_endpoint: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface NotionMcpTokensTable {
+  id: string;
+  identity_id: string;
+  client_id: string;
+  encrypted_access_token: string;
+  encrypted_refresh_token: string;
+  expires_at: number | null;
+  bot_id: string | null;
+  workspace_name: string | null;
+  workspace_icon: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface DatabaseSchema {
   sessions: SessionsTable;
   session_stream_offsets: SessionStreamOffsetsTable;
@@ -439,6 +464,8 @@ export interface DatabaseSchema {
   chatgpt_oauth_states: ChatgptOAuthStatesTable;
   slack_installations: SlackInstallationsTable;
   github_mcp_tokens: GithubMcpTokensTable;
+  notion_mcp_clients: NotionMcpClientsTable;
+  notion_mcp_tokens: NotionMcpTokensTable;
 }
 
 export type Db = Kysely<DatabaseSchema>;

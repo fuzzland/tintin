@@ -20,6 +20,7 @@ import {
   resolvePlaywrightProviderEntry,
   type GitHubMcpProviderConfig,
   type McpProviderConfig,
+  type NotionMcpProviderConfig,
 } from "../mcp/config.js";
 import { resolveCodexHomeFromSessionsRoot, resolveSessionsRoot } from "../codex.js";
 import { resolveClaudeConfigDirFromSessionsRoot, resolveClaudeSessionJsonlPath } from "../claudeCode.js";
@@ -30,6 +31,7 @@ import { createBrowserbaseSession, releaseBrowserbaseSession } from "./browserba
 import { createHyperbrowserSession, stopHyperbrowserSession } from "./hyperbrowser.js";
 import { hashSetupSpec, parseSetupSpec } from "./setupSpec.js";
 import { decryptSecret, interpolateSecrets } from "./secrets.js";
+import { ensureNotionToken } from "./notion/token.js";
 import { buildCloneUrl, buildGitAuthHeader } from "./git.js";
 import { createGithubPullRequest, ensureGithubAppToken } from "./githubApp.js";
 import { findRemoteJsonlFiles, getRemoteFileSize, RemoteLogSync } from "./modalLogs.js";
@@ -1639,6 +1641,8 @@ export class CloudManager {
         };
       case "github":
         throw new Error(`[mcp.providers.${name}] GitHub MCP requires a per-user token.`);
+      case "notion":
+        return this.buildNotionServerInfo(name, provider);
       default: {
         const unreachable: never = provider;
         throw new Error(`Unsupported MCP provider type: ${(unreachable as { type?: string }).type ?? "unknown"}`);
@@ -1671,6 +1675,20 @@ export class CloudManager {
     };
   }
 
+  private buildNotionServerInfo(name: string, provider: NotionMcpProviderConfig): McpServerInfo {
+    const url = "https://mcp.notion.com/mcp";
+    const bearerTokenEnvVar = provider.bearer_token_env_var ?? formatMcpBearerEnvVar(name);
+    return {
+      id: name,
+      transport: "http",
+      url,
+      headers: provider.headers ?? {},
+      bearerTokenEnvVar,
+      status: "running",
+      startupTimeoutSec: provider.startup_timeout_sec,
+    };
+  }
+
   private async buildRemoteMcpArgs(
     agent: SessionAgent,
     identityId: string,
@@ -1688,7 +1706,14 @@ export class CloudManager {
         servers.set(name, this.buildGithubServerInfo(name, provider, token));
         continue;
       }
-      servers.set(name, this.buildServerInfoFromConfig(name, provider));
+      const serverInfo = this.buildServerInfoFromConfig(name, provider);
+      if (provider.type === "notion") {
+        const token = await this.requireNotionMcpToken(identityId);
+        serverInfo.bearerTokenEnvVar =
+          serverInfo.bearerTokenEnvVar ?? provider.bearer_token_env_var ?? formatMcpBearerEnvVar(name);
+        serverInfo.bearerToken = token;
+      }
+      servers.set(name, serverInfo);
     }
     const entry = resolvePlaywrightProviderEntry(mcp);
     if (entry?.provider?.enabled) {
@@ -1723,6 +1748,14 @@ export class CloudManager {
       throw new Error('GitHub MCP token is not set. Use "/mcp github token set <token>".');
     }
     return decryptSecret(row.encrypted_token, secretKey);
+  }
+
+  private async requireNotionMcpToken(identityId: string): Promise<string> {
+    const secretKey = this.config.cloud?.secrets_key ?? "";
+    if (!secretKey) {
+      throw new Error("cloud.secrets_key is required to use Notion MCP tokens.");
+    }
+    return await ensureNotionToken({ db: this.db, identityId, secretKey, logger: this.logger });
   }
 
   private logMcpServerSummary(agent: SessionAgent, servers: Map<string, McpServerInfo>): void {

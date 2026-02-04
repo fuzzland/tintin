@@ -564,6 +564,144 @@ export async function getGithubMcpToken(db: Db, identityId: string) {
     .executeTakeFirst();
 }
 
+export async function getLatestNotionMcpClient(db: Db) {
+  return await db
+    .selectFrom("notion_mcp_clients")
+    .selectAll()
+    .orderBy("updated_at", "desc")
+    .limit(1)
+    .executeTakeFirst();
+}
+
+export async function getNotionMcpClientByClientId(db: Db, clientId: string) {
+  return await db
+    .selectFrom("notion_mcp_clients")
+    .selectAll()
+    .where("client_id", "=", clientId)
+    .executeTakeFirst();
+}
+
+export async function getNotionMcpClientById(db: Db, id: string) {
+  return await db
+    .selectFrom("notion_mcp_clients")
+    .selectAll()
+    .where("id", "=", id)
+    .executeTakeFirst();
+}
+
+export async function upsertNotionMcpClient(db: Db, opts: {
+  clientId: string;
+  clientSecret: string;
+  registrationUri?: string | null;
+  authEndpoint: string;
+  tokenEndpoint: string;
+}) {
+  const now = nowMs();
+  const existing = await db
+    .selectFrom("notion_mcp_clients")
+    .select(["id"])
+    .where("client_id", "=", opts.clientId)
+    .executeTakeFirst();
+  if (existing) {
+    await db
+      .updateTable("notion_mcp_clients")
+      .set({
+        client_secret: opts.clientSecret,
+        registration_uri: opts.registrationUri ?? null,
+        auth_endpoint: opts.authEndpoint,
+        token_endpoint: opts.tokenEndpoint,
+        updated_at: now,
+      })
+      .where("id", "=", existing.id)
+      .execute();
+    return existing.id;
+  }
+  const id = crypto.randomUUID();
+  await db
+    .insertInto("notion_mcp_clients")
+    .values({
+      id,
+      client_id: opts.clientId,
+      client_secret: opts.clientSecret,
+      registration_uri: opts.registrationUri ?? null,
+      auth_endpoint: opts.authEndpoint,
+      token_endpoint: opts.tokenEndpoint,
+      created_at: now,
+      updated_at: now,
+    })
+    .execute();
+  return id;
+}
+
+export async function getNotionMcpToken(db: Db, identityId: string) {
+  return await db
+    .selectFrom("notion_mcp_tokens")
+    .selectAll()
+    .where("identity_id", "=", identityId)
+    .executeTakeFirst();
+}
+
+export async function deleteNotionMcpToken(db: Db, identityId: string) {
+  const res = await db
+    .deleteFrom("notion_mcp_tokens")
+    .where("identity_id", "=", identityId)
+    .executeTakeFirst();
+  return Number(res.numDeletedRows ?? 0) > 0;
+}
+
+export async function upsertNotionMcpToken(db: Db, opts: {
+  identityId: string;
+  clientId: string;
+  encryptedAccessToken: string;
+  encryptedRefreshToken: string;
+  expiresAt: number | null;
+  botId?: string | null;
+  workspaceName?: string | null;
+  workspaceIcon?: string | null;
+}) {
+  const now = nowMs();
+  const existing = await db
+    .selectFrom("notion_mcp_tokens")
+    .select(["id"])
+    .where("identity_id", "=", opts.identityId)
+    .executeTakeFirst();
+  if (existing) {
+    await db
+      .updateTable("notion_mcp_tokens")
+      .set({
+        client_id: opts.clientId,
+        encrypted_access_token: opts.encryptedAccessToken,
+        encrypted_refresh_token: opts.encryptedRefreshToken,
+        expires_at: opts.expiresAt,
+        bot_id: opts.botId ?? null,
+        workspace_name: opts.workspaceName ?? null,
+        workspace_icon: opts.workspaceIcon ?? null,
+        updated_at: now,
+      })
+      .where("id", "=", existing.id)
+      .execute();
+    return existing.id;
+  }
+  const id = crypto.randomUUID();
+  await db
+    .insertInto("notion_mcp_tokens")
+    .values({
+      id,
+      identity_id: opts.identityId,
+      client_id: opts.clientId,
+      encrypted_access_token: opts.encryptedAccessToken,
+      encrypted_refresh_token: opts.encryptedRefreshToken,
+      expires_at: opts.expiresAt,
+      bot_id: opts.botId ?? null,
+      workspace_name: opts.workspaceName ?? null,
+      workspace_icon: opts.workspaceIcon ?? null,
+      created_at: now,
+      updated_at: now,
+    })
+    .execute();
+  return id;
+}
+
 export async function putSetupSpec(db: Db, opts: { repoId: string; ymlBlob: string; hash: string }) {
   const now = nowMs();
   const existing = await db

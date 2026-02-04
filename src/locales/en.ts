@@ -183,6 +183,8 @@ export const en = {
   "cloud.help.cmd.connect_chatgpt_status": "- {cmd} check ChatGPT status",
   "cloud.help.cmd.connect_chatgpt_revoke": "- {cmd} revoke ChatGPT connection",
   "cloud.help.cmd.mcp_github_token": "- {cmd} set your GitHub MCP token",
+  "cloud.help.cmd.mcp_notion_connect": "- {cmd} connect Notion MCP (OAuth)",
+  "cloud.help.cmd.mcp_notion_status": "- {cmd} show Notion MCP status",
   "cloud.help.cmd.connect_github": "- {cmd} (GitHub) / {cmd2} (GitLab) / {cmd3} (local)",
   "cloud.help.step_pick_repos": "2) Pick repositories",
   "cloud.help.cmd.repos": "- {cmd} list repos (use {cmd2} to search)",
@@ -224,6 +226,9 @@ export const en = {
   "connect.chatgpt.status.workspace_none": "Workspace: (none)",
 
   "oauth.authorize_link": "Authorize {provider} here: {url}",
+  "notion.oauth.start_failed": "Failed to start Notion OAuth: {error}",
+  "notion.oauth.not_connected": "Notion is not connected.",
+  "notion.oauth.connected": "Notion connected. Workspace: {workspace}",
 
   "github.already_connected.title": "GitHub App already connected.",
   "github.already_connected.account": "Account: {login} ({type})",

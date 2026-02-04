@@ -17,6 +17,7 @@ import { contentTypeForPath, readHeader, readRequestBody, sendJson, sendText } f
 import { createProxyToken, handleProxyRequest } from "../cloud/proxy.js";
 import { handleOAuthCallback } from "../cloud/oauth.js";
 import { handleGithubAppCallback } from "../cloud/githubApp.js";
+import { handleNotionCallback } from "../cloud/notion/oauth.js";
 import {
   githubWebhookAppIdMatches,
   githubWebhookMaxBodyBytes,
@@ -386,10 +387,16 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
           return;
         }
         try {
-          const result = await handleOAuthCallback({ db, cloud: config.cloud, provider, code, state });
+          const result =
+            provider === "notion"
+              ? await handleNotionCallback({ db, config, code, state })
+              : await handleOAuthCallback({ db, cloud: config.cloud, provider, code, state });
           await deps.notifyWebSocketOAuthComplete(result.metadataJson, result.provider, result.identityId);
           if (result.provider === "github") {
             await deps.notifyGithubConnected(result.metadataJson);
+          }
+          if (result.provider === "notion") {
+            // No additional notifications for now.
           }
           sendText(res, 200, "Connected. Return to the chat.");
         } catch (e) {

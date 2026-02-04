@@ -222,6 +222,10 @@ enabled = true
 type = "github"
 toolsets = ["repos", "issues", "pull_requests"]
 
+# Notion MCP (OAuth, per-user token via `/mcp notion connect`)
+[mcp.providers.notion]
+enabled = false
+
 [pinecone]
 api_key = "<PINECONE_API_KEY>"
 index = "tintin-snapshots"
