@@ -390,7 +390,7 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
         try {
           const result =
             provider === "notion"
-              ? await handleNotionCallback({ db, config, code, state })
+              ? await handleNotionCallback({ db, config, code, state, logger })
               : await handleOAuthCallback({ db, cloud: config.cloud, provider, code, state });
           await deps.notifyWebSocketOAuthComplete(result.metadataJson, result.provider, result.identityId);
           if (result.provider === "github") {

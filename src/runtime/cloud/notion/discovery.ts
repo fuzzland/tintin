@@ -30,6 +30,7 @@ export async function discoverNotionEndpoints(opts?: {
   const ttl = opts?.cacheTtlMs ?? 10 * 60 * 1000;
   if (cached && Date.now() - cached.ts < ttl) return cached.value;
   const resourceBase = opts?.resourceBaseUrl ?? DEFAULT_RESOURCE_BASE;
+  opts?.logger?.info(`[notion][discovery] start resource=${resourceBase}`);
 
   // RFC 9470: Protected Resource Metadata is at the ORIGIN, not the resource path
   // e.g., for "https://mcp.notion.com/mcp", the metadata is at "https://mcp.notion.com/.well-known/oauth-protected-resource"
@@ -39,6 +40,7 @@ export async function discoverNotionEndpoints(opts?: {
   let authServer = "";
   try {
     const data = await fetchJson(protectedMetadataUrl);
+    opts?.logger?.info(`[notion][discovery] protected-resource ok url=${protectedMetadataUrl}`);
     if (Array.isArray(data.authorization_servers) && data.authorization_servers.length > 0) {
       authServer = String(data.authorization_servers[0] ?? "");
     } else if (typeof data.authorization_server === "string") {
@@ -53,6 +55,7 @@ export async function discoverNotionEndpoints(opts?: {
   }
   const authMetaUrl = `${authServer.replace(/\/+$/g, "")}/.well-known/oauth-authorization-server`;
   const meta = await fetchJson(authMetaUrl);
+  opts?.logger?.info(`[notion][discovery] authorization-server ok url=${authMetaUrl}`);
   const authorizationEndpoint = String(meta.authorization_endpoint ?? "");
   const tokenEndpoint = String(meta.token_endpoint ?? "");
   const registrationEndpoint = String(meta.registration_endpoint ?? "");

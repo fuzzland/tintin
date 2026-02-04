@@ -18,6 +18,9 @@ export async function getOrRegisterNotionClient(opts: {
 }): Promise<RegistrationResult> {
   const existing = await getLatestNotionMcpClient(opts.db);
   if (existing) {
+    opts.logger?.info(
+      `[notion][registration] reuse client_id=${existing.client_id} token_endpoint=${existing.token_endpoint}`,
+    );
     return {
       clientId: existing.client_id,
       clientSecret: existing.client_secret,
@@ -28,6 +31,9 @@ export async function getOrRegisterNotionClient(opts: {
   }
 
   const discovery = await discoverNotionEndpoints({ logger: opts.logger });
+  opts.logger?.info(
+    `[notion][registration] register start auth_endpoint=${discovery.authorizationEndpoint} token_endpoint=${discovery.tokenEndpoint}`,
+  );
   const payload = {
     redirect_uris: [opts.redirectUri],
     grant_types: ["authorization_code", "refresh_token"],
@@ -51,6 +57,7 @@ export async function getOrRegisterNotionClient(opts: {
   if (!clientId) {
     throw new Error("Notion registration missing client credentials");
   }
+  opts.logger?.info(`[notion][registration] register ok client_id=${clientId}`);
   const registrationUri = typeof data.registration_client_uri === "string" ? data.registration_client_uri : null;
   await upsertNotionMcpClient(opts.db, {
     clientId,

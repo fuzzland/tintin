@@ -69,6 +69,7 @@ export async function startNotionFlow(opts: {
   if (!cloud.public_base_url) throw new Error("cloud.public_base_url is required for Notion OAuth.");
   if (!cloud.oauth?.callback_path) throw new Error("cloud.oauth.callback_path is required for Notion OAuth.");
   const redirectUri = `${cloud.public_base_url}${cloud.oauth.callback_path}?provider=notion`;
+  opts.logger?.info(`[notion][oauth] start identity=${opts.identityId} redirect=${redirectUri}`);
   const client = await getOrRegisterNotionClient({ db: opts.db, redirectUri, logger: opts.logger });
   const state = crypto.randomBytes(24).toString("base64url");
   const verifier = generateCodeVerifier();
@@ -91,6 +92,9 @@ export async function startNotionFlow(opts: {
     metadataJson: JSON.stringify(metadata),
     ttlMs: 10 * 60 * 1000,
   });
+  opts.logger?.info(
+    `[notion][oauth] state saved identity=${opts.identityId} client_id=${client.clientId} redirect=${redirectUri}`,
+  );
   return {
     authorizeUrl: buildAuthorizeUrl({
       authorizeEndpoint: client.authEndpoint,
@@ -107,6 +111,7 @@ export async function handleNotionCallback(opts: {
   config: AppConfig;
   code: string;
   state: string;
+  logger?: Logger;
 }): Promise<{ identityId: string; provider: "notion"; metadataJson: string | null }> {
   const saved = await consumeOAuthState(opts.db, "notion", opts.state);
   if (!saved) throw new Error("Invalid or expired OAuth state");
@@ -123,6 +128,9 @@ export async function handleNotionCallback(opts: {
   client = notionClientId ? await getNotionMcpClientByClientId(opts.db, notionClientId) : null;
   if (!client) client = await getLatestNotionMcpClient(opts.db);
   if (!client) throw new Error("Notion OAuth client not registered");
+  opts.logger?.info(
+    `[notion][oauth] callback state ok identity=${saved.identity_id ?? "-"} client_id=${client.client_id}`,
+  );
   const token = await exchangeToken({
     tokenEndpoint: client.token_endpoint,
     clientId: client.client_id,
@@ -131,6 +139,15 @@ export async function handleNotionCallback(opts: {
     code: opts.code,
     codeVerifier: saved.code_verifier,
   });
+  const tokenSummary = {
+    hasAccessToken: typeof token.access_token === "string" && token.access_token.length > 0,
+    hasRefreshToken: typeof token.refresh_token === "string" && token.refresh_token.length > 0,
+    expiresIn: typeof token.expires_in === "number" ? token.expires_in : null,
+    botId: typeof token.bot_id === "string" ? token.bot_id : null,
+    workspaceId: typeof token.workspace_id === "string" ? token.workspace_id : null,
+    workspaceName: typeof token.workspace_name === "string" ? token.workspace_name : null,
+  };
+  opts.logger?.info(`[notion][oauth] token received ${JSON.stringify(tokenSummary)}`);
   const identityId = saved.identity_id;
   if (!identityId) throw new Error("OAuth state missing identity");
   const secretKey = opts.config.cloud?.secrets_key ?? "";
