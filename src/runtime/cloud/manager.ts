@@ -1712,6 +1712,7 @@ export class CloudManager {
         serverInfo.bearerTokenEnvVar =
           serverInfo.bearerTokenEnvVar ?? provider.bearer_token_env_var ?? formatMcpBearerEnvVar(name);
         serverInfo.bearerToken = token;
+        this.logger.debug(`[cloud][mcp] notion token set identity=${identityId} env_var=${serverInfo.bearerTokenEnvVar} token_len=${token.length}`);
       }
       servers.set(name, serverInfo);
     }
@@ -1735,6 +1736,10 @@ export class CloudManager {
     this.logMcpServerSummary(agent, servers);
     const args = adapter.buildMcpCliArgs({ servers, globalTimeout });
     const env = collectMcpAgentEnv(servers);
+    const envKeys = Object.keys(env);
+    if (envKeys.length > 0) {
+      this.logger.debug(`[cloud][mcp] env vars set: ${envKeys.map((k) => `${k}=len:${env[k]?.length ?? 0}`).join(", ")}`);
+    }
     return { args, env };
   }
 
@@ -1771,8 +1776,9 @@ export class CloudManager {
         }
       }
       const headerCount = info.headers ? Object.keys(info.headers).length : 0;
+      const hasBearer = info.bearerToken ? 1 : 0;
       parts.push(
-        `${name}{transport=${info.transport}${urlSummary ? `,url=${urlSummary}` : ""},headers=${headerCount}}`,
+        `${name}{transport=${info.transport}${urlSummary ? `,url=${urlSummary}` : ""},headers=${headerCount},bearer=${hasBearer}}`,
       );
     }
     this.logger.info(`[cloud] mcp servers agent=${agent} ${parts.join(" ")}`);
