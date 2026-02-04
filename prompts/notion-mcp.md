@@ -26,9 +26,9 @@ When using Notion MCP tools, follow these patterns for efficient execution.
 ## Efficient Patterns
 
 ### Listing Recent Pages
-Use `notion-search` with empty or broad query:
+`notion-search` requires a non-empty query. If the user asks for “recent pages” without keywords, ask them for a keyword, page URL, or database to target. Then search with that keyword:
 ```
-notion-search with query="" to get recent pages
+notion-search with query="project status"
 ```
 
 ### Finding Specific Content
