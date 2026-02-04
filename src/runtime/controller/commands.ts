@@ -36,7 +36,7 @@ export type CloudCommand =
   | { kind: "secrets_list" }
   | { kind: "secrets_delete"; name: string }
   | { kind: "mcp_github_token_set"; token: string | null }
-  | { kind: "mcp_notion_connect"; payload?: string }
+  | { kind: "mcp_notion_connect" }
   | { kind: "mcp_notion_status" }
   | { kind: "snapshot_save"; note?: string }
   | { kind: "snapshot_list"; limit?: number }
@@ -422,10 +422,7 @@ export function parseCloudCommand(text: string): CloudCommand | null {
     const provider = tokens.shift()!.toLowerCase();
     if (provider === "notion") {
       const action = tokens.shift()?.toLowerCase() ?? "";
-      if (action === "connect") {
-        const payload = tokens.length > 0 ? tokens.join(" ").trim() : undefined;
-        return { kind: "mcp_notion_connect", payload };
-      }
+      if (action === "connect") return { kind: "mcp_notion_connect" };
       if (action === "status") return { kind: "mcp_notion_status" };
     }
     if (provider === "github" && tokens.length >= 1) {

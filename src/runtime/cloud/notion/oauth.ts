@@ -8,25 +8,6 @@ import { generateCodeChallenge, generateCodeVerifier } from "../oauth.js";
 import { getLatestNotionMcpClient, getNotionMcpClientByClientId, upsertNotionMcpToken } from "../store.js";
 import { getOrRegisterNotionClient } from "./registration.js";
 
-export function parseNotionRedirectUrl(input: string): { code?: string; state?: string } {
-  const value = (input ?? "").trim();
-  if (!value) return {};
-  try {
-    const url = new URL(value);
-    return {
-      code: url.searchParams.get("code") ?? undefined,
-      state: url.searchParams.get("state") ?? undefined,
-    };
-  } catch {
-    /* ignore */
-  }
-  if (value.includes("code=")) {
-    const params = new URLSearchParams(value);
-    return { code: params.get("code") ?? undefined, state: params.get("state") ?? undefined };
-  }
-  return {};
-}
-
 function buildAuthorizeUrl(opts: {
   authorizeEndpoint: string;
   clientId: string;

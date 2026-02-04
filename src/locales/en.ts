@@ -229,12 +229,6 @@ export const en = {
   "notion.oauth.start_failed": "Failed to start Notion OAuth: {error}",
   "notion.oauth.not_connected": "Notion is not connected.",
   "notion.oauth.connected": "Notion connected. Workspace: {workspace}",
-  "notion.oauth.paste_redirect": "Paste the full redirect URL after signing in.",
-  "notion.oauth.link_success": "Notion connected! Check status with {cmd}",
-  "notion.oauth.link_failed": "Failed to link Notion: {error}",
-  "notion.oauth.signin.title": "Sign in to Notion",
-  "notion.oauth.signin.open_link": "Open this link to authorize:",
-  "notion.oauth.signin.instructions": "After authorization, paste the full redirect URL here:",
 
   "github.already_connected.title": "GitHub App already connected.",
   "github.already_connected.account": "Account: {login} ({type})",
