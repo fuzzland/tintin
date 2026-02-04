@@ -30,8 +30,13 @@ export async function discoverNotionEndpoints(opts?: {
   const ttl = opts?.cacheTtlMs ?? 10 * 60 * 1000;
   if (cached && Date.now() - cached.ts < ttl) return cached.value;
   const resourceBase = opts?.resourceBaseUrl ?? DEFAULT_RESOURCE_BASE;
+
+  // RFC 9470: Protected Resource Metadata is at the ORIGIN, not the resource path
+  // e.g., for "https://mcp.notion.com/mcp", the metadata is at "https://mcp.notion.com/.well-known/oauth-protected-resource"
+  const resourceUrl = new URL(resourceBase);
+  const protectedMetadataUrl = `${resourceUrl.origin}/.well-known/oauth-protected-resource`;
+
   let authServer = "";
-  const protectedMetadataUrl = `${resourceBase.replace(/\/+$/g, "")}/.well-known/oauth-protected-resource`;
   try {
     const data = await fetchJson(protectedMetadataUrl);
     if (Array.isArray(data.authorization_servers) && data.authorization_servers.length > 0) {
