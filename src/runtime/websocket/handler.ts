@@ -7,7 +7,7 @@ import type { WebSocketManager } from './manager.js';
 import type { ClientMessage, WebSocketSection } from './types.js';
 import { ErrorCodes } from './types.js';
 import { verifyProxyToken } from '../cloud/proxy.js';
-import { requireAuth } from './guards.js';
+import { requireAuth, requireCloudService } from './guards.js';
 import { GitHubService, GitHubDisconnectService, CloudRunService, SandboxLifecycleService } from './services/index.js';
 
 export interface PreviewUrlEvent {
@@ -135,14 +135,7 @@ export class WebSocketHandler {
       case 'cloud_run': {
         const auth = requireAuth(this.wsManager, connId);
         if (!auth) return;
-        if (!this.cloudRunService) {
-          this.wsManager.sendToConnection(connId, {
-            type: 'error',
-            code: ErrorCodes.SERVICE_ERROR,
-            message: 'Cloud run is not enabled',
-          });
-          return;
-        }
+        if (!requireCloudService(this.wsManager, connId, this.cloudRunService)) return;
         await this.cloudRunService.handleCloudRun(connId, auth.conn, message);
         break;
       }
@@ -150,14 +143,7 @@ export class WebSocketHandler {
       case 'subscribe_run': {
         const auth = requireAuth(this.wsManager, connId);
         if (!auth) return;
-        if (!this.cloudRunService) {
-          this.wsManager.sendToConnection(connId, {
-            type: 'error',
-            code: ErrorCodes.SERVICE_ERROR,
-            message: 'Cloud run is not enabled',
-          });
-          return;
-        }
+        if (!requireCloudService(this.wsManager, connId, this.cloudRunService)) return;
         if (!message.runId) {
           this.wsManager.sendToConnection(connId, {
             type: 'error',
@@ -173,14 +159,7 @@ export class WebSocketHandler {
       case 'cloud_follow_up': {
         const auth = requireAuth(this.wsManager, connId);
         if (!auth) return;
-        if (!this.cloudRunService) {
-          this.wsManager.sendToConnection(connId, {
-            type: 'error',
-            code: ErrorCodes.SERVICE_ERROR,
-            message: 'Cloud run is not enabled',
-          });
-          return;
-        }
+        if (!requireCloudService(this.wsManager, connId, this.cloudRunService)) return;
         await this.cloudRunService.handleCloudFollowUp(connId, auth.conn, message);
         break;
       }
@@ -188,14 +167,7 @@ export class WebSocketHandler {
       case 'cloud_stop': {
         const auth = requireAuth(this.wsManager, connId);
         if (!auth) return;
-        if (!this.cloudRunService) {
-          this.wsManager.sendToConnection(connId, {
-            type: 'error',
-            code: ErrorCodes.SERVICE_ERROR,
-            message: 'Cloud run is not enabled',
-          });
-          return;
-        }
+        if (!requireCloudService(this.wsManager, connId, this.cloudRunService)) return;
         if (!message.runId) {
           this.wsManager.sendToConnection(connId, {
             type: 'error',

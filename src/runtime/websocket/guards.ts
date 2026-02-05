@@ -25,3 +25,22 @@ export function requireAuth(
   }
   return { conn, identityId: conn.identityId };
 }
+
+/**
+ * Check if cloud service is available, send error and return false if not.
+ */
+export function requireCloudService<T>(
+  wsManager: WebSocketManager,
+  connId: string,
+  service: T | null,
+): service is T {
+  if (!service) {
+    wsManager.sendToConnection(connId, {
+      type: 'error',
+      code: ErrorCodes.SERVICE_ERROR,
+      message: 'Cloud run is not enabled',
+    });
+    return false;
+  }
+  return true;
+}
