@@ -91,10 +91,9 @@ export type CreateHttpServerDeps = {
   scheduleGithubWebhookProcessing: (reason: string) => void;
   resolveUserLanguage: (platform: "telegram" | "slack", userId: string) => Promise<UserLanguage>;
   resolveSessionLanguage: (session: { language?: string | null }) => UserLanguage;
-  notifyGithubConnected: (metadataJson: string | null) => Promise<void>;
+  notifyOAuthComplete: (metadataJson: string | null, provider: string, identityId: string) => Promise<void>;
   notifyNotionConnected: (metadataJson: string | null) => Promise<void>;
   notifyChatgptConnected: (metadataJson: string | null) => Promise<void>;
-  notifyWebSocketOAuthComplete: (metadataJson: string | null, provider: string, identityId: string) => Promise<void>;
 };
 
 export function createHttpServer(deps: CreateHttpServerDeps) {
@@ -373,8 +372,7 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
           }
           try {
             const result = await handleGithubAppCallback({ db, cloud: config.cloud, installationId, state });
-            await deps.notifyWebSocketOAuthComplete(result.metadataJson, result.provider, result.identityId);
-            await deps.notifyGithubConnected(result.metadataJson);
+            await deps.notifyOAuthComplete(result.metadataJson, result.provider, result.identityId);
             sendText(res, 200, "Connected. Return to the chat.");
           } catch (e) {
             sendText(res, 400, `GitHub App connect failed: ${String(e)}`);
@@ -392,9 +390,8 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
             provider === "notion"
               ? await handleNotionCallback({ db, config, code, state, logger })
               : await handleOAuthCallback({ db, cloud: config.cloud, provider, code, state });
-          await deps.notifyWebSocketOAuthComplete(result.metadataJson, result.provider, result.identityId);
           if (result.provider === "github") {
-            await deps.notifyGithubConnected(result.metadataJson);
+            await deps.notifyOAuthComplete(result.metadataJson, result.provider, result.identityId);
           }
           if (result.provider === "notion") {
             await deps.notifyNotionConnected(result.metadataJson);

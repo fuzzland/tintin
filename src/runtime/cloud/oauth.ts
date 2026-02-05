@@ -143,8 +143,7 @@ export async function handleOAuthCallback(opts: {
   if (opts.provider === "github" && saved.metadata_json && opts.cloud.secrets_key) {
     try {
       const metadata = JSON.parse(saved.metadata_json);
-      // connection_id indicates this OAuth was initiated from a WebSocket connection
-      if (metadata.connection_id) {
+      if (metadata.platform === "websocket") {
         const encryptedToken = encryptSecret(token.accessToken, opts.cloud.secrets_key);
         await setGithubMcpToken(opts.db, { identityId: saved.identity_id, encryptedToken });
       }

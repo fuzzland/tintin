@@ -39,7 +39,7 @@ export interface BotServiceDeps {
 export type PreviewUrlCallback = (event: PreviewUrlEvent) => void;
 
 type CloudConnectMetadata = {
-  platform: "telegram" | "slack";
+  platform: "telegram" | "slack" | "websocket";
   chat_id: string;
   user_id: string;
   workspace_id?: string | null;
@@ -53,7 +53,7 @@ function parseCloudConnectMetadata(metadataJson: string | null): CloudConnectMet
     const chatId = parsed?.chat_id;
     const userId = parsed?.user_id;
     const workspaceId = parsed?.workspace_id;
-    if ((platform !== "slack" && platform !== "telegram") || typeof chatId !== "string" || typeof userId !== "string") {
+    if ((platform !== "slack" && platform !== "telegram" && platform !== "websocket") || typeof chatId !== "string" || typeof userId !== "string") {
       return null;
     }
     return {
@@ -236,9 +236,45 @@ export async function createBotService(deps: BotServiceDeps) {
     setInterval(() => scheduleGithubWebhookProcessing("poll"), intervalMs);
   }
 
-  const notifyGithubConnected = async (metadataJson: string | null) => {
+  const notifyOAuthComplete = async (
+    metadataJson: string | null,
+    provider: string,
+    identityId: string,
+  ): Promise<void> => {
     const metadata = parseCloudConnectMetadata(metadataJson);
     if (!metadata) return;
+
+    if (metadata.platform === "websocket") {
+      if (!wsManager) return;
+      try {
+        // Get account login for GitHub providers
+        let accountLogin: string | undefined;
+        if (provider === "github") {
+          const connection = await db
+            .selectFrom("connections")
+            .innerJoin("github_installations", "connections.installation_id", "github_installations.installation_id")
+            .select(["github_installations.account_login"])
+            .where("connections.identity_id", "=", identityId)
+            .where("connections.type", "like", "github%")
+            .orderBy("connections.created_at", "desc")
+            .executeTakeFirst();
+          accountLogin = connection?.account_login ?? undefined;
+        }
+        wsManager.sendToIdentity(metadata.chat_id, {
+          type: 'auth_status',
+          provider,
+          connected: true,
+          accountLogin,
+        });
+        logger.info(`Sent auth_status to WebSocket identity=${metadata.chat_id} provider=${provider}`);
+      } catch {
+        // Ignore errors
+      }
+      return;
+    }
+
+    if (provider !== "github") return;
+
     const lang = await resolveUserLanguage(metadata.platform, metadata.user_id);
     const cmdPrefix = metadata.platform === "telegram" ? "/" : "";
     const text = t("connect.github.connected", lang, { cmd: `\`${cmdPrefix}repos\`` });
@@ -268,7 +304,7 @@ export async function createBotService(deps: BotServiceDeps) {
 
   const notifyNotionConnected = async (metadataJson: string | null) => {
     const metadata = parseCloudConnectMetadata(metadataJson);
-    if (!metadata) return;
+    if (!metadata || metadata.platform === "websocket") return;
     const lang = await resolveUserLanguage(metadata.platform, metadata.user_id);
     const cmdPrefix = metadata.platform === "telegram" ? "/" : "";
     const text = t("connect.notion.connected", lang, { cmd: `\`${cmdPrefix}mcp notion status\`` });
@@ -296,49 +332,9 @@ export async function createBotService(deps: BotServiceDeps) {
     }
   };
 
-  /**
-   * Notify WebSocket client about OAuth completion
-   */
-  const notifyWebSocketOAuthComplete = async (
-    metadataJson: string | null,
-    provider: string,
-    identityId: string,
-  ): Promise<void> => {
-    if (!metadataJson || !wsManager) return;
-    try {
-      const wsMetadata = JSON.parse(metadataJson);
-      if (!wsMetadata.connection_id) return;
-
-      // Get account login for GitHub providers
-      let accountLogin: string | undefined;
-      if (provider === "github") {
-        // For GitHub, account_login is stored in github_installations via the connection's installation_id
-        const connection = await db
-          .selectFrom("connections")
-          .innerJoin("github_installations", "connections.installation_id", "github_installations.installation_id")
-          .select(["github_installations.account_login"])
-          .where("connections.identity_id", "=", identityId)
-          .where("connections.type", "like", "github%")
-          .orderBy("connections.created_at", "desc")
-          .executeTakeFirst();
-        accountLogin = connection?.account_login ?? undefined;
-      }
-
-      wsManager.sendToConnection(wsMetadata.connection_id, {
-        type: 'auth_status',
-        provider,
-        connected: true,
-        accountLogin,
-      });
-      logger.info(`Sent auth_status to WebSocket connection ${wsMetadata.connection_id}`);
-    } catch {
-      // Ignore parse errors
-    }
-  };
-
   const notifyChatgptConnected = async (metadataJson: string | null) => {
     const metadata = parseCloudConnectMetadata(metadataJson);
-    if (!metadata) return;
+    if (!metadata || metadata.platform === "websocket") return;
     const lang = await resolveUserLanguage(metadata.platform, metadata.user_id);
     const cmdPrefix = metadata.platform === "telegram" ? "/" : "";
     const text = t("connect.chatgpt.connected", lang, {
@@ -490,10 +486,9 @@ export async function createBotService(deps: BotServiceDeps) {
     scheduleGithubWebhookProcessing,
     resolveUserLanguage,
     resolveSessionLanguage,
-    notifyGithubConnected,
+    notifyOAuthComplete,
     notifyNotionConnected,
     notifyChatgptConnected,
-    notifyWebSocketOAuthComplete,
   });
 
   // WebSocket upgrade handler

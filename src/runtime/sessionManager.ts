@@ -15,8 +15,8 @@ import { nowMs, sleep } from "./util.js";
 import type { McpRegistry } from "./mcp/registry.js";
 import { collectMcpAgentEnv, formatMcpBearerEnvVar } from "./mcp/utils.js";
 import { ensureNotionToken } from "./cloud/notion/token.js";
-import { getGithubMcpToken, getOrCreateIdentity } from "./cloud/store.js";
-import { decryptSecret } from "./cloud/secrets.js";
+import { getOrCreateIdentity } from "./cloud/store.js";
+import { resolveGithubToken } from "./cloud/githubMcpToken.js";
 import { buildLocalizedPrompt } from "./prompt.js";
 import {
   applySearchEnv,
@@ -739,7 +739,12 @@ export class SessionManager {
       for (const [name, provider] of Object.entries(mcp.providers)) {
         if (!provider.enabled) continue;
         if (provider.type !== "github") continue;
-        const token = await this.requireGithubMcpToken(identityId);
+        const token = await resolveGithubToken({
+          db: this.db,
+          identityId,
+          secretKey: this.config.cloud?.secrets_key ?? "",
+          githubAppConfig: this.config.cloud?.github_app,
+        });
         const headers: Record<string, string> = {
           Authorization: `Bearer ${token}`,
         };
@@ -795,18 +800,6 @@ export class SessionManager {
     const args = adapter.buildMcpCliArgs({ servers, globalTimeout });
     const env = collectMcpAgentEnv(servers);
     return { args, env };
-  }
-
-  private async requireGithubMcpToken(identityId: string): Promise<string> {
-    const secretKey = this.config.cloud?.secrets_key ?? "";
-    if (!secretKey) {
-      throw new Error("cloud.secrets_key is required to use GitHub MCP tokens.");
-    }
-    const row = await getGithubMcpToken(this.db, identityId);
-    if (!row?.encrypted_token) {
-      throw new Error('GitHub MCP token is not set. Use "/mcp github token set <token>".');
-    }
-    return decryptSecret(row.encrypted_token, secretKey);
   }
 
   private async requireNotionMcpToken(identityId: string): Promise<string> {

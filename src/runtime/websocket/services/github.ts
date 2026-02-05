@@ -9,6 +9,7 @@ import {
   listGithubInstallationsForIdentity,
   replaceGithubInstallationRepos,
   upsertRepo,
+  getGithubInstallation,
 } from '../../cloud/store.js';
 import { startGithubAppFlow, ensureGithubAppTokenForInstallation, parseGithubAppMetadata } from '../../cloud/githubApp.js';
 import { startOAuthFlow } from '../../cloud/oauth.js';
@@ -211,14 +212,68 @@ export class GitHubService {
 
       const dbIdentityId = await this.identityResolver.resolve(identityId);
 
-      // Build redirect base from config
-      const host = this.config.bot.host ?? 'localhost';
-      const port = this.config.bot.port ?? 3000;
-      const protocol = host === 'localhost' || host === '127.0.0.1' ? 'http' : 'https';
-      const redirectBase = `${protocol}://${host}${port === 80 || port === 443 ? '' : `:${port}`}`;
+      // Already-connected check for GitHub
+      if (provider === 'github') {
+        const connections = await listConnections(this.db, dbIdentityId);
+        const githubAppConns = connections.filter(c => c.type === 'github_app');
 
-      // Store connection ID in metadata for potential WebSocket notification on callback
-      const metadataJson = JSON.stringify({ connection_id: connId });
+        // Clean stale connections
+        const staleConnections: typeof githubAppConns = [];
+        const activeConnections: Array<{ connection: typeof githubAppConns[number]; installation: Awaited<ReturnType<typeof getGithubInstallation>> }> = [];
+        const connectedStatuses = new Set(['active', 'suspended', 'disconnecting']);
+
+        for (const conn of githubAppConns) {
+          const installationId = conn.installation_id ?? null;
+          if (!installationId) {
+            staleConnections.push(conn);
+            continue;
+          }
+          const installation = await getGithubInstallation(this.db, installationId);
+          if (!installation || !connectedStatuses.has(installation.status)) {
+            staleConnections.push(conn);
+            continue;
+          }
+          activeConnections.push({ connection: conn, installation });
+        }
+
+        if (staleConnections.length > 0) {
+          await this.db
+            .deleteFrom('connections')
+            .where(
+              'id',
+              'in',
+              staleConnections.map(c => c.id),
+            )
+            .execute();
+          this.logger.info(`[ws] cleaned stale github_app connections identity=${dbIdentityId} count=${staleConnections.length}`);
+        }
+
+        if (activeConnections.length > 0) {
+          const best = activeConnections.sort((a, b) => (b.connection.updated_at ?? 0) - (a.connection.updated_at ?? 0))[0]!;
+          this.wsManager.sendToConnection(connId, {
+            type: 'auth_status',
+            provider,
+            connected: true,
+            accountLogin: best.installation?.account_login ?? undefined,
+            installationId: best.connection.installation_id ?? undefined,
+          });
+          return;
+        }
+      }
+
+      // Use public_base_url as redirect base
+      const redirectBase = cloud.public_base_url;
+      if (!redirectBase) {
+        throw new Error('cloud.public_base_url is required for OAuth');
+      }
+
+      // Unified metadata format matching TG/Slack
+      const metadataJson = JSON.stringify({
+        platform: 'websocket',
+        chat_id: dbIdentityId,
+        user_id: dbIdentityId,
+        workspace_id: null,
+      });
 
       let authorizeUrl: string;
 

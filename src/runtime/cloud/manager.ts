@@ -31,6 +31,7 @@ import { createBrowserbaseSession, releaseBrowserbaseSession } from "./browserba
 import { createHyperbrowserSession, stopHyperbrowserSession } from "./hyperbrowser.js";
 import { hashSetupSpec, parseSetupSpec } from "./setupSpec.js";
 import { decryptSecret, interpolateSecrets } from "./secrets.js";
+import { resolveGithubToken } from "./githubMcpToken.js";
 import { ensureNotionToken } from "./notion/token.js";
 import { buildCloneUrl, buildGitAuthHeader } from "./git.js";
 import { createGithubPullRequest, ensureGithubAppToken } from "./githubApp.js";
@@ -55,7 +56,6 @@ import {
   getCloudRun,
   getCloudRunBySession,
   getCloudSnapshot,
-  getGithubMcpToken,
   getLatestSetupSpec,
   getLatestRunForIdentity,
   listSecrets,
@@ -1702,7 +1702,12 @@ export class CloudManager {
       if (!provider.enabled) continue;
       if (provider.type === "playwright") continue;
       if (provider.type === "github") {
-        const token = await this.requireGithubMcpToken(identityId);
+        const token = await resolveGithubToken({
+          db: this.db,
+          identityId,
+          secretKey: this.config.cloud?.secrets_key ?? "",
+          githubAppConfig: this.config.cloud?.github_app,
+        });
         servers.set(name, this.buildGithubServerInfo(name, provider, token));
         continue;
       }
@@ -1741,18 +1746,6 @@ export class CloudManager {
       this.logger.debug(`[cloud][mcp] env vars set: ${envKeys.map((k) => `${k}=len:${env[k]?.length ?? 0}`).join(", ")}`);
     }
     return { args, env };
-  }
-
-  private async requireGithubMcpToken(identityId: string): Promise<string> {
-    const secretKey = this.config.cloud?.secrets_key ?? "";
-    if (!secretKey) {
-      throw new Error("cloud.secrets_key is required to use GitHub MCP tokens.");
-    }
-    const row = await getGithubMcpToken(this.db, identityId);
-    if (!row?.encrypted_token) {
-      throw new Error('GitHub MCP token is not set. Use "/mcp github token set <token>".');
-    }
-    return decryptSecret(row.encrypted_token, secretKey);
   }
 
   private async requireNotionMcpToken(identityId: string): Promise<string> {

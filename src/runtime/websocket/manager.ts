@@ -333,6 +333,16 @@ export class WebSocketManager {
     return true;
   }
 
+  sendToIdentity(identityId: string, message: ServerMessage): number {
+    const connIds = this.identityConnections.get(identityId);
+    if (!connIds || connIds.size === 0) return 0;
+    let sent = 0;
+    for (const connId of connIds) {
+      if (this.sendToConnection(connId, message)) sent++;
+    }
+    return sent;
+  }
+
   closeConnection(connId: string, code: number, reason: string): void {
     const conn = this.connections.get(connId);
     if (conn) {
