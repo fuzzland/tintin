@@ -69,6 +69,13 @@ export interface CloudStopMessage {
   runId: string;
 }
 
+// ============ Chat Messages (Client → Server) ============
+
+export interface ChatConnectMessage {
+  type: 'chat_connect';
+  chatId: string;
+}
+
 export type ClientMessage =
   | AuthMessage
   | PingMessage
@@ -80,7 +87,8 @@ export type ClientMessage =
   | CloudRunMessage
   | SubscribeRunMessage
   | CloudFollowUpMessage
-  | CloudStopMessage;
+  | CloudStopMessage
+  | ChatConnectMessage;
 
 // ============ Server → Client Messages ============
 
@@ -280,6 +288,33 @@ export interface FollowUpResumingMessage {
   status: 'resuming' | 'restarting';
 }
 
+// ============ Chat Messages (Server → Client) ============
+
+export interface ChatInfoMessage {
+  type: 'chat_info';
+  chatId: string;
+  title: string | null;
+  repoId: string | null;
+  hasSnapshot: boolean;
+  status: 'restoring' | 'ready';
+}
+
+export interface ChatHistoryMessage {
+  type: 'chat_history';
+  messages: Array<{
+    role: 'user' | 'assistant';
+    content: string;
+    sessionId: string;
+    timestamp: number;
+  }>;
+}
+
+export interface WorkspaceRestoredMessage {
+  type: 'workspace_restored';
+  snapshotId: string;
+  workspaceId: string;
+}
+
 export type ServerMessage =
   | AuthOkMessage
   | AuthErrorMessage
@@ -306,7 +341,10 @@ export type ServerMessage =
   | SandboxReadyMessage
   | SandboxErrorMessage
   | FollowUpQueuedMessage
-  | FollowUpResumingMessage;
+  | FollowUpResumingMessage
+  | ChatInfoMessage
+  | ChatHistoryMessage
+  | WorkspaceRestoredMessage;
 
 // ============ Error Codes ============
 
