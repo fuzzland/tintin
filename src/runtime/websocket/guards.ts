@@ -25,22 +25,3 @@ export function requireAuth(
   }
   return { conn, identityId: conn.identityId };
 }
-
-/**
- * Check if session ID is provided, send error and return false if not.
- */
-export function requireSessionId(
-  wsManager: WebSocketManager,
-  connId: string,
-  sessionId: string | undefined,
-): sessionId is string {
-  if (!sessionId) {
-    wsManager.sendToConnection(connId, {
-      type: 'error',
-      code: ErrorCodes.INVALID_MESSAGE,
-      message: 'Session ID required',
-    });
-    return false;
-  }
-  return true;
-}
