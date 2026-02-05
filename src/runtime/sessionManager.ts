@@ -286,6 +286,7 @@ export class SessionManager {
     initialPrompt: string;
     agent: SessionAgent;
     envOverrides?: Record<string, string>;
+    multiChatId?: string;
   }): Promise<string> {
     await this.assertCanStartNewSession({ platform: opts.platform, chatId: opts.chatId });
 
@@ -321,6 +322,7 @@ export class SessionManager {
       updated_at: now,
       last_user_message_at: now,
       language,
+      multi_chat_id: opts.multiChatId ?? null,
     };
 
     await createSession(this.db, session);

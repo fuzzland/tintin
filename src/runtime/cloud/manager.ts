@@ -2305,6 +2305,7 @@ export class CloudManager {
     prompt: string;
     agent: SessionAgent;
     workspace: CloudWorkspace;
+    multiChatId?: string;
   }): Promise<string> {
     if (this.sessionManager) {
       await this.sessionManager.assertCanStartNewSession({ platform: opts.platform, chatId: opts.chatId });
@@ -2344,6 +2345,7 @@ export class CloudManager {
       updated_at: now,
       last_user_message_at: now,
       language,
+      multi_chat_id: opts.multiChatId ?? null,
     });
 
     try {
