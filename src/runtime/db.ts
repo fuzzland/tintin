@@ -36,6 +36,7 @@ export interface SessionsTable {
   updated_at: number;
   last_user_message_at: number | null;
   language: UserLanguage;
+  multi_chat_id: string | null;
 }
 
 export interface SessionStreamOffsetsTable {
@@ -102,6 +103,20 @@ export interface IdentitiesTable {
   branch_name_rule: string | null;
   git_user_name: string | null;
   git_user_email: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export type ChatStatus = "active" | "archived";
+
+export interface ChatsTable {
+  id: string;
+  identity_id: string;
+  title: string | null;
+  repo_id: string | null;
+  initial_prompt: string;
+  last_snapshot_id: string | null;
+  status: ChatStatus;
   created_at: number;
   updated_at: number;
 }
@@ -439,6 +454,7 @@ export interface DatabaseSchema {
   session_pending_messages: SessionPendingMessagesTable;
   user_preferences: UserPreferencesTable;
   identities: IdentitiesTable;
+  chats: ChatsTable;
   connections: ConnectionsTable;
   repos: ReposTable;
   cloud_runs: CloudRunsTable;
