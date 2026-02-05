@@ -395,19 +395,6 @@ export class WebSocketManager {
       sessions: this.sessionSubscribers.size,
     };
   }
-
-  /**
-   * Find the connection ID whose sandbox is associated with the given session.
-   */
-  findConnectionBySandboxSession(sessionId: string): string | null {
-    for (const [connId, conn] of this.connections) {
-      if (conn.sandbox?.sessionId === sessionId) {
-        return connId;
-      }
-    }
-    return null;
-  }
-
   close(): void {
     this.stopHeartbeat();
     for (const conn of this.connections.values()) {
