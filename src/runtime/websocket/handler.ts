@@ -8,7 +8,7 @@ import type { ClientMessage, WebSocketSection } from './types.js';
 import { ErrorCodes } from './types.js';
 import { verifyProxyToken } from '../cloud/proxy.js';
 import { requireAuth, requireCloudService } from './guards.js';
-import { GitHubService, GitHubDisconnectService, CloudRunService, SandboxLifecycleService } from './services/index.js';
+import { GitHubService, GitHubDisconnectService, CloudRunService, SandboxLifecycleService, ChatSessionService } from './services/index.js';
 
 export interface PreviewUrlEvent {
   sessionId: string;
@@ -21,6 +21,7 @@ export class WebSocketHandler {
   private readonly githubService: GitHubService;
   private readonly githubDisconnectService: GitHubDisconnectService;
   private readonly cloudRunService: CloudRunService | null;
+  private readonly chatSessionService: ChatSessionService;
   readonly sandboxLifecycleService: SandboxLifecycleService | null;
 
   get cloudService(): CloudRunService | null {
@@ -59,6 +60,8 @@ export class WebSocketHandler {
     this.cloudRunService = cloudManager
       ? new CloudRunService(wsManager, cloudManager, config, db, logger, this.sandboxLifecycleService)
       : null;
+
+    this.chatSessionService = new ChatSessionService(wsManager, cloudManager, db, logger);
   }
 
   /**
@@ -177,6 +180,13 @@ export class WebSocketHandler {
           return;
         }
         await this.cloudRunService.handleCloudStop(connId, auth.conn, message.runId);
+        break;
+      }
+
+      case 'chat_connect': {
+        const auth = requireAuth(this.wsManager, connId);
+        if (!auth) return;
+        await this.chatSessionService.handleChatConnect(connId, auth.conn, message.chatId);
         break;
       }
 
