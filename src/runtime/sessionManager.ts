@@ -15,7 +15,8 @@ import { nowMs, sleep } from "./util.js";
 import type { McpRegistry } from "./mcp/registry.js";
 import { collectMcpAgentEnv, formatMcpBearerEnvVar } from "./mcp/utils.js";
 import { ensureNotionToken } from "./cloud/notion/token.js";
-import { getOrCreateIdentity } from "./cloud/store.js";
+import { getOrCreateIdentity, getCloudRunBySession } from "./cloud/store.js";
+import type { RunNotificationService } from "./notification/RunNotificationService.js";
 import { resolveGithubToken } from "./cloud/githubMcpToken.js";
 import { buildLocalizedPrompt } from "./prompt.js";
 import {
@@ -75,6 +76,7 @@ export class SessionStartError extends Error {
 export class SessionManager {
   private readonly processes = new Map<string, RunningProcess>();
   private readonly chatgptProxies = new Map<string, { proc: ChildProcess; refreshPath: string; identityId: string }>();
+  private notificationService: RunNotificationService | null = null;
 
   constructor(
     private readonly config: AppConfig,
@@ -90,6 +92,10 @@ export class SessionManager {
       signal: NodeJS.Signals | null,
   ) => Promise<void>,
   ) {}
+
+  setNotificationService(service: RunNotificationService): void {
+    this.notificationService = service;
+  }
 
   private resolveSessionLanguage(session: { language?: string | null }): UserLanguage {
     const language = session.language;
@@ -723,6 +729,19 @@ export class SessionManager {
     if (this.onSessionFinished) {
       void this.onSessionFinished(sessionId, status, code, signal).catch((e) => {
         this.logger.warn(`[session] onSessionFinished failed session=${sessionId}: ${String(e)}`);
+      });
+    }
+
+    // Notify other platforms about run completion (cross-platform sync)
+    if (this.notificationService && (status === "finished" || status === "error")) {
+      getCloudRunBySession(this.db, sessionId).then((run) => {
+        if (run?.identity_id) {
+          this.notificationService!.notifyRunCompleted(run.id, run.identity_id, this.db).catch((e) => {
+            this.logger.warn(`[session] notification failed run=${run.id}: ${String(e)}`);
+          });
+        }
+      }).catch((e) => {
+        this.logger.warn(`[session] failed to get cloud run for session=${sessionId}: ${String(e)}`);
       });
     }
 
