@@ -476,28 +476,29 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
 
     const wsManager = deps.getWsManager();
     if (wsManager?.hasSubscribers(sessionId)) {
+      const chatId = session.chat_id;
       let wsMessage: ServerMessage | null = null;
       if (message.type === "finalize") {
-        wsMessage = { type: "done", sessionId };
+        wsMessage = { type: "done", chatId };
       } else if (message.type === "plan_update") {
         wsMessage = {
           type: "plan_update",
-          sessionId,
+          chatId,
           plan: message.plan.map((p) => ({ step: p.step, status: p.status as any })),
           explanation: message.explanation,
         };
       } else if (message.type === "image") {
         wsMessage = {
           type: "tool_output",
-          sessionId,
+          chatId,
           name: "screenshot",
           output: message.caption ?? message.filename,
         };
       } else if (isTextMessage(message)) {
-        wsMessage = { type: "chunk", sessionId, content: message.text };
+        wsMessage = { type: "chunk", chatId, content: message.text };
         if (message.final) {
           wsManager.broadcastToSession(sessionId, wsMessage);
-          wsMessage = { type: "done", sessionId };
+          wsMessage = { type: "done", chatId };
         }
       }
       if (wsMessage) {

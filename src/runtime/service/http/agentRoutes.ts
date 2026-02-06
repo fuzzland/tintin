@@ -87,7 +87,7 @@ const resolveAgentContext = async (
   req: http.IncomingMessage,
   res: http.ServerResponse,
   opts?: { sessionId?: string },
-): Promise<{ sessionId: string; identityId: string } | null> => {
+): Promise<{ sessionId: string; identityId: string; chatId: string } | null> => {
   if (!deps.cloudManager || !deps.config.cloud?.enabled) {
     sendText(res, 404, "cloud not enabled");
     return null;
@@ -113,7 +113,7 @@ const resolveAgentContext = async (
   }
   const sessionRow = await deps.db
     .selectFrom("sessions")
-    .select(["platform", "workspace_id", "created_by_user_id"])
+    .select(["platform", "workspace_id", "created_by_user_id", "chat_id"])
     .where("id", "=", sessionId)
     .executeTakeFirst();
   if (!sessionRow) {
@@ -125,7 +125,7 @@ const resolveAgentContext = async (
     workspaceId: sessionRow.workspace_id || null,
     userId: sessionRow.created_by_user_id,
   });
-  return { sessionId, identityId: identity.id };
+  return { sessionId, identityId: identity.id, chatId: sessionRow.chat_id };
 };
 
 export async function handleAgentRoutes(params: {
@@ -251,7 +251,7 @@ export async function handleAgentRoutes(params: {
     if (!deps.wsManager) return;
     deps.wsManager.broadcastToSession(ctx.sessionId, {
       type: "agent_event",
-      sessionId: ctx.sessionId,
+      chatId: ctx.chatId,
       command: payload.command,
       subcommand: payload.subcommand,
       request: payload.request,
@@ -417,7 +417,7 @@ export async function handleAgentRoutes(params: {
       if (previewUrl && deps.wsManager && cloudRunId) {
         deps.wsManager.broadcastToSession(ctx.sessionId, {
           type: "run_links",
-          runId: cloudRunId,
+          chatId: ctx.chatId,
           sessionId: ctx.sessionId,
           previewUrl,
           previewSummary: summary,
