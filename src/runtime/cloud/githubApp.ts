@@ -303,5 +303,14 @@ export async function handleGithubAppCallback(opts: {
     metadataJson: null,
   });
   await markIdentityOnboarded(opts.db, saved.identity_id);
+
+  // TODO: Link identity to group for cross-platform sync
+  // GitHub App uses installation tokens, not user tokens. To link identities
+  // via GitHub user ID, we would need either:
+  // 1. A separate user OAuth flow after GitHub App installation
+  // 2. Store account_login as a secondary identifier (less reliable)
+  // 3. Use GitHub App user-to-server token flow (requires additional scopes)
+  // For MVP, users can link via GitHub OAuth flow instead.
+
   return { identityId: saved.identity_id, provider: "github", metadataJson: saved.metadata_json ?? null };
 }
