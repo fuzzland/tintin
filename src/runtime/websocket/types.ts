@@ -40,40 +40,25 @@ export interface GitHubDisconnectMessage {
   token?: string;  // Required when action is 'confirm'
 }
 
-// ============ Cloud Run Messages (Client → Server) ============
-
-export interface CloudRunMessage {
-  type: 'cloud_run';
-  repoIds?: string[];              // repo IDs (empty array = playground mode)
-  prompt: string;                  // user prompt
-  agent?: 'codex' | 'claude_code'; // optional, defaults from config
-  language?: string;               // optional, language code (e.g., 'en', 'zh')
-  restoreSnapshotId?: string;      // optional, restore from specified snapshot
-  autoRestore?: boolean;           // optional, auto-restore from latest snapshot
-  lastRunId?: string;              // optional, restore from specific run's snapshot
-}
-
-export interface SubscribeRunMessage {
-  type: 'subscribe_run';
-  runId: string;
-}
-
-export interface CloudFollowUpMessage {
-  type: 'cloud_follow_up';
-  runId: string;
-  prompt: string;
-}
-
-export interface CloudStopMessage {
-  type: 'cloud_stop';
-  runId: string;
-}
-
 // ============ Chat Messages (Client → Server) ============
 
-export interface ChatConnectMessage {
-  type: 'chat_connect';
-  chatId: string;
+export interface ChatMessage {
+  type: 'chat';
+  chatId: string;                         // Website-generated chat ID
+  prompt: string;                         // User input
+  repoIds?: string[];                     // Optional, specify repos on first message
+  agent?: 'codex' | 'claude_code';        // Optional, specify agent on first message
+  restoreSnapshotId?: string;             // Optional, restore from snapshot
+}
+
+export interface StopMessage {
+  type: 'stop';
+  chatId: string;                         // Stop the active session for this chat
+}
+
+export interface SubscribeMessage {
+  type: 'subscribe';
+  chatId: string;                         // Subscribe to the active session for this chat
 }
 
 export interface ListRunsMessage {
@@ -89,11 +74,9 @@ export type ClientMessage =
   | GetAuthStatusMessage
   | StartOAuthMessage
   | GitHubDisconnectMessage
-  | CloudRunMessage
-  | SubscribeRunMessage
-  | CloudFollowUpMessage
-  | CloudStopMessage
-  | ChatConnectMessage
+  | ChatMessage
+  | StopMessage
+  | SubscribeMessage
   | ListRunsMessage;
 
 // ============ Server → Client Messages ============
@@ -112,31 +95,32 @@ export interface SessionStartedMessage {
   type: 'session_started';
   sessionId: string;
   runId?: string;
+  chatId: string;
 }
 
 export interface ChunkMessage {
   type: 'chunk';
-  sessionId: string;
+  chatId: string;
   content: string;
 }
 
 export interface ToolCallMessage {
   type: 'tool_call';
-  sessionId: string;
+  chatId: string;
   name: string;
   input?: string;
 }
 
 export interface ToolOutputMessage {
   type: 'tool_output';
-  sessionId: string;
+  chatId: string;
   name: string;
   output: string;
 }
 
 export interface AgentEventMessage {
   type: 'agent_event';
-  sessionId: string;
+  chatId: string;
   command: string;
   subcommand: string;
   request: {
@@ -157,7 +141,7 @@ export interface AgentEventMessage {
 
 export interface PlanUpdateMessage {
   type: 'plan_update';
-  sessionId: string;
+  chatId: string;
   plan: Array<{
     step: string;
     status: 'pending' | 'in_progress' | 'done' | 'failed';
@@ -167,7 +151,7 @@ export interface PlanUpdateMessage {
 
 export interface DoneMessage {
   type: 'done';
-  sessionId: string;
+  chatId: string;
   stopped?: boolean;
   usage?: {
     promptTokens: number;
@@ -255,14 +239,14 @@ export interface GitHubDisconnectErrorMessage {
 
 export interface RunStatusMessage {
   type: 'run_status';
-  runId: string;
+  chatId: string;
   status: CloudRunStatus;
   message?: string;
 }
 
 export interface RunLinksMessage {
   type: 'run_links';
-  runId: string;
+  chatId: string;
   sessionId: string;
   viewUrl?: string;
   vscodeUrl?: string;          // VS Code desktop URI scheme
@@ -278,41 +262,6 @@ export interface BrowserSessionMessage {
   cdpUrl: string;
   liveViewUrl?: string;
   provider: BrowserProvider;
-}
-
-export interface FollowUpQueuedMessage {
-  type: 'follow_up_queued';
-  runId: string;
-  sessionId: string;
-  position: number;
-}
-
-export interface FollowUpResumingMessage {
-  type: 'follow_up_resuming';
-  runId: string;
-  sessionId: string;
-  status: 'resuming' | 'restarting';
-}
-
-// ============ Chat Messages (Server → Client) ============
-
-export interface ChatInfoMessage {
-  type: 'chat_info';
-  chatId: string;
-  title: string | null;
-  repoId: string | null;
-  hasSnapshot: boolean;
-  status: 'restoring' | 'ready';
-}
-
-export interface ChatHistoryMessage {
-  type: 'chat_history';
-  messages: Array<{
-    role: 'user' | 'assistant';
-    content: string;
-    sessionId: string;
-    timestamp: number;
-  }>;
 }
 
 export interface WorkspaceRestoredMessage {
@@ -371,10 +320,6 @@ export type ServerMessage =
   | SandboxStatusMessage
   | SandboxReadyMessage
   | SandboxErrorMessage
-  | FollowUpQueuedMessage
-  | FollowUpResumingMessage
-  | ChatInfoMessage
-  | ChatHistoryMessage
   | WorkspaceRestoredMessage
   | RunCompletedNotificationMessage
   | RunsListMessage;
