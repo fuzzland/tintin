@@ -52,7 +52,18 @@ node dist/tinc.js lift|pull|attach
 │  ┌──────────────────────────▼───────────────────────────────┐   │
 │  │                  controller2.ts                           │   │
 │  │   Command Parser · Conversation Flow · Session Dispatch   │   │
+│  │  ┌─────────────────────────────────────────────────────┐  │   │
+│  │  │  Platform Handlers (TG/Slack/Cloud/Interaction)     │  │   │
+│  │  └─────────────────────────────────────────────────────┘  │   │
 │  └────┬─────────────────────┬───────────────────────┬───────┘   │
+│       │                     │                       │            │
+│       │    ┌────────────────▼────────────────┐      │            │
+│       │    │        Shared Services          │      │            │
+│       │    │  ┌────────────┐ ┌─────────────┐ │      │            │
+│       │    │  │AccessControl│ │ ActionParser│ │      │            │
+│       │    │  │ UIBuilder  │ │IdentityRes. │ │      │            │
+│       │    │  └────────────┘ └─────────────┘ │      │            │
+│       │    └─────────────────────────────────┘      │            │
 └───────┼─────────────────────┼───────────────────────┼───────────┘
         │                     │                       │
 ┌───────┼─────────────────────┼───────────────────────┼───────────┐
@@ -107,20 +118,29 @@ node dist/tinc.js lift|pull|attach
 │ controller2 │
 └──────┬──────┘
        │
-       ├────────────────┬────────────────┬─────────────────┐
-       │                │                │                 │
-       ▼                ▼                ▼                 ▼
-┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-│SessionManager│ │ CloudManager │ │   Streamer   │ │ WebSocket    │
-│              │ │              │ │              │ │   Handler    │
-└──────┬───────┘ └──────────────┘ └──────┬───────┘ └──────────────┘
-       │                                 │
-       │                                 │
-       ▼                                 ▼
-┌──────────────┐                  ┌──────────────┐
-│ AgentAdapter │                  │ EventMappers │
-│ (Codex/CC)   │                  │              │
-└──────────────┘                  └──────────────┘
+       ├──────────────────────────────────────────────────────┐
+       │                                                      │
+       ▼                                                      ▼
+┌──────────────────────────────────────────┐    ┌──────────────────────┐
+│           Platform Handlers               │    │    Shared Services   │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐  │    │  ┌────────────────┐  │
+│  │ Telegram │ │  Slack   │ │Interaction│ │───▶│  │ AccessControl  │  │
+│  │ Handler  │ │ Handler  │ │ Handler   │ │    │  │ ActionParser   │  │
+│  └──────────┘ └──────────┘ └──────────┘  │    │  │ UIBuilder      │  │
+└──────────────────┬───────────────────────┘    │  │ IdentityResolver│ │
+                   │                            │  └────────────────┘  │
+       ┌───────────┴───────────┬────────────┐   └──────────────────────┘
+       │                       │            │
+       ▼                       ▼            ▼
+┌──────────────┐       ┌──────────────┐ ┌──────────────┐
+│SessionManager│       │ CloudManager │ │ WebSocket    │
+└──────┬───────┘       └──────────────┘ │   Handler    │
+       │                                └──────────────┘
+       ▼
+┌──────────────┐       ┌──────────────┐
+│ AgentAdapter │       │  Streamer    │
+│ (Codex/CC)   │       │ EventMappers │
+└──────────────┘       └──────────────┘
 ```
 
 ## File Structure
@@ -166,6 +186,27 @@ src/runtime/
 │   ├── ChatGptProxyManager.ts  # ChatGPT OAuth proxy
 │   └── EnvironmentBuilder.ts   # Fluent env var builder
 │
+├── shared/                 # Cross-platform shared services
+│   ├── index.ts            # Public exports
+│   ├── types.ts            # Shared type definitions
+│   ├── AccessControl.ts    # Unified access control (TG/Slack/WS)
+│   ├── ActionParser.ts     # Button interaction parsing
+│   ├── UIBuilder.ts        # Platform-specific UI components
+│   └── IdentityResolver.ts # User identity resolution
+│
+├── orchestrator/           # Session orchestration (future)
+│   ├── index.ts            # Public exports
+│   ├── types.ts            # ChatRequest, ChatResult types
+│   └── SessionOrchestrator.ts  # Unified session handling
+│
+├── adapters/               # Platform adapters (future)
+│   ├── index.ts            # Public exports
+│   ├── types.ts            # Adapter interfaces
+│   ├── BaseAdapter.ts      # Shared adapter logic
+│   ├── TelegramAdapter.ts  # Telegram platform adapter
+│   ├── SlackAdapter.ts     # Slack platform adapter
+│   └── WebSocketAdapter.ts # WebSocket platform adapter
+│
 ├── cloud/                  # Cloud execution
 │   ├── manager.ts          # Cloud run orchestration
 │   ├── modalProvider.ts    # Modal sandbox provider
@@ -180,11 +221,10 @@ src/runtime/
 │   ├── types.ts            # Protocol definitions
 │   └── services/           # WebSocket message handlers
 │       ├── index.ts        # Public exports
-│       ├── identity.ts     # IdentityResolver - WS identity mapping
-│       ├── linkBuilder.ts  # CloudLinkBuilder - URL construction
 │       ├── cloud.ts        # CloudRunService - cloud_run handling
-│       ├── session.ts      # SessionService - local chat handling
-│       └── github.ts       # GitHubService - OAuth & repos
+│       ├── chat.ts         # ChatService - local chat handling
+│       ├── github.ts       # GitHubService - OAuth & repos
+│       └── sandboxLifecycle.ts # Sandbox lifecycle management
 │
 ├── chatgpt/                # ChatGPT OAuth
 │   ├── oauth.ts            # Auth flow handling
@@ -210,11 +250,27 @@ tests/
 │       ├── codexMapper.test.ts
 │       └── claudeMapper.test.ts
 │
-└── session/
-    ├── types.test.ts
-    ├── SessionStateMachine.test.ts
-    ├── ProcessLifecycleManager.test.ts
-    └── EnvironmentBuilder.test.ts
+├── session/
+│   ├── types.test.ts
+│   ├── SessionStateMachine.test.ts
+│   ├── ProcessLifecycleManager.test.ts
+│   └── EnvironmentBuilder.test.ts
+│
+├── shared/
+│   ├── ActionParser.test.ts
+│   ├── AccessControl.test.ts
+│   ├── UIBuilder.test.ts
+│   └── IdentityResolver.test.ts
+│
+├── orchestrator/
+│   ├── types.test.ts
+│   └── SessionOrchestrator.test.ts
+│
+└── adapters/
+    ├── BaseAdapter.test.ts
+    ├── TelegramAdapter.test.ts
+    ├── SlackAdapter.test.ts
+    └── WebSocketAdapter.test.ts
 ```
 
 ## Data Flow Diagrams
@@ -498,6 +554,15 @@ Valid Transitions:
 - **session/ChatGptProxyManager.ts**: Handles ChatGPT OAuth proxy process lifecycle
 - **session/EnvironmentBuilder.ts**: Fluent builder for constructing agent environment variables
 
+### Modular Components (Shared Services)
+
+Cross-platform shared services that eliminate duplicate code across Telegram, Slack, and WebSocket handlers:
+
+- **shared/AccessControl.ts**: Unified access control for all platforms - validates allowlists, workspace permissions, token auth
+- **shared/ActionParser.ts**: Parses button interactions (callback_data, action_id) to typed actions (kill, review, commit, lang)
+- **shared/UIBuilder.ts**: Builds platform-specific UI components (Telegram inline keyboards, Slack blocks) with i18n support
+- **shared/IdentityResolver.ts**: Resolves user identities across platforms to database identity records
+
 ### Cloud & Integration
 
 - **cloud/manager.ts**: Cloud run orchestration - workspace creation, file uploads, execution, snapshots.
@@ -506,9 +571,8 @@ Valid Transitions:
 - **websocket/**: WebSocket real-time communication
   - `manager.ts` manages connections, `handler.ts` routes messages
   - `services/CloudRunService` handles `cloud_run` and `subscribe_run` for cloud sandbox execution
-  - `services/SessionService` handles local `chat` sessions
+  - `services/ChatService` handles local `chat` sessions
   - `services/GitHubService` handles OAuth and repository listing
-  - `services/IdentityResolver` maps WebSocket identities to database identities
 - **chatgpt/**: ChatGPT OAuth integration - `oauth.ts` handles authentication flow, `store.ts` manages tokens.
 
 ## Code Conventions

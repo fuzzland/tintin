@@ -261,14 +261,12 @@ graph LR
 
     subgraph ServerToClient["Server → Client"]
         E1[auth_ok/auth_error] --> E2[认证结果]
-        F1[session_started] --> F2[会话已创建]
         F3[chunk] --> F4[流式文本]
         F5[tool_call] --> F6[工具调用]
         F7[tool_output] --> F8[工具输出]
         F9[plan_update] --> F10[计划更新]
         F11[done] --> F12[会话结束]
         G1[run_status] --> G2[运行状态]
-        G3[run_links] --> G4[访问链接]
         G5[sandbox_ready] --> G6[沙箱就绪]
     end
 ```
@@ -294,14 +292,13 @@ graph LR
 |------|------|----------|
 | `auth_ok` | 认证成功 | `identityId` |
 | `auth_error` | 认证失败 | `message` |
-| `session_started` | 会话创建 | `sessionId`, `chatId`, `runId?` |
 | `chunk` | 流式输出 | `chatId`, `content` |
 | `tool_call` | 工具调用 | `chatId`, `name`, `input?` |
 | `tool_output` | 工具结果 | `chatId`, `name`, `output` |
 | `plan_update` | 计划更新 | `chatId`, `plan[]` |
 | `done` | 会话结束 | `chatId`, `stopped?`, `usage?` |
 | `run_status` | 云运行状态 | `chatId`, `status`, `message?` |
-| `run_links` | 访问链接 | `viewUrl`, `codeServerUrl`, `previewUrl` |
+| `browser_session` | 浏览器会话 | `sessionId`, `cdpUrl`, `provider` |
 | `sandbox_ready` | 沙箱就绪 | `workspaceId` |
 | `error` | 错误 | `code`, `message` |
 
@@ -324,7 +321,7 @@ sequenceDiagram
     C->>S: {"type": "chat", "chatId": "xxx", "prompt": "..."}
 
     S->>A: 启动 Agent 进程
-    S-->>C: {"type": "session_started", "sessionId": "...", "chatId": "xxx"}
+    S-->>C: {"type": "run_status", "chatId": "xxx", "status": "preparing"}
 
     loop 流式输出
         A->>S: JSONL 事件
@@ -444,11 +441,12 @@ sequenceDiagram
     S->>M: 克隆仓库到 Sandbox
 
     S-->>C: {"type": "run_status", "status": "running"}
-    S-->>C: {"type": "session_started", "sessionId": "...", "runId": "..."}
 
     S->>A: 启动 Agent
 
-    S-->>C: {"type": "run_links", "codeServerUrl": "...", "previewUrl": "..."}
+    opt 浏览器会话
+        S-->>C: {"type": "browser_session", "sessionId": "...", "cdpUrl": "..."}
+    end
 
     loop Agent 执行
         S-->>C: {"type": "chunk/tool_call/tool_output/plan_update"}
@@ -471,18 +469,17 @@ sequenceDiagram
 | `failed` | 失败 | 显示错误信息 |
 | `cancelled` | 取消 | 显示已取消 |
 
-#### run_links 访问链接
+#### browser_session 浏览器会话
+
+当云沙箱中有浏览器可用时，服务器会发送此消息：
 
 ```typescript
-interface RunLinksMessage {
-  type: 'run_links';
-  chatId: string;
+interface BrowserSessionMessage {
+  type: 'browser_session';
   sessionId: string;
-  viewUrl?: string;        // 只读查看页面
-  vscodeUrl?: string;      // VS Code 桌面版远程连接
-  codeServerUrl?: string;  // Web 版 VS Code
-  previewUrl?: string;     // 开发服务器预览
-  previewSummary?: string; // 预览描述
+  cdpUrl: string;          // Chrome DevTools Protocol URL
+  liveViewUrl?: string;    // 实时预览 URL
+  provider: 'hyperbrowser';
 }
 ```
 
@@ -959,14 +956,6 @@ interface PongMessage {
   type: 'pong';
 }
 
-// 会话已创建
-interface SessionStartedMessage {
-  type: 'session_started';
-  sessionId: string;
-  chatId: string;
-  runId?: string;
-}
-
 // 流式文本输出
 interface ChunkMessage {
   type: 'chunk';
@@ -1049,16 +1038,13 @@ interface RunStatusMessage {
   message?: string;
 }
 
-// 访问链接
-interface RunLinksMessage {
-  type: 'run_links';
-  chatId: string;
+// 浏览器会话
+interface BrowserSessionMessage {
+  type: 'browser_session';
   sessionId: string;
-  viewUrl?: string;
-  vscodeUrl?: string;
-  codeServerUrl?: string;
-  previewUrl?: string;
-  previewSummary?: string;
+  cdpUrl: string;
+  liveViewUrl?: string;
+  provider: 'hyperbrowser';
 }
 
 // 沙箱状态
