@@ -22,7 +22,7 @@ export interface PreviewUrlEvent {
 export class WebSocketHandler {
   private readonly githubService: GitHubService;
   private readonly githubDisconnectService: GitHubDisconnectService;
-  private readonly chatService: ChatService | null;
+  readonly chatService: ChatService | null;
   readonly sandboxLifecycleService: SandboxLifecycleService | null;
 
   constructor(

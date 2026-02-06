@@ -431,18 +431,10 @@ export async function createBotService(deps: BotServiceDeps) {
     if (cloudManager && wsHandler.sandboxLifecycleService) {
       const sandboxService = wsHandler.sandboxLifecycleService;
       wsManager.setDisconnectHandler(async (connId, conn) => {
-        // Clean up follow-up queue entries for disconnected connection
-        wsHandler!.cloudService?.cleanupConnection(connId);
+        // Clean up resources for disconnected connection
+        wsHandler!.chatService?.cleanupConnection(connId);
         await sandboxService.terminateSandbox(connId, conn);
       });
-
-      // Wire sandbox completion to follow-up queue processing
-      const cloudService = wsHandler.cloudService;
-      if (cloudService) {
-        sandboxService.setOnSessionComplete((sessionId) => {
-          void cloudService.processQueuedFollowUps(sessionId);
-        });
-      }
     }
 
     wsManager.startHeartbeat();
