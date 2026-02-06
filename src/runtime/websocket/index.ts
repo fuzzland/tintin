@@ -15,7 +15,6 @@ export type {
   // Server → Client messages
   AuthOkMessage,
   AuthErrorMessage,
-  SessionStartedMessage,
   ChunkMessage,
   ToolCallMessage,
   ToolOutputMessage,

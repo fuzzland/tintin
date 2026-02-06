@@ -18,6 +18,7 @@ import { hashSetupSpec, stringifySetupSpec } from "../cloud/setupSpec.js";
 import { buildCloneUrl, buildGitAuthHeader, runGitClone } from "../cloud/git.js";
 import { LocalCloudProvider } from "../cloud/localProvider.js";
 import { createUiToken } from "../cloud/uiTokens.js";
+import { buildTelegramRunKeyboard, buildSlackRunBlocks } from "../shared/UIBuilder.js";
 import { startNotionFlow } from "../cloud/notion/oauth.js";
 import {
   getCloudRun,
@@ -106,59 +107,6 @@ export class CloudHandler {
     return `${base}${path}/${runId}?token=${encodeURIComponent(token)}`;
   }
 
-  private buildRunActionTelegramKeyboard(
-    sessionId: string,
-    runId: string,
-    lang: UserLanguage,
-    viewUrl?: string | null,
-    vscodeUrl?: string | null,
-  ) {
-    const rows: Array<Array<{ text: string; callback_data?: string; url?: string }>> = [
-      [
-        { text: t("button.stop", lang), callback_data: `kill:${sessionId}` },
-        { text: t("button.status", lang), callback_data: `run_status:${runId}` },
-      ],
-    ];
-    const linkRow: Array<{ text: string; url: string }> = [];
-    if (viewUrl) linkRow.push({ text: t("button.view", lang), url: viewUrl });
-    if (vscodeUrl) linkRow.push({ text: t("button.vscode", lang), url: vscodeUrl });
-    if (linkRow.length > 0) rows.push(linkRow);
-    return { inline_keyboard: rows };
-  }
-
-  private buildRunActionSlackBlocks(
-    sessionId: string,
-    runId: string,
-    lang: UserLanguage,
-    viewUrl?: string | null,
-    vscodeUrl?: string | null,
-  ) {
-    const elements: Array<{
-      type: string;
-      text: { type: string; text: string };
-      action_id: string;
-      style?: string;
-      value?: string;
-      url?: string;
-    }> = [
-      {
-        type: "button",
-        text: { type: "plain_text", text: t("button.stop", lang) },
-        style: "danger",
-        action_id: "kill_session",
-        value: sessionId,
-      },
-      { type: "button", text: { type: "plain_text", text: t("button.status", lang) }, action_id: "run_status", value: runId },
-    ];
-    if (viewUrl) {
-      elements.push({ type: "button", text: { type: "plain_text", text: t("button.view", lang) }, action_id: "view_run", url: viewUrl });
-    }
-    if (vscodeUrl) {
-      elements.push({ type: "button", text: { type: "plain_text", text: t("button.vscode", lang) }, action_id: "open_vscode", url: vscodeUrl });
-    }
-    return [{ type: "actions", elements }];
-  }
-
   private buildRunActionMarkup(opts: {
     platform: "telegram" | "slack";
     sessionId: string;
@@ -167,15 +115,22 @@ export class CloudHandler {
     viewUrl?: string | null;
     vscodeUrl?: string | null;
   }): InteractiveMarkup {
+    const uiOpts = {
+      sessionId: opts.sessionId,
+      runId: opts.runId,
+      lang: opts.lang,
+      viewUrl: opts.viewUrl ?? undefined,
+      vscodeUrl: opts.vscodeUrl ?? undefined,
+    };
     if (opts.platform === "telegram") {
       return {
         type: "inline_keyboard",
-        payload: this.buildRunActionTelegramKeyboard(opts.sessionId, opts.runId, opts.lang, opts.viewUrl, opts.vscodeUrl),
+        payload: buildTelegramRunKeyboard(uiOpts),
       };
     }
     return {
       type: "blocks",
-      payload: this.buildRunActionSlackBlocks(opts.sessionId, opts.runId, opts.lang, opts.viewUrl, opts.vscodeUrl),
+      payload: buildSlackRunBlocks(uiOpts),
     };
   }
 

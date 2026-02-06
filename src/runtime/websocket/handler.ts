@@ -12,13 +12,6 @@ import { GitHubService, GitHubDisconnectService, ChatService, SandboxLifecycleSe
 import { listRunsForGroup } from '../cloud/runsQuery.js';
 import { listCloudRunsForIdentity, getIdentity } from '../cloud/store.js';
 
-export interface PreviewUrlEvent {
-  sessionId: string;
-  runId: string;
-  previewUrl: string;
-  previewSummary: string;
-}
-
 export class WebSocketHandler {
   private readonly githubService: GitHubService;
   private readonly githubDisconnectService: GitHubDisconnectService;
@@ -57,37 +50,6 @@ export class WebSocketHandler {
     this.chatService = cloudManager
       ? new ChatService(wsManager, cloudManager, config, db, logger, this.sandboxLifecycleService)
       : null;
-  }
-
-  /**
-   * Push preview URL to frontend via WebSocket.
-   * Called by service.ts when agent registers a site.
-   */
-  pushPreviewUrl(event: PreviewUrlEvent): void {
-    const connId = this.wsManager.getConnectionBySession(event.sessionId);
-    if (!connId) {
-      this.logger.debug(`[ws] pushPreviewUrl: no connection for session=${event.sessionId}`);
-      return;
-    }
-    // Get chatId from session
-    this.db
-      .selectFrom('sessions')
-      .select(['chat_id'])
-      .where('id', '=', event.sessionId)
-      .executeTakeFirst()
-      .then((session) => {
-        if (session) {
-          this.wsManager.sendToConnection(connId, {
-            type: 'run_links',
-            chatId: session.chat_id,
-            sessionId: event.sessionId,
-            previewUrl: event.previewUrl,
-            previewSummary: event.previewSummary,
-          });
-        }
-      })
-      .catch(() => {});
-    this.logger.debug(`[ws] pushPreviewUrl sent connId=${connId} session=${event.sessionId} url=${event.previewUrl}`);
   }
 
   async handleMessage(connId: string, message: ClientMessage): Promise<void> {

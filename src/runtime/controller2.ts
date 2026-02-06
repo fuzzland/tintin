@@ -13,7 +13,7 @@ import { getCloudRunBySession } from "./cloud/store.js";
 import { countPendingMessages, enqueuePendingMessage, getUserLanguage } from "./store.js";
 import type { SessionRow } from "./store.js";
 import { isUserLanguage, t, type UserLanguage } from "../locales/index.js";
-import { telegramChatIdMatchesAllowlist } from "./controller/utils.js";
+import { AccessControl } from "./shared/AccessControl.js";
 import type { CommitProposalStore } from "./controller/types.js";
 import { mergeTextIntoSlackBlocks } from "./message/slack.js";
 import { TelegramHandler } from "./controller/telegramHandler.js";
@@ -43,6 +43,7 @@ export class BotController {
   private readonly slackHandler: SlackHandler;
   private readonly cloudHandler: CloudHandler;
   private readonly interactionHandler: InteractionHandler;
+  private readonly accessControl: AccessControl;
 
   constructor(
     private readonly config: AppConfig,
@@ -57,6 +58,11 @@ export class BotController {
     private readonly commitProposalStore: CommitProposalStore | null,
     private readonly lookupTelegramSessionByReply: ((chatId: string, messageId: number) => string | null) | null,
   ) {
+    this.accessControl = new AccessControl({
+      config: this.config,
+      telegram: this.telegram,
+      logger: this.logger,
+    });
     this.interactionHandler = new InteractionHandler({
       config: this.config,
       db: this.db,
@@ -75,8 +81,7 @@ export class BotController {
       commitProposalStore: this.commitProposalStore,
       markReviewCommitDisabled: this.markReviewCommitDisabled.bind(this),
       disableReviewCommitButtons: this.disableReviewCommitButtons.bind(this),
-      telegramAccessDecision: this.telegramAccessDecision.bind(this),
-      slackAccessDecision: this.slackAccessDecision.bind(this),
+      accessControl: this.accessControl,
       buildCommitProposalPrompt,
       reviewPrompt: REVIEW_PROMPT,
       commitPrompt: COMMIT_PROMPT,
@@ -89,7 +94,7 @@ export class BotController {
       sessionManager: this.sessionManager,
       lookupTelegramSessionByReply: this.lookupTelegramSessionByReply,
       resolveUserLanguage: this.resolveUserLanguage.bind(this),
-      telegramAccessDecision: this.telegramAccessDecision.bind(this),
+      accessControl: this.accessControl,
       sendCloudHelp: (...args) => this.cloudHandler.sendCloudHelp(...args),
       handleCloudCommand: (...args) => this.cloudHandler.handleCloudCommand(...args),
       handleSharedInteractionAction: (...args) => this.interactionHandler.handleSharedInteractionAction(...args),
@@ -103,7 +108,7 @@ export class BotController {
       slack: this.slack,
       sessionManager: this.sessionManager,
       resolveUserLanguage: this.resolveUserLanguage.bind(this),
-      slackAccessDecision: this.slackAccessDecision.bind(this),
+      accessControl: this.accessControl,
       sendCloudHelp: (...args) => this.cloudHandler.sendCloudHelp(...args),
       handleCloudCommand: (...args) => this.cloudHandler.handleCloudCommand(...args),
       handleSharedInteractionAction: (...args) => this.interactionHandler.handleSharedInteractionAction(...args),
@@ -178,48 +183,6 @@ export class BotController {
     const p = this.config.projects.find((x) => x.id === projectId);
     if (!p) throw new Error(`Unknown project id: ${projectId}`);
     return p;
-  }
-
-  private slackAccessDecision(
-    workspaceId: string | null,
-    channelId: string,
-    userId: string,
-  ): { allowed: boolean; reason?: string } {
-    const sec = this.config.security;
-    if (sec.slack_allow_workspace_ids.length > 0) {
-      if (!workspaceId) return { allowed: false, reason: "missing workspace_id" };
-      if (!sec.slack_allow_workspace_ids.includes(workspaceId)) {
-        return { allowed: false, reason: `workspace not allowed (${workspaceId})` };
-      }
-    }
-    if (sec.slack_allow_channel_ids.length > 0 && !sec.slack_allow_channel_ids.includes(channelId)) {
-      return { allowed: false, reason: `channel not allowed (${channelId})` };
-    }
-    if (sec.slack_allow_user_ids.length > 0 && !sec.slack_allow_user_ids.includes(userId)) {
-      return { allowed: false, reason: `user not allowed (${userId})` };
-    }
-    return { allowed: true };
-  }
-
-  private async telegramAccessDecision(chatId: string, userId: string): Promise<{ allowed: boolean; reason?: string }> {
-    const sec = this.config.security;
-    if (sec.telegram_allow_chat_ids.length > 0 && !telegramChatIdMatchesAllowlist(chatId, sec.telegram_allow_chat_ids)) {
-      return { allowed: false, reason: `chat not allowed (${chatId})` };
-    }
-    if (sec.telegram_allow_user_ids.length > 0 && !sec.telegram_allow_user_ids.includes(userId)) {
-      return { allowed: false, reason: `user not allowed (${userId})` };
-    }
-    if (sec.telegram_require_admin) {
-      if (!this.telegram) return { allowed: false, reason: "telegram not configured" };
-      try {
-        const member = await this.telegram.getChatMember(chatId, userId);
-        if (member.status === "administrator" || member.status === "creator") return { allowed: true };
-        return { allowed: false, reason: `not admin (status=${member.status})` };
-      } catch (e) {
-        return { allowed: false, reason: `admin check failed (${String(e)})` };
-      }
-    }
-    return { allowed: true };
   }
 
   // --- Telegram ---

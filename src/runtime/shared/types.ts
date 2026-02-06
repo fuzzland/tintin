@@ -3,7 +3,10 @@
  * These types are platform-agnostic and used by all adapters.
  */
 
-import type { UserLanguage } from "../../locales/index.js";
+import type { UserLanguage as _UserLanguage } from "../../locales/index.js";
+
+// Re-export UserLanguage for consumers of the shared layer
+export type UserLanguage = _UserLanguage;
 import type { SessionAgent } from "../db.js";
 
 // ============================================================================

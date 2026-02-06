@@ -3,7 +3,8 @@ import type { Db } from '../../db.js';
 import type { CloudManager } from '../../cloud/manager.js';
 import type { WebSocketManager } from '../manager.js';
 import type { WSConnection, ConnectionSandbox, ConnectionSandboxStatus } from '../types.js';
-import { IdentityResolver } from './identity.js';
+import { IdentityResolver } from '../../shared/IdentityResolver.js';
+import { getCloudRunBySession } from '../../cloud/store.js';
 
 /**
  * SandboxLifecycleService - Manages sandbox (workspace) lifecycle tied to WebSocket connections.
@@ -45,14 +46,13 @@ export class SandboxLifecycleService {
 
     try {
       // Resolve WS identity to DB identity
-      const dbIdentityId = await this.identityResolver.resolve(wsIdentityId);
+      const dbIdentityId = await this.identityResolver.resolveWebSocket(wsIdentityId);
 
       // Initialize sandbox state as provisioning
       const sandbox: ConnectionSandbox = {
         workspaceId: '',
         rootPath: '',
         status: 'provisioning',
-        runId: null,
         sessionId: null,
         dbIdentityId,
         createdAt: Date.now(),
@@ -128,14 +128,21 @@ export class SandboxLifecycleService {
     sandbox.status = 'terminating';
     this.logger.info(
       `[sandbox] terminating connId=${connId} workspaceId=${sandbox.workspaceId} ` +
-      `status=${sandbox.status} runId=${sandbox.runId} sessionId=${sandbox.sessionId}`,
+      `status=${sandbox.status} sessionId=${sandbox.sessionId}`,
     );
 
     try {
+      // Get runId from sessionId if needed for cleanup
+      let runId: string | null = null;
+      if (sandbox.sessionId) {
+        const run = await getCloudRunBySession(this.db, sandbox.sessionId);
+        runId = run?.id ?? null;
+      }
+
       await this.cloudManager.terminateConnectionWorkspace({
         workspaceId: sandbox.workspaceId,
         sessionId: sandbox.sessionId,
-        runId: sandbox.runId,
+        runId,
         identityId: sandbox.dbIdentityId,
       });
 
@@ -182,18 +189,16 @@ export class SandboxLifecycleService {
    * Mark sandbox as in use for an active run.
    *
    * @param connId - WebSocket connection ID
-   * @param runId - Cloud run ID
    * @param sessionId - Session ID
    */
-  markInUse(connId: string, runId: string, sessionId: string): void {
+  markInUse(connId: string, sessionId: string): void {
     const conn = this.wsManager.getConnection(connId);
     if (!conn?.sandbox) return;
 
     conn.sandbox.status = 'in_use';
-    conn.sandbox.runId = runId;
     conn.sandbox.sessionId = sessionId;
 
-    this.logger.debug(`[sandbox] marked in_use connId=${connId} runId=${runId} sessionId=${sessionId}`);
+    this.logger.debug(`[sandbox] marked in_use connId=${connId} sessionId=${sessionId}`);
   }
 
   /**
@@ -206,7 +211,6 @@ export class SandboxLifecycleService {
     if (!conn?.sandbox) return;
 
     conn.sandbox.status = 'ready';
-    conn.sandbox.runId = null;
     conn.sandbox.sessionId = null;
 
     this.logger.debug(`[sandbox] marked ready connId=${connId}`);
@@ -222,7 +226,6 @@ export class SandboxLifecycleService {
 
     const sessionId = conn.sandbox.sessionId;
     conn.sandbox.status = 'ready';
-    conn.sandbox.runId = null;
     conn.sandbox.sessionId = null;
 
     this.logger.debug(`[sandbox] marked ready (with notify) connId=${connId} sessionId=${sessionId}`);

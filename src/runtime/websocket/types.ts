@@ -91,13 +91,6 @@ export interface AuthErrorMessage {
   message: string;
 }
 
-export interface SessionStartedMessage {
-  type: 'session_started';
-  sessionId: string;
-  runId?: string;
-  chatId: string;
-}
-
 export interface ChunkMessage {
   type: 'chunk';
   chatId: string;
@@ -244,21 +237,9 @@ export interface RunStatusMessage {
   message?: string;
 }
 
-export interface RunLinksMessage {
-  type: 'run_links';
-  chatId: string;
-  sessionId: string;
-  viewUrl?: string;
-  vscodeUrl?: string;          // VS Code desktop URI scheme
-  codeServerUrl?: string;      // Modal tunnel URL (direct access to web code-server)
-  previewUrl?: string;         // Dev server tunnel URL
-  previewSummary?: string;     // Description for UI display
-}
-
 export interface BrowserSessionMessage {
   type: 'browser_session';
   sessionId: string;
-  runId: string;
   cdpUrl: string;
   liveViewUrl?: string;
   provider: BrowserProvider;
@@ -298,7 +279,6 @@ export interface RunsListMessage {
 export type ServerMessage =
   | AuthOkMessage
   | AuthErrorMessage
-  | SessionStartedMessage
   | ChunkMessage
   | ToolCallMessage
   | ToolOutputMessage
@@ -315,7 +295,6 @@ export type ServerMessage =
   | GitHubDisconnectResultMessage
   | GitHubDisconnectErrorMessage
   | RunStatusMessage
-  | RunLinksMessage
   | BrowserSessionMessage
   | SandboxStatusMessage
   | SandboxReadyMessage
@@ -364,7 +343,6 @@ export interface ConnectionSandbox {
   workspaceId: string;
   rootPath: string;
   status: ConnectionSandboxStatus;
-  runId: string | null;
   sessionId: string | null;
   dbIdentityId: string;
   createdAt: number;

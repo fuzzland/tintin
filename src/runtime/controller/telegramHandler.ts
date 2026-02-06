@@ -59,9 +59,9 @@ import {
 } from "../cloud/store.js";
 import type { CloudCommand } from "./commands.js";
 import type { CommitProposalAction, SharedInteractionAction } from "./types.js";
+import { parseTelegramAction } from "../shared/ActionParser.js";
+import type { AccessControl } from "../shared/AccessControl.js";
 import type { SessionRow, WizardStateRow } from "../store.js";
-
-export type TelegramAccessDecision = { allowed: boolean; reason?: string };
 
 export type HandleCloudHelp = (opts: {
   platform: "telegram";
@@ -106,7 +106,7 @@ export interface TelegramHandlerDeps {
   sessionManager: SessionManager;
   lookupTelegramSessionByReply: ((chatId: string, messageId: number) => string | null) | null;
   resolveUserLanguage: (platform: "telegram" | "slack", userId: string) => Promise<UserLanguage>;
-  telegramAccessDecision: (chatId: string, userId: string) => Promise<TelegramAccessDecision>;
+  accessControl: AccessControl;
   sendCloudHelp: HandleCloudHelp;
   handleCloudCommand: HandleCloudCommand;
   handleSharedInteractionAction: HandleSharedInteractionAction;
@@ -190,55 +190,6 @@ export class TelegramHandler {
         });
       } catch {}
     }
-  }
-
-  buildRunActionTelegramKeyboard(sessionId: string, runId: string, lang: UserLanguage, viewUrl?: string | null, vscodeUrl?: string | null) {
-    const rows: Array<Array<{ text: string; callback_data?: string; url?: string }>> = [
-      [
-        { text: t("button.stop", lang), callback_data: `kill:${sessionId}` },
-        { text: t("button.status", lang), callback_data: `run_status:${runId}` },
-      ],
-    ];
-    const linkRow: Array<{ text: string; url: string }> = [];
-    if (viewUrl) linkRow.push({ text: t("button.view", lang), url: viewUrl });
-    if (vscodeUrl) linkRow.push({ text: t("button.vscode", lang), url: vscodeUrl });
-    if (linkRow.length > 0) rows.push(linkRow);
-    return { inline_keyboard: rows };
-  }
-
-  parseTelegramInteractionAction(data: string): SharedInteractionAction | null {
-    if (data.startsWith("lang:")) {
-      const next = data.slice("lang:".length);
-      return isUserLanguage(next) ? { kind: "lang", value: next } : null;
-    }
-    if (data.startsWith("kill:")) {
-      const sessionId = data.slice("kill:".length);
-      return sessionId ? { kind: "kill", sessionId } : null;
-    }
-    if (data.startsWith("review:")) {
-      const sessionId = data.slice("review:".length);
-      return sessionId ? { kind: "review", sessionId } : null;
-    }
-    if (data.startsWith("commit:")) {
-      const sessionId = data.slice("commit:".length);
-      return sessionId ? { kind: "commit", sessionId } : null;
-    }
-    if (data.startsWith("run_status:")) {
-      const runId = data.slice("run_status:".length).trim();
-      return runId ? { kind: "run_status", runId } : null;
-    }
-    if (data.startsWith("stop_sandbox:")) {
-      const sessionId = data.slice("stop_sandbox:".length);
-      return sessionId ? { kind: "stop_sandbox", sessionId } : null;
-    }
-    if (data.startsWith("cpr:")) {
-      const rest = data.slice("cpr:".length);
-      const [proposalId, actionRaw] = rest.split(":");
-      const action = (actionRaw ?? "").trim() as CommitProposalAction;
-      if (!proposalId || (action !== "cancel" && action !== "push" && action !== "pr")) return null;
-      return { kind: "commit_proposal", proposalId, action };
-    }
-    return null;
   }
 
   async disableReviewCommitButtonsTelegram(opts: { chatId: string; messageId: number; text?: string; note?: string }) {
@@ -344,7 +295,7 @@ export class TelegramHandler {
 
     const listIntent = parseListSessionsIntentFromTelegram(text);
     if (listIntent) {
-      const access = await this.deps.telegramAccessDecision(chatId, userId);
+      const access = await this.deps.accessControl.checkTelegram({ chatId, userId });
       if (!access.allowed) {
         this.deps.logger.warn(`[tg] rejected list sessions chat=${chatId} user=${userId} reason=${access.reason ?? "-"}`);
         await this.deps.telegram.sendMessage({
@@ -376,7 +327,7 @@ export class TelegramHandler {
 
     const settingsIntent = parseSettingsIntentFromTelegram(text);
     if (settingsIntent) {
-      const access = await this.deps.telegramAccessDecision(chatId, userId);
+      const access = await this.deps.accessControl.checkTelegram({ chatId, userId });
       if (!access.allowed) {
         this.deps.logger.warn(`[tg] rejected settings chat=${chatId} user=${userId} reason=${access.reason ?? "-"}`);
         await this.deps.telegram.sendMessage({
@@ -468,7 +419,7 @@ export class TelegramHandler {
       const session = await getSessionBySpace(this.deps.db, "telegram", chatId, spaceId);
       if (!session) continue;
 
-      const access = await this.deps.telegramAccessDecision(chatId, userId);
+      const access = await this.deps.accessControl.checkTelegram({ chatId, userId });
       if (!access.allowed) {
         this.deps.logger.warn(
           `[tg] rejected session message chat=${chatId} user=${userId} space=${spaceId} session=${session.id} reason=${access.reason ?? "-"}`,
@@ -501,7 +452,7 @@ export class TelegramHandler {
           .where("id", "=", mappedSessionId)
           .executeTakeFirst();
         if (session && session.platform === "telegram" && session.chat_id === chatId) {
-          const access = await this.deps.telegramAccessDecision(chatId, userId);
+          const access = await this.deps.accessControl.checkTelegram({ chatId, userId });
           if (!access.allowed) {
             this.deps.logger.warn(
               `[tg] rejected reply session chat=${chatId} user=${userId} session=${session.id} reason=${access.reason ?? "-"}`,
@@ -537,7 +488,7 @@ export class TelegramHandler {
     }
 
     if (text.startsWith("/") && this.deps.telegram.isMentionOrCommand(message)) {
-      const access = await this.deps.telegramAccessDecision(chatId, userId);
+      const access = await this.deps.accessControl.checkTelegram({ chatId, userId });
       if (!access.allowed) {
         this.deps.logger.warn(`[tg] rejected wizard start chat=${chatId} user=${userId} reason=${access.reason ?? "-"}`);
         await this.deps.telegram.sendMessage({
@@ -573,7 +524,7 @@ export class TelegramHandler {
       this.deps.logger.debug(`[tg] message ignored (no wizard/session match) chat=${chatId} user=${userId}`);
       return;
     }
-    const access = await this.deps.telegramAccessDecision(chatId, userId);
+    const access = await this.deps.accessControl.checkTelegram({ chatId, userId });
     if (!access.allowed) {
       this.deps.logger.warn(`[tg] rejected wizard continuation chat=${chatId} user=${userId} reason=${access.reason ?? "-"}`);
       await this.deps.telegram.sendMessage({
@@ -598,7 +549,7 @@ export class TelegramHandler {
     const chatId = String(opts.message.chat.id);
     const forumThreadId = this.telegramForumThreadIdFromMessage(opts.message);
     const fallbackLang = await this.deps.resolveUserLanguage("telegram", opts.userId);
-    const access = await this.deps.telegramAccessDecision(chatId, opts.userId);
+    const access = await this.deps.accessControl.checkTelegram({ chatId, userId: opts.userId });
     if (!access.allowed) {
       await this.deps.telegram.sendMessage({
         chatId,
@@ -711,7 +662,7 @@ export class TelegramHandler {
         safeSnippet(data),
       )}`,
     );
-    const action = this.parseTelegramInteractionAction(data);
+    const action = parseTelegramAction(data);
     if (action) {
       const chat = cb.message?.chat;
       const chatId = chat ? String(chat.id) : "";
@@ -755,7 +706,7 @@ export class TelegramHandler {
       await this.deps.telegram.answerCallbackQuery(cb.id, t("callback.unsupported_context", actorLang));
       return;
     }
-    const access = await this.deps.telegramAccessDecision(chatId, userId);
+    const access = await this.deps.accessControl.checkTelegram({ chatId, userId });
     if (!access.allowed) {
       this.deps.logger.warn(
         `[tg] rejected callback chat=${chatId} user=${userId} project=${projectId} reason=${access.reason ?? "-"}`,

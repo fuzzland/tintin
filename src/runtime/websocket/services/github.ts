@@ -14,7 +14,7 @@ import {
 import { startGithubAppFlow, ensureGithubAppTokenForInstallation, parseGithubAppMetadata } from '../../cloud/githubApp.js';
 import { startOAuthFlow } from '../../cloud/oauth.js';
 import { fetchGithubInstallationRepos } from '../../cloud/repos.js';
-import { IdentityResolver } from './identity.js';
+import { IdentityResolver } from '../../shared/IdentityResolver.js';
 
 export class GitHubService {
   private readonly identityResolver: IdentityResolver;
@@ -30,7 +30,7 @@ export class GitHubService {
 
   async handleGetConnections(connId: string, identityId: string): Promise<void> {
     try {
-      const dbIdentityId = await this.identityResolver.resolve(identityId);
+      const dbIdentityId = await this.identityResolver.resolveWebSocket(identityId);
 
       // Get connections from DB
       const connections = await listConnections(this.db, dbIdentityId);
@@ -104,7 +104,7 @@ export class GitHubService {
     opts: { provider?: string; search?: string },
   ): Promise<void> {
     try {
-      const dbIdentityId = await this.identityResolver.resolve(identityId);
+      const dbIdentityId = await this.identityResolver.resolveWebSocket(identityId);
 
       // Sync repos from remote if there are GitHub App installations
       await this.syncReposForIdentity(dbIdentityId);
@@ -150,7 +150,7 @@ export class GitHubService {
     provider: 'github' | 'gitlab',
   ): Promise<void> {
     try {
-      const dbIdentityId = await this.identityResolver.resolve(identityId);
+      const dbIdentityId = await this.identityResolver.resolveWebSocket(identityId);
       const connections = await listConnections(this.db, dbIdentityId);
 
       let connected = false;
@@ -210,7 +210,7 @@ export class GitHubService {
         throw new Error('Cloud configuration not available');
       }
 
-      const dbIdentityId = await this.identityResolver.resolve(identityId);
+      const dbIdentityId = await this.identityResolver.resolveWebSocket(identityId);
 
       // Already-connected check for GitHub
       if (provider === 'github') {

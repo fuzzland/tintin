@@ -413,17 +413,6 @@ export async function handleAgentRoutes(params: {
         }
       }
 
-      // Push preview URL via WebSocket
-      if (previewUrl && deps.wsManager && cloudRunId) {
-        deps.wsManager.broadcastToSession(ctx.sessionId, {
-          type: "run_links",
-          chatId: ctx.chatId,
-          sessionId: ctx.sessionId,
-          previewUrl,
-          previewSummary: summary,
-        });
-      }
-
       const entry = await createSiteRegistryEntry(db, { identityId: ctx.identityId, port, path: sitePath, summary });
       const url = previewUrl || buildLocalSiteUrl(entry.port, entry.path);
       sendAgentJson(

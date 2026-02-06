@@ -1,21 +1,6 @@
 import type { TelegramMessageEntity } from "../platform/telegram.js";
 import { redactText } from "../redact.js";
 
-export function telegramChatIdMatchesAllowlist(chatId: string, allowIds: string[]): boolean {
-  if (allowIds.length === 0) return true;
-  const c = chatId.trim();
-  const candidates = new Set<string>([c]);
-
-  if (c.startsWith("-100") && c.length > 4) candidates.add(c.slice(4));
-  if (c.startsWith("-") && c.length > 1) candidates.add(c.slice(1));
-
-  for (const raw of allowIds) {
-    const a = String(raw).trim();
-    if (candidates.has(a)) return true;
-  }
-  return false;
-}
-
 export function safeSnippet(text: string, maxLen = 200): string {
   const redacted = redactText(text);
   const oneLine = redacted.replace(/\s+/g, " ").trim();

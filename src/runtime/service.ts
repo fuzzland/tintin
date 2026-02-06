@@ -25,7 +25,6 @@ import { McpRegistry } from "./mcp/registry.js";
 import { isUserLanguage, t, type UserLanguage } from "../locales/index.js";
 import { WebSocketManager } from "./websocket/manager.js";
 import { WebSocketHandler } from "./websocket/handler.js";
-import type { PreviewUrlEvent } from "./websocket/handler.js";
 import type { ServerMessage } from "./websocket/types.js";
 import { createHttpServer } from "./service/httpServer.js";
 import { readHeader, sendText } from "./service/httpUtils.js";
@@ -41,8 +40,6 @@ export interface BotServiceDeps {
   db: Db;
   logger: Logger;
 }
-
-export type PreviewUrlCallback = (event: PreviewUrlEvent) => void;
 
 type CloudConnectMetadata = {
   platform: "telegram" | "slack" | "websocket";
@@ -75,9 +72,6 @@ function parseCloudConnectMetadata(metadataJson: string | null): CloudConnectMet
 
 export async function createBotService(deps: BotServiceDeps) {
   const { config, db, logger } = deps;
-
-  // Preview URL callback (set after wsHandler is created)
-  let onPreviewUrl: PreviewUrlCallback | null = null;
 
   const slackEventStartTs = Math.floor(Date.now() / 1000);
 
@@ -423,9 +417,6 @@ export async function createBotService(deps: BotServiceDeps) {
     wsManager = new WebSocketManager(config.websocket, logger);
     wsHandler = new WebSocketHandler(wsManager, sessionManager, config, config.websocket, db, logger, cloudManager);
     wsManager.setHandler((connId, message) => wsHandler!.handleMessage(connId, message));
-
-    // Connect preview URL callback
-    onPreviewUrl = (event) => wsHandler!.pushPreviewUrl(event);
 
     // Set up disconnect handler for sandbox termination
     if (cloudManager && wsHandler.sandboxLifecycleService) {

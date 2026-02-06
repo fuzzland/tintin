@@ -1,6 +1,8 @@
-import type { UserLanguage } from "../../locales/index.js";
+import type { CommitProposalAction as _CommitProposalAction, InteractionAction } from "../shared/types.js";
 
-export type CommitProposalAction = "cancel" | "push" | "pr";
+// Re-export from shared types for backward compatibility
+export type CommitProposalAction = _CommitProposalAction;
+export type SharedInteractionAction = InteractionAction;
 
 export interface CommitProposal {
   id: string;
@@ -32,12 +34,3 @@ export interface CommitProposalStore {
   consumeProposal: (id: string) => CommitProposal | null;
   clearPendingForSession: (sessionId: string) => void;
 }
-
-export type SharedInteractionAction =
-  | { kind: "lang"; value: UserLanguage }
-  | { kind: "kill"; sessionId: string }
-  | { kind: "review"; sessionId: string }
-  | { kind: "commit"; sessionId: string }
-  | { kind: "run_status"; runId: string }
-  | { kind: "stop_sandbox"; sessionId: string }
-  | { kind: "commit_proposal"; proposalId: string; action: CommitProposalAction };

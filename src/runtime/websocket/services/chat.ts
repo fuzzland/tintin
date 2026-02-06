@@ -5,8 +5,7 @@ import type { CloudManager } from '../../cloud/manager.js';
 import type { WebSocketManager } from '../manager.js';
 import type { ChatMessage, StopMessage, SubscribeMessage, WSConnection } from '../types.js';
 import { ErrorCodes } from '../types.js';
-import { IdentityResolver } from './identity.js';
-import { CloudLinkBuilder } from './linkBuilder.js';
+import { IdentityResolver } from '../../shared/IdentityResolver.js';
 import type { SandboxLifecycleService } from './sandboxLifecycle.js';
 import { getLatestSessionForChat, type SessionRow } from '../../store.js';
 import { listReposForIdentity, getCloudRunBySession } from '../../cloud/store.js';
@@ -19,7 +18,6 @@ import { mapDbStatusToWsStatus } from '../../cloud/types.js';
  */
 export class ChatService {
   private readonly identityResolver: IdentityResolver;
-  private readonly linkBuilder: CloudLinkBuilder;
 
   constructor(
     private readonly wsManager: WebSocketManager,
@@ -30,7 +28,6 @@ export class ChatService {
     private readonly sandboxService: SandboxLifecycleService | null = null,
   ) {
     this.identityResolver = new IdentityResolver(db);
-    this.linkBuilder = new CloudLinkBuilder(config);
   }
 
   /** Helper: send error message */
@@ -117,11 +114,7 @@ export class ChatService {
     if (resumed === 'resumed') {
       this.logger.info(`[ws][chat] follow-up sent chatId=${chatId} sessionId=${session.id}`);
       if (this.sandboxService) {
-        // Find the runId for this session
-        const run = await getCloudRunBySession(this.db, session.id);
-        if (run) {
-          this.sandboxService.markInUse(connId, run.id, session.id);
-        }
+        this.sandboxService.markInUse(connId, session.id);
       }
     } else {
       // Session not resumable, need to restart
@@ -139,7 +132,7 @@ export class ChatService {
     message: ChatMessage,
   ): Promise<void> {
     const { chatId, prompt, repoIds = [], agent: requestedAgent, restoreSnapshotId } = message;
-    const dbIdentityId = await this.identityResolver.resolve(conn.identityId!);
+    const dbIdentityId = await this.identityResolver.resolveWebSocket(conn.identityId!);
     const isPlayground = repoIds.length === 0;
 
     // Validate repo access
@@ -176,7 +169,6 @@ export class ChatService {
     });
 
     const spaceId = `${Date.now()}`;
-    let runId: string;
     let sessionId: string;
     let cdpUrl: string | null;
 
@@ -198,10 +190,9 @@ export class ChatService {
         playground: isPlayground,
         restoreSnapshotId: snapshotId,
       });
-      runId = result.runId;
       sessionId = result.sessionId;
       cdpUrl = result.cdpUrl;
-      this.sandboxService!.markInUse(connId, runId, sessionId);
+      this.sandboxService!.markInUse(connId, sessionId);
     } else {
       const result = await this.cloudManager.startRun({
         identityId: dbIdentityId,
@@ -216,19 +207,12 @@ export class ChatService {
         playground: isPlayground,
         restoreSnapshotId: snapshotId,
       });
-      runId = result.runId;
       sessionId = result.sessionId;
       cdpUrl = result.cdpUrl;
     }
 
-    // Subscribe and send session_started
+    // Subscribe to session for streaming updates
     this.wsManager.subscribeToSession(connId, sessionId);
-    this.wsManager.sendToConnection(connId, {
-      type: 'session_started',
-      sessionId,
-      runId,
-      chatId,
-    });
 
     // Send browser session if available
     if (cdpUrl) {
@@ -236,26 +220,11 @@ export class ChatService {
       this.wsManager.sendToConnection(connId, {
         type: 'browser_session',
         sessionId,
-        runId,
         cdpUrl,
         liveViewUrl: liveViewUrl ?? undefined,
         provider: 'hyperbrowser',
       });
     }
-
-    // Send run links
-    const viewUrl = this.linkBuilder.buildViewUrl(runId);
-    this.wsManager.sendToConnection(connId, {
-      type: 'run_links',
-      chatId,
-      sessionId,
-      viewUrl,
-    });
-
-    // Poll for VS Code URL
-    this.pollAndSendVscodeUrl(connId, chatId, sessionId).catch((err) => {
-      this.logger.debug(`[ws][chat] vscode poll error chatId=${chatId}: ${String(err)}`);
-    });
 
     this.logger.info(`[ws][chat] session started chatId=${chatId} sessionId=${sessionId} agent=${agent}`);
   }
@@ -265,33 +234,6 @@ export class ChatService {
     const accessibleRepos = await listReposForIdentity(this.db, identityId);
     const accessibleIds = new Set(accessibleRepos.map((r) => r.id));
     return repoIds.every((id) => accessibleIds.has(id));
-  }
-
-  private async pollAndSendVscodeUrl(
-    connId: string,
-    chatId: string,
-    sessionId: string,
-    maxAttempts = 15,
-    intervalMs = 2000,
-  ): Promise<void> {
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      if (!this.wsManager.getConnection(connId)) return;
-
-      const tunnelUrl = await this.cloudManager.getVscodeUrl(sessionId).catch(() => null);
-      if (tunnelUrl) {
-        const vscodeUrl = this.linkBuilder.buildVscodeUrl(tunnelUrl);
-        this.wsManager.sendToConnection(connId, {
-          type: 'run_links',
-          chatId,
-          sessionId,
-          vscodeUrl,
-          codeServerUrl: tunnelUrl,
-        });
-        return;
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, intervalMs));
-    }
   }
 
   /**
@@ -316,7 +258,7 @@ export class ChatService {
       }
 
       // Validate ownership
-      const dbIdentityId = await this.identityResolver.resolve(conn.identityId!);
+      const dbIdentityId = await this.identityResolver.resolveWebSocket(conn.identityId!);
       const run = await this.db
         .selectFrom('cloud_runs')
         .select(['identity_id'])
@@ -392,16 +334,6 @@ export class ChatService {
           chatId,
           status: mapDbStatusToWsStatus(run.status),
         });
-
-        const viewUrl = this.linkBuilder.buildViewUrl(run.id);
-        this.wsManager.sendToConnection(connId, {
-          type: 'run_links',
-          chatId,
-          sessionId: session.id,
-          viewUrl,
-        });
-
-        this.pollAndSendVscodeUrl(connId, chatId, session.id).catch(() => {});
       }
 
       this.logger.debug(`[ws][chat] subscribed chatId=${chatId} sessionId=${session.id}`);

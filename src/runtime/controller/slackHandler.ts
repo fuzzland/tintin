@@ -13,9 +13,9 @@ import { safeSnippet } from "./utils.js";
 import { clearWizardState, getLatestSessionForChat, setUserLanguage, setWizardState, updateSession } from "../store.js";
 import type { CloudCommand } from "./commands.js";
 import type { SharedInteractionAction } from "./types.js";
+import { parseSlackAction } from "../shared/ActionParser.js";
+import type { AccessControl } from "../shared/AccessControl.js";
 import type { SessionRow } from "../store.js";
-
-export type SlackAccessDecision = { allowed: boolean; reason?: string };
 
 export type HandleCloudHelp = (opts: {
   platform: "slack";
@@ -53,7 +53,7 @@ export interface SlackHandlerDeps {
   slack: SlackClient | null;
   sessionManager: SessionManager;
   resolveUserLanguage: (platform: "telegram" | "slack", userId: string) => Promise<UserLanguage>;
-  slackAccessDecision: (workspaceId: string | null, channelId: string, userId: string) => SlackAccessDecision;
+  accessControl: AccessControl;
   sendCloudHelp: HandleCloudHelp;
   handleCloudCommand: HandleCloudCommand;
   handleSharedInteractionAction: HandleSharedInteractionAction;
@@ -97,7 +97,7 @@ export class SlackHandler {
         return;
       }
       registerWorkspace(channelId);
-      const access = this.deps.slackAccessDecision(teamId, channelId, userId);
+      const access = this.deps.accessControl.checkSlack({ workspaceId: teamId, channelId, userId });
       if (!access.allowed) {
         this.deps.logger.warn(`[slack] rejected message channel=${channelId} user=${userId} reason=${access.reason ?? "-"}`);
         return;
@@ -225,7 +225,7 @@ export class SlackHandler {
     const slack = this.deps.slack;
     if (!slack) return;
     const fallbackLang = await this.deps.resolveUserLanguage("slack", opts.userId);
-    const access = this.deps.slackAccessDecision(opts.teamId, opts.channelId, opts.userId);
+    const access = this.deps.accessControl.checkSlack({ workspaceId: opts.teamId, channelId: opts.channelId, userId: opts.userId });
     if (!access.allowed) {
       await slack.postEphemeral({
         channel: opts.channelId,
@@ -340,7 +340,7 @@ export class SlackHandler {
     if (!action) return;
     const actionId = action.action_id as string;
     const actionValue = typeof action.value === "string" ? action.value : null;
-    const sharedAction = this.parseSlackInteractionAction(actionId, actionValue);
+    const sharedAction = parseSlackAction(actionId, actionValue);
     if (sharedAction) {
       const channelId = payload.channel?.id as string | undefined;
       const userId = payload.user?.id as string | undefined;
@@ -377,7 +377,7 @@ export class SlackHandler {
     if (!projectId || !triggerId || !channelId || !userId) return;
     slack.registerWorkspaceForChannel(channelId, { workspaceId: teamId ?? null });
     const lang = await this.deps.resolveUserLanguage("slack", userId);
-    const access = this.deps.slackAccessDecision(teamId ?? null, channelId, userId);
+    const access = this.deps.accessControl.checkSlack({ workspaceId: teamId ?? null, channelId, userId });
     if (!access.allowed) {
       this.deps.logger.warn(
         `[slack] rejected block_actions channel=${channelId} user=${userId} reason=${access.reason ?? "-"}`,
@@ -453,7 +453,7 @@ export class SlackHandler {
     const metaRaw = payload.view?.private_metadata as string | undefined;
     if (!metaRaw) return;
     const meta = JSON.parse(metaRaw) as { projectId: string; channelId: string; userId: string; teamId: string | null };
-    const access = this.deps.slackAccessDecision(meta.teamId, meta.channelId, meta.userId);
+    const access = this.deps.accessControl.checkSlack({ workspaceId: meta.teamId, channelId: meta.channelId, userId: meta.userId });
     if (!access.allowed) {
       this.deps.logger.warn(
         `[slack] rejected view_submission channel=${meta.channelId} user=${meta.userId} reason=${access.reason ?? "-"}`,
@@ -492,21 +492,5 @@ export class SlackHandler {
       initialPrompt: prompt,
       agent: "codex",
     });
-  }
-
-  private parseSlackInteractionAction(actionId: string, value: string | null): SharedInteractionAction | null {
-    if (actionId === "switch_language") {
-      if (!value || (value !== "en" && value !== "zh")) return null;
-      return { kind: "lang", value };
-    }
-    if (actionId === "kill_session" && value) return { kind: "kill", sessionId: value };
-    if (actionId === "review_session" && value) return { kind: "review", sessionId: value };
-    if (actionId === "commit_session" && value) return { kind: "commit", sessionId: value };
-    if (actionId === "run_status" && value) return { kind: "run_status", runId: value };
-    if (actionId === "stop_sandbox" && value) return { kind: "stop_sandbox", sessionId: value };
-    if (actionId === "commit_cancel" && value) return { kind: "commit_proposal", proposalId: value, action: "cancel" };
-    if (actionId === "commit_push" && value) return { kind: "commit_proposal", proposalId: value, action: "push" };
-    if (actionId === "commit_pr" && value) return { kind: "commit_proposal", proposalId: value, action: "pr" };
-    return null;
   }
 }

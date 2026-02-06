@@ -13,6 +13,7 @@ import { getOrCreateIdentity } from "../cloud/store.js";
 import { setUserLanguage } from "../store.js";
 import type { CommitProposal, CommitProposalAction, CommitProposalStore, SharedInteractionAction } from "./types.js";
 import type { SessionRow } from "../store.js";
+import type { AccessControl } from "../shared/AccessControl.js";
 
 export interface InteractionHandlerDeps {
   config: AppConfig;
@@ -58,8 +59,7 @@ export interface InteractionHandlerDeps {
     note?: string;
     workspaceId?: string | null;
   }) => Promise<void>;
-  telegramAccessDecision: (chatId: string, userId: string) => Promise<{ allowed: boolean; reason?: string }>;
-  slackAccessDecision: (workspaceId: string | null, channelId: string, userId: string) => { allowed: boolean; reason?: string };
+  accessControl: AccessControl;
   buildCommitProposalPrompt: (branchRule: string | null) => string;
   reviewPrompt: string;
   commitPrompt: string;
@@ -138,8 +138,8 @@ export class InteractionHandler {
       case "kill": {
         const access =
           opts.platform === "telegram"
-            ? await this.deps.telegramAccessDecision(opts.chatId, opts.userId)
-            : this.deps.slackAccessDecision(opts.workspaceId, opts.chatId, opts.userId);
+            ? await this.deps.accessControl.checkTelegram({ chatId: opts.chatId, userId: opts.userId })
+            : this.deps.accessControl.checkSlack({ workspaceId: opts.workspaceId, channelId: opts.chatId, userId: opts.userId });
         if (!access.allowed) {
           this.deps.logger.warn(
             `[${opts.platform}] rejected kill action chat=${opts.chatId} user=${opts.userId} session=${opts.action.sessionId} reason=${access.reason ?? "-"}`,
@@ -186,8 +186,8 @@ export class InteractionHandler {
       case "review": {
         const access =
           opts.platform === "telegram"
-            ? await this.deps.telegramAccessDecision(opts.chatId, opts.userId)
-            : this.deps.slackAccessDecision(opts.workspaceId, opts.chatId, opts.userId);
+            ? await this.deps.accessControl.checkTelegram({ chatId: opts.chatId, userId: opts.userId })
+            : this.deps.accessControl.checkSlack({ workspaceId: opts.workspaceId, channelId: opts.chatId, userId: opts.userId });
         if (!access.allowed) {
           this.deps.logger.warn(
             `[${opts.platform}] rejected review action chat=${opts.chatId} user=${opts.userId} session=${opts.action.sessionId} reason=${access.reason ?? "-"}`,
@@ -231,8 +231,8 @@ export class InteractionHandler {
       case "commit": {
         const access =
           opts.platform === "telegram"
-            ? await this.deps.telegramAccessDecision(opts.chatId, opts.userId)
-            : this.deps.slackAccessDecision(opts.workspaceId, opts.chatId, opts.userId);
+            ? await this.deps.accessControl.checkTelegram({ chatId: opts.chatId, userId: opts.userId })
+            : this.deps.accessControl.checkSlack({ workspaceId: opts.workspaceId, channelId: opts.chatId, userId: opts.userId });
         if (!access.allowed) {
           this.deps.logger.warn(
             `[${opts.platform}] rejected commit action chat=${opts.chatId} user=${opts.userId} session=${opts.action.sessionId} reason=${access.reason ?? "-"}`,
@@ -306,8 +306,8 @@ export class InteractionHandler {
       case "run_status": {
         const access =
           opts.platform === "telegram"
-            ? await this.deps.telegramAccessDecision(opts.chatId, opts.userId)
-            : this.deps.slackAccessDecision(opts.workspaceId, opts.chatId, opts.userId);
+            ? await this.deps.accessControl.checkTelegram({ chatId: opts.chatId, userId: opts.userId })
+            : this.deps.accessControl.checkSlack({ workspaceId: opts.workspaceId, channelId: opts.chatId, userId: opts.userId });
         if (!access.allowed) {
           this.deps.logger.warn(
             `[${opts.platform}] rejected run status action chat=${opts.chatId} user=${opts.userId} run=${opts.action.runId} reason=${access.reason ?? "-"}`,
@@ -332,8 +332,8 @@ export class InteractionHandler {
       case "stop_sandbox": {
         const access =
           opts.platform === "telegram"
-            ? await this.deps.telegramAccessDecision(opts.chatId, opts.userId)
-            : this.deps.slackAccessDecision(opts.workspaceId, opts.chatId, opts.userId);
+            ? await this.deps.accessControl.checkTelegram({ chatId: opts.chatId, userId: opts.userId })
+            : this.deps.accessControl.checkSlack({ workspaceId: opts.workspaceId, channelId: opts.chatId, userId: opts.userId });
         if (!access.allowed) {
           this.deps.logger.warn(
             `[${opts.platform}] rejected stop sandbox action chat=${opts.chatId} user=${opts.userId} session=${opts.action.sessionId} reason=${access.reason ?? "-"}`,
@@ -375,8 +375,8 @@ export class InteractionHandler {
       case "commit_proposal": {
         const access =
           opts.platform === "telegram"
-            ? await this.deps.telegramAccessDecision(opts.chatId, opts.userId)
-            : this.deps.slackAccessDecision(opts.workspaceId, opts.chatId, opts.userId);
+            ? await this.deps.accessControl.checkTelegram({ chatId: opts.chatId, userId: opts.userId })
+            : this.deps.accessControl.checkSlack({ workspaceId: opts.workspaceId, channelId: opts.chatId, userId: opts.userId });
         if (!access.allowed) {
           this.deps.logger.warn(
             `[${opts.platform}] rejected commit proposal action chat=${opts.chatId} user=${opts.userId} proposal=${opts.action.proposalId} reason=${access.reason ?? "-"}`,

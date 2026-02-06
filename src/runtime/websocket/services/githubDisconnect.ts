@@ -5,7 +5,7 @@ import type { AppConfig } from '../../config.js';
 import type { WebSocketManager } from '../manager.js';
 import type { CloudManager } from '../../cloud/manager.js';
 import type { GitHubDisconnectMessage } from '../types.js';
-import { IdentityResolver } from './identity.js';
+import { IdentityResolver } from '../../shared/IdentityResolver.js';
 import { createPendingAction, consumePendingAction } from '../../cloud/store.js';
 import {
   findAnyGithubConnection,
@@ -44,7 +44,7 @@ export class GitHubDisconnectService {
     }
 
     try {
-      const dbIdentityId = await this.identityResolver.resolve(identityId);
+      const dbIdentityId = await this.identityResolver.resolveWebSocket(identityId);
 
       if (msg.action === 'preview') {
         await this.handlePreview(connId, dbIdentityId);
