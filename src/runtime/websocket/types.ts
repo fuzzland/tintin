@@ -315,6 +315,19 @@ export interface WorkspaceRestoredMessage {
   workspaceId: string;
 }
 
+export interface RunCompletedNotificationMessage {
+  type: 'run_completed_notification';
+  runId: string;
+  status: 'completed' | 'error';
+  title: string;
+  diffStats: { filesChanged: number; additions: number; deletions: number } | null;
+  screenshotUrl: string | null;
+  viewUrl: string;
+  vscodeUrl: string | null;
+  initiatorPlatform: string;
+  finishedAt: number;
+}
+
 export type ServerMessage =
   | AuthOkMessage
   | AuthErrorMessage
@@ -344,7 +357,8 @@ export type ServerMessage =
   | FollowUpResumingMessage
   | ChatInfoMessage
   | ChatHistoryMessage
-  | WorkspaceRestoredMessage;
+  | WorkspaceRestoredMessage
+  | RunCompletedNotificationMessage;
 
 // ============ Error Codes ============
 
