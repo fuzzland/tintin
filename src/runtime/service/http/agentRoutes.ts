@@ -194,7 +194,6 @@ export async function handleAgentRoutes(params: {
       updated_at: now,
       last_user_message_at: now,
       language: "en",
-      multi_chat_id: null,
     };
     await createSession(db, sessionRow);
     const token = deps.cloudManager.issueAgentTokenForSession(sessionId);
