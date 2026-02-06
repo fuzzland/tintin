@@ -129,7 +129,6 @@ export interface SessionRow {
   updated_at: number;
   last_user_message_at: number | null;
   language: UserLanguage;
-  multi_chat_id: string | null;
 }
 
 export async function getSessionBySpace(db: Db, platform: string, chatId: string, spaceId: string) {
@@ -232,19 +231,6 @@ export async function listSessionsForChat(opts: {
   const sessions = rows.slice(0, limit);
   const hasMore = rows.length > limit;
   return { sessions, page, limit, hasMore };
-}
-
-/**
- * Get sessions for a multi-chat conversation.
- * Used by the multi-chat feature to link sessions to chat records.
- */
-export async function getSessionsByMultiChatId(db: Db, multiChatId: string) {
-  return db
-    .selectFrom("sessions")
-    .selectAll()
-    .where("multi_chat_id", "=", multiChatId)
-    .orderBy("created_at", "asc")
-    .execute();
 }
 
 export interface SessionStreamOffsetRow {

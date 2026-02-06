@@ -36,7 +36,6 @@ export interface SessionsTable {
   updated_at: number;
   last_user_message_at: number | null;
   language: UserLanguage;
-  multi_chat_id: string | null;
 }
 
 export interface SessionStreamOffsetsTable {
@@ -112,20 +111,6 @@ export interface IdentityGroupsTable {
   id: string;
   github_user_id: string;
   github_login: string | null;
-  created_at: number;
-  updated_at: number;
-}
-
-export type ChatStatus = "active" | "archived";
-
-export interface ChatsTable {
-  id: string;
-  identity_id: string;
-  title: string | null;
-  repo_id: string | null;
-  initial_prompt: string;
-  last_snapshot_id: string | null;
-  status: ChatStatus;
   created_at: number;
   updated_at: number;
 }
@@ -464,7 +449,6 @@ export interface DatabaseSchema {
   user_preferences: UserPreferencesTable;
   identities: IdentitiesTable;
   identity_groups: IdentityGroupsTable;
-  chats: ChatsTable;
   connections: ConnectionsTable;
   repos: ReposTable;
   cloud_runs: CloudRunsTable;
