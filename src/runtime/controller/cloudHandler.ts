@@ -64,6 +64,7 @@ import {
   type CloudCommand,
 } from "./commands.js";
 import { buildCloudHelpText } from "./sessions.js";
+import { listRunsForGroup, formatTimeAgo } from "../cloud/runsQuery.js";
 
 export interface CloudHandlerDeps {
   config: AppConfig;
@@ -1053,6 +1054,42 @@ export class CloudHandler {
         const lines = [t("run.list.title", lang)];
         for (const run of runs) {
           lines.push(`- ${run.id} (${humanStatus(run.status, lang)})`);
+          const link = this.buildCloudUiLink(run.id, identity.id, opts.isDirect);
+          if (link) lines.push(`  ${link}`);
+        }
+        await reply(lines.join("\n"));
+        return true;
+      }
+      case "runs": {
+        // Cross-platform runs: show runs from all identities in the user's group
+        const cmd = opts.command as Extract<CloudCommand, { kind: "runs" }>;
+        const groupId = identity.group_id;
+        if (!groupId) {
+          // User not linked to a group - show their own runs
+          const runs = await listCloudRunsForIdentity(this.deps.db, { identityId: identity.id, limit: cmd.limit ?? 5 });
+          if (runs.length === 0) {
+            await replyText("run.none_recent");
+            return true;
+          }
+          const lines = [t("run.list.title", lang)];
+          for (const run of runs) {
+            lines.push(`- ${run.id} (${humanStatus(run.status, lang)}) ${formatTimeAgo(run.created_at)}`);
+          }
+          await reply(lines.join("\n"));
+          return true;
+        }
+        // User is in a group - show runs from all platforms
+        const groupRuns = await listRunsForGroup(this.deps.db, groupId, cmd.limit ?? 5);
+        if (groupRuns.length === 0) {
+          await replyText("run.none_recent");
+          return true;
+        }
+        const lines = [t("run.list.title", lang)];
+        for (const run of groupRuns) {
+          const platformLabel = run.platform === "telegram" ? "TG" : run.platform === "slack" ? "Slack" : "WS";
+          const prompt = truncateText(run.prompt, 40);
+          lines.push(`- [${platformLabel}] ${humanStatus(run.status, lang)} ${formatTimeAgo(run.createdAt)}`);
+          lines.push(`  ${prompt}`);
           const link = this.buildCloudUiLink(run.id, identity.id, opts.isDirect);
           if (link) lines.push(`  ${link}`);
         }

@@ -42,7 +42,8 @@ export type CloudCommand =
   | { kind: "snapshot_list"; limit?: number }
   | { kind: "snapshot_search"; query: string }
   | { kind: "snapshot_restore"; target: string }
-  | { kind: "snapshot_clear" };
+  | { kind: "snapshot_clear" }
+  | { kind: "runs"; limit?: number };
 
 export const TELEGRAM_COMMAND_AGENT: Record<string, SessionAgent> = { codex: "codex", cc: "claude_code" };
 
@@ -346,6 +347,12 @@ export function parseCloudCommand(text: string): CloudCommand | null {
     }
   }
   if (head === "actions") return { kind: "actions_list" };
+  if (head === "runs") {
+    const raw = tokens[0];
+    const n = raw ? Number(raw) : NaN;
+    const limit = Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+    return { kind: "runs", limit };
+  }
   if (head === "run") {
     const repoIds: string[] = [];
     const promptParts: string[] = [];

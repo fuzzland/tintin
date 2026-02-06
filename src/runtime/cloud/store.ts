@@ -15,6 +15,7 @@ export interface IdentityRow {
   branch_name_rule: string | null;
   git_user_name: string | null;
   git_user_email: string | null;
+  group_id: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -50,6 +51,7 @@ export async function getOrCreateIdentity(
     branch_name_rule: null,
     git_user_name: null,
     git_user_email: null,
+    group_id: null,
     created_at: now,
     updated_at: now,
   };

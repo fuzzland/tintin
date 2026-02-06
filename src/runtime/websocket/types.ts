@@ -76,6 +76,11 @@ export interface ChatConnectMessage {
   chatId: string;
 }
 
+export interface ListRunsMessage {
+  type: 'list_runs';
+  limit?: number;  // defaults to 5
+}
+
 export type ClientMessage =
   | AuthMessage
   | PingMessage
@@ -88,7 +93,8 @@ export type ClientMessage =
   | SubscribeRunMessage
   | CloudFollowUpMessage
   | CloudStopMessage
-  | ChatConnectMessage;
+  | ChatConnectMessage
+  | ListRunsMessage;
 
 // ============ Server → Client Messages ============
 
@@ -328,6 +334,18 @@ export interface RunCompletedNotificationMessage {
   finishedAt: number;
 }
 
+export interface RunsListMessage {
+  type: 'runs_list';
+  runs: Array<{
+    id: string;
+    status: string;
+    prompt: string;
+    platform: string;
+    diffSummary: string | null;
+    createdAt: number;
+  }>;
+}
+
 export type ServerMessage =
   | AuthOkMessage
   | AuthErrorMessage
@@ -358,7 +376,8 @@ export type ServerMessage =
   | ChatInfoMessage
   | ChatHistoryMessage
   | WorkspaceRestoredMessage
-  | RunCompletedNotificationMessage;
+  | RunCompletedNotificationMessage
+  | RunsListMessage;
 
 // ============ Error Codes ============
 

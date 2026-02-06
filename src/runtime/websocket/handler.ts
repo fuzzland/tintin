@@ -9,6 +9,8 @@ import { ErrorCodes } from './types.js';
 import { verifyProxyToken } from '../cloud/proxy.js';
 import { requireAuth, requireCloudService } from './guards.js';
 import { GitHubService, GitHubDisconnectService, CloudRunService, SandboxLifecycleService, ChatSessionService } from './services/index.js';
+import { listRunsForGroup } from '../cloud/runsQuery.js';
+import { listCloudRunsForIdentity, getIdentity } from '../cloud/store.js';
 
 export interface PreviewUrlEvent {
   sessionId: string;
@@ -190,6 +192,13 @@ export class WebSocketHandler {
         break;
       }
 
+      case 'list_runs': {
+        const auth = requireAuth(this.wsManager, connId);
+        if (!auth) return;
+        await this.handleListRuns(connId, auth.identityId, message.limit);
+        break;
+      }
+
       default:
         this.wsManager.sendToConnection(connId, {
           type: 'error',
@@ -283,6 +292,56 @@ export class WebSocketHandler {
     // Provision sandbox after successful auth (async, non-blocking)
     if (this.sandboxLifecycleService) {
       void this.sandboxLifecycleService.provisionSandbox(connId, verified.identityId);
+    }
+  }
+
+  private async handleListRuns(connId: string, identityId: string, limit?: number): Promise<void> {
+    try {
+      // Get the identity to check for group_id
+      const identity = await getIdentity(this.db, {
+        platform: 'websocket',
+        workspaceId: null,
+        userId: identityId,
+      });
+
+      const effectiveLimit = limit ?? 5;
+
+      if (identity?.group_id) {
+        // User is in a group - show runs from all platforms
+        const runs = await listRunsForGroup(this.db, identity.group_id, effectiveLimit);
+        this.wsManager.sendToConnection(connId, {
+          type: 'runs_list',
+          runs: runs.map(r => ({
+            id: r.id,
+            status: r.status,
+            prompt: r.prompt,
+            platform: r.platform,
+            diffSummary: r.diffSummary,
+            createdAt: r.createdAt,
+          })),
+        });
+      } else {
+        // User not linked to a group - show their own runs
+        const runs = await listCloudRunsForIdentity(this.db, { identityId, limit: effectiveLimit });
+        this.wsManager.sendToConnection(connId, {
+          type: 'runs_list',
+          runs: runs.map(r => ({
+            id: r.id,
+            status: r.status,
+            prompt: r.prompt,
+            platform: 'websocket',
+            diffSummary: r.diff_summary ?? null,
+            createdAt: r.created_at,
+          })),
+        });
+      }
+    } catch (e) {
+      this.logger.error(`[ws] handleListRuns error connId=${connId}: ${String(e)}`);
+      this.wsManager.sendToConnection(connId, {
+        type: 'error',
+        code: ErrorCodes.SERVICE_ERROR,
+        message: 'Failed to list runs',
+      });
     }
   }
 }
