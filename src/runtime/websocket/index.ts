@@ -7,7 +7,9 @@ export { GitHubService } from './services/index.js';
 export type {
   // Client → Server messages
   AuthMessage,
-  CloudStopMessage,
+  ChatMessage,
+  StopMessage,
+  SubscribeMessage,
   PingMessage,
   ClientMessage,
   // Server → Client messages

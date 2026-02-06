@@ -7,8 +7,8 @@ import type { WebSocketManager } from './manager.js';
 import type { ClientMessage, WebSocketSection } from './types.js';
 import { ErrorCodes } from './types.js';
 import { verifyProxyToken } from '../cloud/proxy.js';
-import { requireAuth, requireCloudService } from './guards.js';
-import { GitHubService, GitHubDisconnectService, CloudRunService, SandboxLifecycleService, ChatSessionService } from './services/index.js';
+import { requireAuth } from './guards.js';
+import { GitHubService, GitHubDisconnectService, ChatService, SandboxLifecycleService } from './services/index.js';
 import { listRunsForGroup } from '../cloud/runsQuery.js';
 import { listCloudRunsForIdentity, getIdentity } from '../cloud/store.js';
 
@@ -22,13 +22,8 @@ export interface PreviewUrlEvent {
 export class WebSocketHandler {
   private readonly githubService: GitHubService;
   private readonly githubDisconnectService: GitHubDisconnectService;
-  private readonly cloudRunService: CloudRunService | null;
-  private readonly chatSessionService: ChatSessionService;
+  private readonly chatService: ChatService | null;
   readonly sandboxLifecycleService: SandboxLifecycleService | null;
-
-  get cloudService(): CloudRunService | null {
-    return this.cloudRunService;
-  }
 
   constructor(
     private readonly wsManager: WebSocketManager,
@@ -59,11 +54,9 @@ export class WebSocketHandler {
       ? new SandboxLifecycleService(wsManager, cloudManager, db, logger)
       : null;
 
-    this.cloudRunService = cloudManager
-      ? new CloudRunService(wsManager, cloudManager, config, db, logger, this.sandboxLifecycleService)
+    this.chatService = cloudManager
+      ? new ChatService(wsManager, cloudManager, config, db, logger, this.sandboxLifecycleService)
       : null;
-
-    this.chatSessionService = new ChatSessionService(wsManager, cloudManager, db, logger);
   }
 
   /**
@@ -76,13 +69,24 @@ export class WebSocketHandler {
       this.logger.debug(`[ws] pushPreviewUrl: no connection for session=${event.sessionId}`);
       return;
     }
-    this.wsManager.sendToConnection(connId, {
-      type: 'run_links',
-      runId: event.runId,
-      sessionId: event.sessionId,
-      previewUrl: event.previewUrl,
-      previewSummary: event.previewSummary,
-    });
+    // Get chatId from session
+    this.db
+      .selectFrom('sessions')
+      .select(['chat_id'])
+      .where('id', '=', event.sessionId)
+      .executeTakeFirst()
+      .then((session) => {
+        if (session) {
+          this.wsManager.sendToConnection(connId, {
+            type: 'run_links',
+            chatId: session.chat_id,
+            sessionId: event.sessionId,
+            previewUrl: event.previewUrl,
+            previewSummary: event.previewSummary,
+          });
+        }
+      })
+      .catch(() => {});
     this.logger.debug(`[ws] pushPreviewUrl sent connId=${connId} session=${event.sessionId} url=${event.previewUrl}`);
   }
 
@@ -137,58 +141,48 @@ export class WebSocketHandler {
         break;
       }
 
-      case 'cloud_run': {
+      case 'chat': {
         const auth = requireAuth(this.wsManager, connId);
         if (!auth) return;
-        if (!requireCloudService(this.wsManager, connId, this.cloudRunService)) return;
-        await this.cloudRunService.handleCloudRun(connId, auth.conn, message);
-        break;
-      }
-
-      case 'subscribe_run': {
-        const auth = requireAuth(this.wsManager, connId);
-        if (!auth) return;
-        if (!requireCloudService(this.wsManager, connId, this.cloudRunService)) return;
-        if (!message.runId) {
+        if (!this.chatService) {
           this.wsManager.sendToConnection(connId, {
             type: 'error',
-            code: ErrorCodes.INVALID_MESSAGE,
-            message: 'Run ID required',
+            code: ErrorCodes.SERVICE_ERROR,
+            message: 'Cloud service not available',
           });
           return;
         }
-        await this.cloudRunService.handleSubscribeRun(connId, message.runId);
+        await this.chatService.handleChat(connId, auth.conn, message);
         break;
       }
 
-      case 'cloud_follow_up': {
+      case 'stop': {
         const auth = requireAuth(this.wsManager, connId);
         if (!auth) return;
-        if (!requireCloudService(this.wsManager, connId, this.cloudRunService)) return;
-        await this.cloudRunService.handleCloudFollowUp(connId, auth.conn, message);
-        break;
-      }
-
-      case 'cloud_stop': {
-        const auth = requireAuth(this.wsManager, connId);
-        if (!auth) return;
-        if (!requireCloudService(this.wsManager, connId, this.cloudRunService)) return;
-        if (!message.runId) {
+        if (!this.chatService) {
           this.wsManager.sendToConnection(connId, {
             type: 'error',
-            code: ErrorCodes.INVALID_MESSAGE,
-            message: 'Run ID required',
+            code: ErrorCodes.SERVICE_ERROR,
+            message: 'Cloud service not available',
           });
           return;
         }
-        await this.cloudRunService.handleCloudStop(connId, auth.conn, message.runId);
+        await this.chatService.handleStop(connId, auth.conn, message);
         break;
       }
 
-      case 'chat_connect': {
+      case 'subscribe': {
         const auth = requireAuth(this.wsManager, connId);
         if (!auth) return;
-        await this.chatSessionService.handleChatConnect(connId, auth.conn, message.chatId);
+        if (!this.chatService) {
+          this.wsManager.sendToConnection(connId, {
+            type: 'error',
+            code: ErrorCodes.SERVICE_ERROR,
+            message: 'Cloud service not available',
+          });
+          return;
+        }
+        await this.chatService.handleSubscribe(connId, auth.conn, message);
         break;
       }
 
