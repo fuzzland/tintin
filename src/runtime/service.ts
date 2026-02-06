@@ -29,6 +29,12 @@ import type { PreviewUrlEvent } from "./websocket/handler.js";
 import type { ServerMessage } from "./websocket/types.js";
 import { createHttpServer } from "./service/httpServer.js";
 import { readHeader, sendText } from "./service/httpUtils.js";
+import {
+  RunNotificationService,
+  TelegramSender,
+  SlackSender,
+  WebSocketSender,
+} from "./notification/index.js";
 
 export interface BotServiceDeps {
   config: AppConfig;
@@ -442,6 +448,23 @@ export async function createBotService(deps: BotServiceDeps) {
     wsManager.startHeartbeat();
     logger.info(`[ws] WebSocket enabled on path=${config.websocket.path}`);
   }
+
+  // Initialize cross-platform notification service
+  // Note: TelegramSender and SlackSender require specific bot/client interfaces
+  // For MVP, we only enable WebSocketSender since the TG/Slack client interfaces differ
+  const notificationSenders = [
+    new WebSocketSender(wsManager, logger),
+    // TelegramSender and SlackSender require adapters for the current client interfaces
+    // TODO: Add TelegramSender(telegramBotAdapter, logger) when adapter is implemented
+    // TODO: Add SlackSender(slackClientAdapter, logger) when adapter is implemented
+  ];
+  const notificationService = RunNotificationService.create({
+    db,
+    config: { publicBaseUrl: config.cloud?.public_base_url ?? `http://127.0.0.1:${config.bot.port}` },
+    senders: notificationSenders,
+    logger,
+  });
+  sessionManager.setNotificationService(notificationService);
 
   if (telegram && config.telegram?.mode === "poll") {
     logger.info(
