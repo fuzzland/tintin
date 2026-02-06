@@ -3,6 +3,8 @@ import type { CloudOAuthProviderSection, CloudSection } from "../config.js";
 import type { Db } from "../db.js";
 import { createOAuthState, consumeOAuthState, markIdentityOnboarded, upsertConnection, setGithubMcpToken } from "./store.js";
 import { encryptSecret } from "./secrets.js";
+import { fetchGitHubUser } from "./githubUser.js";
+import { GroupStore } from "../notification/GroupStore.js";
 
 function base64Url(input: Buffer): string {
   return input
@@ -137,6 +139,22 @@ export async function handleOAuthCallback(opts: {
     metadataJson: saved.metadata_json ?? null,
   });
   await markIdentityOnboarded(opts.db, saved.identity_id);
+
+  // Link identity to group via GitHub user ID for cross-platform sync
+  if (opts.provider === "github") {
+    try {
+      const githubUser = await fetchGitHubUser(token.accessToken, cfg.api_base_url);
+      const groupStore = new GroupStore(opts.db);
+      const groupId = await groupStore.getOrCreateGroup(
+        String(githubUser.id),
+        githubUser.login,
+      );
+      await groupStore.linkIdentityToGroup(saved.identity_id, groupId);
+    } catch (e) {
+      // Log but don't fail OAuth flow - group linking is non-critical
+      console.warn(`[oauth] group linking failed: ${String(e)}`);
+    }
+  }
 
   // For WebSocket GitHub OAuth connections, also store the token in github_mcp_tokens
   // This enables GitHub MCP server integration for WebSocket users
