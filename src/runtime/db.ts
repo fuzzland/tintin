@@ -103,6 +103,15 @@ export interface IdentitiesTable {
   branch_name_rule: string | null;
   git_user_name: string | null;
   git_user_email: string | null;
+  group_id: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface IdentityGroupsTable {
+  id: string;
+  github_user_id: string;
+  github_login: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -454,6 +463,7 @@ export interface DatabaseSchema {
   session_pending_messages: SessionPendingMessagesTable;
   user_preferences: UserPreferencesTable;
   identities: IdentitiesTable;
+  identity_groups: IdentityGroupsTable;
   chats: ChatsTable;
   connections: ConnectionsTable;
   repos: ReposTable;
