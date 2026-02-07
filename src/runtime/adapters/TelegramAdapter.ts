@@ -26,6 +26,7 @@ import type {
   CloudOrchestrator,
   CloudContext,
 } from "../orchestrator/CloudOrchestrator.js";
+import type { CommitProposalOrchestrator } from "../orchestrator/CommitProposalOrchestrator.js";
 import { parseTelegramAction } from "../shared/ActionParser.js";
 import { buildTelegramProjectKeyboard, type ProjectOption } from "../shared/UIBuilder.js";
 import type { TelegramInlineKeyboard } from "../shared/types.js";
@@ -58,6 +59,8 @@ export interface TelegramAdapterDeps {
   commandOrchestrator?: CommandOrchestrator;
   /** Cloud orchestrator for cloud commands */
   cloudOrchestrator?: CloudOrchestrator;
+  /** Commit proposal orchestrator for push/pr actions */
+  commitProposalOrchestrator?: CommitProposalOrchestrator;
   /** Request router for intent detection */
   router?: RequestRouter;
   /** Get user's language preference */
@@ -417,6 +420,21 @@ export class TelegramAdapter extends BaseAdapter {
           await this.deps.telegram.answerCallbackQuery(ctx.callbackQueryId, result.text);
         }
 
+        return { handled: true };
+      }
+
+      if (action.kind === "commit_proposal") {
+        if (!this.deps.commitProposalOrchestrator) {
+          return { handled: false };
+        }
+        await this.deps.commitProposalOrchestrator.handle({
+          platform: "telegram",
+          chatId: ctx.chatId,
+          userId: ctx.userId,
+          workspaceId: null,
+          proposalId: action.proposalId,
+          action: action.action,
+        });
         return { handled: true };
       }
 

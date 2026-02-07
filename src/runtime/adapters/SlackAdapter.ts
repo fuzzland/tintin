@@ -26,6 +26,7 @@ import type {
   CloudOrchestrator,
   CloudContext,
 } from "../orchestrator/CloudOrchestrator.js";
+import type { CommitProposalOrchestrator } from "../orchestrator/CommitProposalOrchestrator.js";
 import { parseSlackAction } from "../shared/ActionParser.js";
 import { buildSlackProjectBlocks, type ProjectOption } from "../shared/UIBuilder.js";
 import type { SlackActionsBlock } from "../shared/types.js";
@@ -78,6 +79,8 @@ export interface SlackAdapterDeps {
   commandOrchestrator?: CommandOrchestrator;
   /** Cloud orchestrator for cloud commands */
   cloudOrchestrator?: CloudOrchestrator;
+  /** Commit proposal orchestrator for push/pr actions */
+  commitProposalOrchestrator?: CommitProposalOrchestrator;
   /** Request router for intent detection */
   router?: RequestRouter;
   /** Get user's language preference */
@@ -574,6 +577,21 @@ export class SlackAdapter extends BaseAdapter {
           });
         }
 
+        return { handled: true };
+      }
+
+      if (action.kind === "commit_proposal") {
+        if (!this.deps.commitProposalOrchestrator) {
+          return { handled: false };
+        }
+        await this.deps.commitProposalOrchestrator.handle({
+          platform: "slack",
+          chatId: ctx.channelId,
+          userId: ctx.userId,
+          workspaceId: ctx.workspaceId ?? null,
+          proposalId: action.proposalId,
+          action: action.action,
+        });
         return { handled: true };
       }
 

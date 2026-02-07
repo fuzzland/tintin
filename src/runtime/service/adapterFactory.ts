@@ -25,7 +25,9 @@ import { SessionOrchestrator } from "../orchestrator/SessionOrchestrator.js";
 import { createWizardOrchestrator } from "../orchestrator/WizardOrchestrator.js";
 import { createCommandOrchestrator } from "../orchestrator/CommandOrchestrator.js";
 import { createCloudOrchestrator } from "../orchestrator/CloudOrchestrator.js";
+import { CommitProposalOrchestrator } from "../orchestrator/CommitProposalOrchestrator.js";
 import { createForumTopicManager, type ForumTopicManager } from "../adapters/telegram/ForumTopicManager.js";
+import type { CommitProposalStore } from "../controller/types.js";
 import {
   getUserLanguage,
   getWizardState,
@@ -45,6 +47,7 @@ export interface AdapterFactoryDeps {
   slack: SlackClient | null;
   sessionManager: SessionManager;
   cloudManager: CloudManager | null;
+  commitProposalStore?: CommitProposalStore | null;
   sendPlatformMessage: (opts: {
     platform: IMessagingPlatform | null;
     chatId: string;
@@ -77,6 +80,7 @@ export function createAdapters(deps: AdapterFactoryDeps): AdapterFactoryResult {
     sessionManager,
     cloudManager,
     sendPlatformMessage,
+    commitProposalStore,
   } = deps;
 
   // Create request router
@@ -382,6 +386,19 @@ export function createAdapters(deps: AdapterFactoryDeps): AdapterFactoryResult {
       })
     : undefined;
 
+  const commitProposalOrchestrator = commitProposalStore
+    ? new CommitProposalOrchestrator({
+        logger,
+        db,
+        cloudManager,
+        commitProposalStore,
+        telegram,
+        slack,
+        sendPlatformMessage,
+        resolveUserLanguage,
+      })
+    : undefined;
+
   // Helper functions for adapters
   const findActiveSession = async (
     platform: string,
@@ -428,6 +445,7 @@ export function createAdapters(deps: AdapterFactoryDeps): AdapterFactoryResult {
         wizardOrchestrator,
         commandOrchestrator,
         cloudOrchestrator,
+        commitProposalOrchestrator,
         router,
         getUserLanguage: (userId) => resolveUserLanguage("telegram", userId),
         findActiveSession: (chatId, spaceId) => findActiveSession("telegram", chatId, spaceId),
@@ -457,6 +475,7 @@ export function createAdapters(deps: AdapterFactoryDeps): AdapterFactoryResult {
         wizardOrchestrator,
         commandOrchestrator,
         cloudOrchestrator,
+        commitProposalOrchestrator,
         router,
         getUserLanguage: (userId) => resolveUserLanguage("slack", userId),
         findActiveSession: (chatId, spaceId) => findActiveSession("slack", chatId, spaceId),

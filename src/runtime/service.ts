@@ -464,6 +464,7 @@ export async function createBotService(deps: BotServiceDeps) {
     slack,
     sessionManager,
     cloudManager,
+    commitProposalStore,
     sendPlatformMessage,
     lookupTelegramSessionByReply: telegram ? lookupTelegramSessionId : undefined,
   });
@@ -490,13 +491,12 @@ export async function createBotService(deps: BotServiceDeps) {
   }
 
   // Initialize cross-platform notification service
-  // Note: TelegramSender and SlackSender require specific bot/client interfaces
-  // For MVP, we only enable WebSocketSender since the TG/Slack client interfaces differ
+  // Note: TelegramSender and SlackSender require adapter wrappers for the current client interfaces
+  // For now, we only enable WebSocketSender since TG/Slack client interfaces differ from sender expectations
   const notificationSenders = [
     new WebSocketSender(wsManager, logger),
-    // TelegramSender and SlackSender require adapters for the current client interfaces
-    // TODO: Add TelegramSender(telegramBotAdapter, logger) when adapter is implemented
-    // TODO: Add SlackSender(slackClientAdapter, logger) when adapter is implemented
+    // TODO: Wrap TelegramClient to match TelegramSender interface
+    // TODO: Wrap SlackClient to match SlackSender interface
   ];
   const notificationService = RunNotificationService.create({
     db,
