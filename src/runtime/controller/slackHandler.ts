@@ -1,3 +1,19 @@
+/**
+ * SlackHandler - Legacy Slack message handler.
+ *
+ * @deprecated This module is superseded by the new adapter architecture.
+ * Most functionality has been migrated to:
+ * - `adapters/SlackAdapter.ts` - Main message routing
+ * - `orchestrator/SessionOrchestrator.ts` - Session management
+ * - `orchestrator/WizardOrchestrator.ts` - New session wizard
+ * - `orchestrator/CommandOrchestrator.ts` - Command handling
+ * - `shared/ActionParser.ts` - Interaction parsing
+ * - `shared/SessionListFormatter.ts` - Session list formatting
+ *
+ * This handler is kept as a fallback for edge cases.
+ * New features should be implemented in the orchestrators/adapters.
+ */
+
 import crypto from "node:crypto";
 import type { AppConfig, ProjectEntry } from "../config.js";
 import type { Db } from "../db.js";

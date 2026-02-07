@@ -1,3 +1,18 @@
+/**
+ * InteractionHandler - Legacy interaction action handler.
+ *
+ * @deprecated This module handles commit proposal flows which should
+ * eventually be migrated to a dedicated service or to CloudOrchestrator.
+ *
+ * Contains complex logic for:
+ * - Commit proposal creation and management
+ * - Push/PR/cancel actions
+ * - Integration with CloudManager for git operations
+ *
+ * This is kept as-is because the commit proposal feature is complex
+ * and rarely used. New features should use the orchestrator/adapters.
+ */
+
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db.js";
 import type { Logger } from "../log.js";
