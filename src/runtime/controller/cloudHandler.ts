@@ -64,7 +64,7 @@ import {
   truncateText,
   type CloudCommand,
 } from "./commands.js";
-import { buildCloudHelpText } from "./sessions.js";
+import { buildCloudHelpText } from "../shared/SessionListFormatter.js";
 import { listRunsForGroup, formatTimeAgo } from "../cloud/runsQuery.js";
 
 export interface CloudHandlerDeps {

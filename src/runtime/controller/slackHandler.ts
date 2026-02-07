@@ -8,7 +8,7 @@ import { validateAndResolveProjectPath } from "../security.js";
 import { nowMs } from "../util.js";
 import { getOtherLanguage, isUserLanguage, t, type UserLanguage } from "../../locales/index.js";
 import { parseCloudCommand, parseLanguageCommandFromSlack, isSlackHelpCommand, safeParseMeta } from "./commands.js";
-import { buildCommandExamples, buildMenuText } from "./sessions.js";
+import { buildCommandExamples, buildMenuText } from "../shared/SessionListFormatter.js";
 import { safeSnippet } from "./utils.js";
 import { clearWizardState, getLatestSessionForChat, setUserLanguage, setWizardState, updateSession } from "../store.js";
 import type { CloudCommand } from "./commands.js";

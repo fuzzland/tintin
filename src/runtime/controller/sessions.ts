@@ -1,8 +1,12 @@
 /**
  * Session formatting utilities.
  *
- * This module now re-exports from the shared layer for consistency.
- * @deprecated Import from shared/SessionListFormatter.ts instead.
+ * @deprecated This module is deprecated. Import from `shared/SessionListFormatter.ts` instead.
+ * All functions here are re-exported from the shared layer.
+ *
+ * Migration guide:
+ * - Replace `from "../controller/sessions.js"` with `from "../shared/SessionListFormatter.js"`
+ * - All exported functions have the same names and signatures
  */
 
 import type { SessionAgent, SessionStatus } from "../db.js";

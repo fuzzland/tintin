@@ -24,7 +24,7 @@ import {
   formatSessionFilterLabel,
   buildMenuText,
   buildCloudHelpText,
-} from "../controller/sessions.js";
+} from "../shared/SessionListFormatter.js";
 import {
   applySettingsCommand,
   applyIdentitySettingsCommand,
