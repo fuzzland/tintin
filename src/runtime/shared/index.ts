@@ -32,7 +32,11 @@ export {
   buildSlackSessionBlocks,
   buildRunActionMarkup,
   buildSessionActionMarkup,
+  buildTelegramProjectKeyboard,
+  buildSlackProjectBlocks,
+  buildProjectSelectionMarkup,
   type PlatformMarkup,
+  type ProjectOption,
 } from "./UIBuilder.js";
 
 // Identity resolution

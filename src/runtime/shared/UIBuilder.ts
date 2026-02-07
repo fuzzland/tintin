@@ -221,4 +221,67 @@ export function buildSessionActionMarkup(
   };
 }
 
+// ============================================================================
+// Wizard UI Components
+// ============================================================================
+
+export interface ProjectOption {
+  id: string;
+  name: string;
+}
+
+/**
+ * Build Telegram inline keyboard for project selection.
+ */
+export function buildTelegramProjectKeyboard(projects: ProjectOption[]): TelegramInlineKeyboard {
+  // One button per row for project names
+  const rows: TelegramInlineKeyboardButton[][] = projects.map(project => [
+    { text: project.name, callback_data: `project:${project.id}` },
+  ]);
+  return { inline_keyboard: rows };
+}
+
+/**
+ * Build Slack blocks for project selection.
+ */
+export function buildSlackProjectBlocks(projects: ProjectOption[]): SlackActionsBlock[] {
+  const elements: SlackButtonElement[] = projects.map(project => ({
+    type: "button",
+    text: { type: "plain_text", text: project.name },
+    action_id: `select_project`,
+    value: project.id,
+  }));
+
+  if (elements.length === 0) {
+    return [];
+  }
+
+  // Slack allows max 5 buttons per actions block
+  const blocks: SlackActionsBlock[] = [];
+  for (let i = 0; i < elements.length; i += 5) {
+    blocks.push({ type: "actions", elements: elements.slice(i, i + 5) });
+  }
+
+  return blocks;
+}
+
+/**
+ * Build project selection UI for any platform.
+ */
+export function buildProjectSelectionMarkup(
+  platform: "telegram" | "slack",
+  projects: ProjectOption[],
+): PlatformMarkup {
+  if (platform === "telegram") {
+    return {
+      type: "inline_keyboard",
+      payload: buildTelegramProjectKeyboard(projects),
+    };
+  }
+  return {
+    type: "blocks",
+    payload: buildSlackProjectBlocks(projects),
+  };
+}
+
 // Note: UIBuilder class removed - use standalone functions directly

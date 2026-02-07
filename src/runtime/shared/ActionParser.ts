@@ -23,6 +23,11 @@ import type { InteractionAction, CommitProposalAction } from "./types.js";
 export function parseTelegramAction(data: string): InteractionAction | null {
   if (!data) return null;
 
+  if (data.startsWith("project:")) {
+    const projectId = data.slice("project:".length);
+    return projectId ? { kind: "project_select", projectId } : null;
+  }
+
   if (data.startsWith("lang:")) {
     const value = data.slice("lang:".length);
     return isUserLanguage(value) ? { kind: "lang", value } : null;
@@ -80,6 +85,10 @@ export function parseTelegramAction(data: string): InteractionAction | null {
  */
 export function parseSlackAction(actionId: string, value: string | null): InteractionAction | null {
   if (!actionId) return null;
+
+  if (actionId === "select_project" && value) {
+    return { kind: "project_select", projectId: value };
+  }
 
   if (actionId === "switch_language") {
     if (!value || (value !== "en" && value !== "zh")) return null;

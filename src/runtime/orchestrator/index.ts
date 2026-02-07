@@ -25,5 +25,16 @@ export type {
   OrchestratorDeps,
 } from "./types.js";
 
-// Orchestrator
+// Orchestrators
 export { SessionOrchestrator } from "./SessionOrchestrator.js";
+export {
+  WizardOrchestrator,
+  createWizardOrchestrator,
+  type WizardOrchestratorDeps,
+  type WizardContext,
+  type WizardResult,
+  type WizardStateRecord,
+  type ProjectInfo,
+  type PathValidationResult,
+  type SessionStartResult,
+} from "./WizardOrchestrator.js";

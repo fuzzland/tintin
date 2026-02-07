@@ -406,6 +406,9 @@ export class InteractionHandler {
         await this.handleCommitProposalAction({ proposal, session: session as SessionRow, action: opts.action.action });
         return true;
       }
+      case "project_select":
+        // Wizard project selection - not handled by InteractionHandler
+        return false;
     }
   }
 

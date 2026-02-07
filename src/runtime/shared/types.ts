@@ -41,6 +41,7 @@ export interface WebSocketAccessContext {
 export type CommitProposalAction = "cancel" | "push" | "pr";
 
 export type InteractionAction =
+  | { kind: "project_select"; projectId: string }
   | { kind: "lang"; value: UserLanguage }
   | { kind: "kill"; sessionId: string }
   | { kind: "review"; sessionId: string }

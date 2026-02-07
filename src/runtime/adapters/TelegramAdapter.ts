@@ -10,8 +10,16 @@ import type { Logger } from "../log.js";
 import type { TelegramClient, TelegramUpdate, TelegramMessage } from "../platform/telegram.js";
 import type { ChatRequest, ChatResult, ActionContext, SessionInfo } from "../orchestrator/index.js";
 import type { SessionOrchestrator } from "../orchestrator/SessionOrchestrator.js";
+import type {
+  WizardOrchestrator,
+  WizardContext,
+  WizardResult,
+  ProjectInfo,
+} from "../orchestrator/WizardOrchestrator.js";
 import { parseTelegramAction } from "../shared/ActionParser.js";
-import { RequestRouter, type RoutingContext } from "./RequestRouter.js";
+import { buildTelegramProjectKeyboard, type ProjectOption } from "../shared/UIBuilder.js";
+import type { TelegramInlineKeyboard } from "../shared/types.js";
+import { RequestRouter, type RoutingContext, type WizardAction } from "./RequestRouter.js";
 import { BaseAdapter } from "./BaseAdapter.js";
 import type {
   TelegramMessageContext,
@@ -34,6 +42,8 @@ export interface TelegramAdapterDeps {
   logger: Logger;
   /** Session orchestrator for handling messages */
   orchestrator?: SessionOrchestrator;
+  /** Wizard orchestrator for new session creation */
+  wizardOrchestrator?: WizardOrchestrator;
   /** Request router for intent detection */
   router?: RequestRouter;
   /** Get user's language preference */
@@ -42,6 +52,8 @@ export interface TelegramAdapterDeps {
   findActiveSession?: (chatId: string, spaceId: string | null) => Promise<SessionInfo | null>;
   /** Check if user has an active wizard */
   hasActiveWizard?: (chatId: string, spaceId: string | null) => Promise<boolean>;
+  /** Get available projects for wizard */
+  getProjects?: () => ProjectInfo[];
   /** Whether cloud features are enabled */
   cloudEnabled?: boolean;
 }
@@ -207,6 +219,24 @@ export class TelegramAdapter extends BaseAdapter {
 
       // Handle based on intent type
       switch (intent.type) {
+        case "wizard": {
+          // Handle wizard actions
+          const messageCtx = this.buildMessageContext(message);
+          const wizardResult = await this.handleWizardIntent(
+            intent.action,
+            messageCtx,
+            intent.agent,
+            intent.projectId,
+            intent.path,
+            text,
+          );
+          if (wizardResult) {
+            await this.sendWizardResponse(messageCtx, wizardResult);
+            return { handled: true };
+          }
+          return { handled: false };
+        }
+
         case "session": {
           // Handle session message through orchestrator
           if (ctx.activeSession) {
@@ -222,7 +252,6 @@ export class TelegramAdapter extends BaseAdapter {
           return { handled: false };
         }
 
-        case "wizard":
         case "command":
         case "cloud":
           // Not yet implemented - fall back to old handler
@@ -245,11 +274,6 @@ export class TelegramAdapter extends BaseAdapter {
   private async handleCallbackUpdate(
     query: NonNullable<TelegramUpdate["callback_query"]>,
   ): Promise<HandleUpdateResult> {
-    // Skip if no orchestrator
-    if (!this.deps.orchestrator) {
-      return { handled: false };
-    }
-
     const data = query.data;
     if (!data) {
       return { handled: false };
@@ -264,6 +288,53 @@ export class TelegramAdapter extends BaseAdapter {
 
       // Build callback context
       const ctx = await this.buildCallbackContext(query);
+
+      // Handle project selection for wizard
+      if (action.kind === "project_select") {
+        if (!this.deps.wizardOrchestrator) {
+          return { handled: false };
+        }
+
+        const language = ctx.language;
+        const spaceId = ctx.messageThreadId ? `${ctx.chatId}:${ctx.messageThreadId}` : null;
+
+        const wizardCtx: WizardContext = {
+          platform: "telegram",
+          chatId: ctx.chatId,
+          userId: ctx.userId,
+          language,
+          workspaceId: null,
+          spaceId,
+        };
+
+        const result = await this.deps.wizardOrchestrator.handleProjectSelect(
+          wizardCtx,
+          action.projectId,
+        );
+
+        // Answer callback and send response
+        if (this.deps.telegram) {
+          await this.deps.telegram.answerCallbackQuery(ctx.callbackQueryId);
+        }
+
+        const messageCtx: TelegramMessageContext = {
+          platform: "telegram",
+          chatId: ctx.chatId,
+          userId: ctx.userId,
+          language,
+          replyToMessageId: ctx.replyToMessageId,
+          messageThreadId: ctx.messageThreadId,
+          isDirect: true,
+        };
+        await this.sendWizardResponse(messageCtx, result);
+
+        return { handled: true };
+      }
+
+      // Skip if no session orchestrator for session actions
+      if (!this.deps.orchestrator) {
+        return { handled: false };
+      }
 
       // Convert to SessionAction if applicable
       const sessionAction = this.toSessionAction(action);
@@ -365,6 +436,85 @@ export class TelegramAdapter extends BaseAdapter {
       return `${message.chat.id}:${message.message_thread_id}`;
     }
     return null;
+  }
+
+  // ==========================================================================
+  // Wizard Handling
+  // ==========================================================================
+
+  /**
+   * Handle wizard intent.
+   */
+  private async handleWizardIntent(
+    action: WizardAction,
+    messageCtx: TelegramMessageContext,
+    agent?: import("../db.js").SessionAgent,
+    projectId?: string,
+    path?: string,
+    text?: string,
+  ): Promise<WizardResult | null> {
+    if (!this.deps.wizardOrchestrator) {
+      return null;
+    }
+
+    const language = this.deps.getUserLanguage
+      ? await this.deps.getUserLanguage(messageCtx.userId)
+      : "en" as UserLanguage;
+
+    const wizardCtx: WizardContext = {
+      platform: "telegram",
+      chatId: messageCtx.chatId,
+      userId: messageCtx.userId,
+      language,
+      workspaceId: null,
+      spaceId: messageCtx.messageThreadId ? `${messageCtx.chatId}:${messageCtx.messageThreadId}` : null,
+    };
+
+    switch (action) {
+      case "start":
+        return this.deps.wizardOrchestrator.start(wizardCtx, agent || "codex");
+      case "project_select":
+        if (projectId) {
+          return this.deps.wizardOrchestrator.handleProjectSelect(wizardCtx, projectId);
+        }
+        return null;
+      case "path_input":
+        if (path) {
+          return this.deps.wizardOrchestrator.handleCustomPath(wizardCtx, path);
+        }
+        return null;
+      case "continue":
+        return this.deps.wizardOrchestrator.continue(wizardCtx, text || "");
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * Send wizard response to Telegram.
+   */
+  private async sendWizardResponse(
+    ctx: TelegramMessageContext,
+    result: WizardResult,
+  ): Promise<void> {
+    if (!this.deps.telegram) return;
+
+    // Build keyboard if needed
+    let replyMarkup: TelegramInlineKeyboard | undefined;
+    if (result.showProjectKeyboard && this.deps.getProjects) {
+      const projects = this.deps.getProjects();
+      const projectOptions: ProjectOption[] = projects.map(p => ({ id: p.id, name: p.name }));
+      replyMarkup = buildTelegramProjectKeyboard(projectOptions);
+    }
+
+    await this.deps.telegram.sendMessage({
+      chatId: ctx.chatId,
+      text: result.message,
+      replyToMessageId: ctx.replyToMessageId,
+      messageThreadId: ctx.messageThreadId,
+      priority: "user",
+      replyMarkup,
+    });
   }
 
   /**

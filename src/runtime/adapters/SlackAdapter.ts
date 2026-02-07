@@ -10,8 +10,16 @@ import type { Logger } from "../log.js";
 import type { SlackClient } from "../platform/slack.js";
 import type { ChatRequest, ChatResult, ActionContext, SessionInfo } from "../orchestrator/index.js";
 import type { SessionOrchestrator } from "../orchestrator/SessionOrchestrator.js";
+import type {
+  WizardOrchestrator,
+  WizardContext,
+  WizardResult,
+  ProjectInfo,
+} from "../orchestrator/WizardOrchestrator.js";
 import { parseSlackAction } from "../shared/ActionParser.js";
-import { RequestRouter, type RoutingContext } from "./RequestRouter.js";
+import { buildSlackProjectBlocks, type ProjectOption } from "../shared/UIBuilder.js";
+import type { SlackActionsBlock } from "../shared/types.js";
+import { RequestRouter, type RoutingContext, type WizardAction } from "./RequestRouter.js";
 import { BaseAdapter } from "./BaseAdapter.js";
 import type {
   SlackMessageContext,
@@ -54,6 +62,8 @@ export interface SlackAdapterDeps {
   logger: Logger;
   /** Session orchestrator for handling messages */
   orchestrator?: SessionOrchestrator;
+  /** Wizard orchestrator for new session creation */
+  wizardOrchestrator?: WizardOrchestrator;
   /** Request router for intent detection */
   router?: RequestRouter;
   /** Get user's language preference */
@@ -62,6 +72,8 @@ export interface SlackAdapterDeps {
   findActiveSession?: (chatId: string, spaceId: string | null) => Promise<SessionInfo | null>;
   /** Check if user has an active wizard */
   hasActiveWizard?: (chatId: string, spaceId: string | null) => Promise<boolean>;
+  /** Get available projects for wizard */
+  getProjects?: () => ProjectInfo[];
   /** Whether cloud features are enabled */
   cloudEnabled?: boolean;
 }
@@ -242,6 +254,24 @@ export class SlackAdapter extends BaseAdapter {
 
       // Handle based on intent type
       switch (intent.type) {
+        case "wizard": {
+          // Handle wizard actions
+          const messageCtx = this.buildMessageContext(channelId, userId, teamId, enterpriseId, event.thread_ts);
+          const wizardResult = await this.handleWizardIntent(
+            intent.action,
+            messageCtx,
+            intent.agent,
+            intent.projectId,
+            intent.path,
+            text,
+          );
+          if (wizardResult) {
+            await this.sendWizardResponse(messageCtx, wizardResult);
+            return { handled: true };
+          }
+          return { handled: false };
+        }
+
         case "session": {
           // Handle session message through orchestrator
           if (ctx.activeSession) {
@@ -257,7 +287,6 @@ export class SlackAdapter extends BaseAdapter {
           return { handled: false };
         }
 
-        case "wizard":
         case "command":
         case "cloud":
           // Not yet implemented - fall back to old handler
@@ -279,15 +308,50 @@ export class SlackAdapter extends BaseAdapter {
    * Returns whether the interaction was handled.
    */
   async handleInteraction(ctx: SlackInteractionContext): Promise<HandleEventResult> {
-    // Skip if no orchestrator
-    if (!this.deps.orchestrator) {
-      return { handled: false };
-    }
-
     try {
       // Parse the action
       const action = this.parseInteraction(ctx.actionId, ctx.value);
       if (!action) {
+        return { handled: false };
+      }
+
+      // Handle project selection for wizard
+      if (action.kind === "project_select") {
+        if (!this.deps.wizardOrchestrator) {
+          return { handled: false };
+        }
+
+        const language = ctx.language;
+        const wizardCtx: WizardContext = {
+          platform: "slack",
+          chatId: ctx.channelId,
+          userId: ctx.userId,
+          language,
+          workspaceId: ctx.workspaceId,
+          spaceId: ctx.channelId,
+        };
+
+        const result = await this.deps.wizardOrchestrator.handleProjectSelect(
+          wizardCtx,
+          action.projectId,
+        );
+
+        const messageCtx: SlackMessageContext = {
+          platform: "slack",
+          chatId: ctx.channelId,
+          userId: ctx.userId,
+          language,
+          workspaceId: ctx.workspaceId,
+          isDirect: true,
+          threadTs: ctx.threadTs,
+        };
+        await this.sendWizardResponse(messageCtx, result);
+
+        return { handled: true };
+      }
+
+      // Skip if no session orchestrator for session actions
+      if (!this.deps.orchestrator) {
         return { handled: false };
       }
 
@@ -384,8 +448,86 @@ export class SlackAdapter extends BaseAdapter {
       case "stop_sandbox":
         return { kind: "stop_sandbox", sessionId: action.sessionId };
       default:
-        // lang, commit_proposal not handled by SessionOrchestrator
+        // lang, commit_proposal, project_select not handled by SessionOrchestrator
         return null;
     }
+  }
+
+  // ==========================================================================
+  // Wizard Handling
+  // ==========================================================================
+
+  /**
+   * Handle wizard intent.
+   */
+  private async handleWizardIntent(
+    action: WizardAction,
+    messageCtx: SlackMessageContext,
+    agent?: import("../db.js").SessionAgent,
+    projectId?: string,
+    path?: string,
+    text?: string,
+  ): Promise<WizardResult | null> {
+    if (!this.deps.wizardOrchestrator) {
+      return null;
+    }
+
+    const language = this.deps.getUserLanguage
+      ? await this.deps.getUserLanguage(messageCtx.userId)
+      : "en" as UserLanguage;
+
+    const wizardCtx: WizardContext = {
+      platform: "slack",
+      chatId: messageCtx.chatId,
+      userId: messageCtx.userId,
+      language,
+      workspaceId: messageCtx.workspaceId ?? null,
+      spaceId: messageCtx.chatId,
+    };
+
+    switch (action) {
+      case "start":
+        return this.deps.wizardOrchestrator.start(wizardCtx, agent || "codex");
+      case "project_select":
+        if (projectId) {
+          return this.deps.wizardOrchestrator.handleProjectSelect(wizardCtx, projectId);
+        }
+        return null;
+      case "path_input":
+        if (path) {
+          return this.deps.wizardOrchestrator.handleCustomPath(wizardCtx, path);
+        }
+        return null;
+      case "continue":
+        return this.deps.wizardOrchestrator.continue(wizardCtx, text || "");
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * Send wizard response to Slack.
+   */
+  private async sendWizardResponse(
+    ctx: SlackMessageContext,
+    result: WizardResult,
+  ): Promise<void> {
+    if (!this.deps.slack) return;
+
+    // Build blocks if needed
+    let blocks: SlackActionsBlock[] | undefined;
+    if (result.showProjectKeyboard && this.deps.getProjects) {
+      const projects = this.deps.getProjects();
+      const projectOptions: ProjectOption[] = projects.map(p => ({ id: p.id, name: p.name }));
+      blocks = buildSlackProjectBlocks(projectOptions);
+    }
+
+    await this.deps.slack.postMessage({
+      channel: ctx.chatId,
+      text: result.message,
+      thread_ts: ctx.threadTs,
+      workspaceId: ctx.workspaceId,
+      blocks: blocks as unknown as import("@slack/web-api").Block[],
+    });
   }
 }
