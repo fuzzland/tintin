@@ -200,12 +200,12 @@ export class TelegramAdapter extends BaseAdapter {
     }
 
     // Handle messages
-    const message = update.message || update.edited_message;
+    const message = update.message || update.edited_message || update.channel_post || update.edited_channel_post;
     if (message) {
       return this.handleMessageUpdate(message);
     }
 
-    // Not handled - let old handler deal with channel posts, etc.
+    // Not handled - let old handler deal with any other update types
     return { handled: false };
   }
 
@@ -220,6 +220,14 @@ export class TelegramAdapter extends BaseAdapter {
 
     const text = message.text?.trim() || "";
     if (!text) {
+      return { handled: false };
+    }
+
+    // For channel posts, there may be no `from` user
+    const chat = message.chat;
+    if (chat?.type === "channel") {
+      // Channel posts are handled differently - they don't have a user context
+      // For now, let the old handler deal with channel posts
       return { handled: false };
     }
 
