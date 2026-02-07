@@ -75,6 +75,12 @@ export interface WizardResult {
   spaceResult?: PrepareSpaceResult;
 }
 
+export interface WizardModalSubmission {
+  projectId: string;
+  customPath: string | null;
+  prompt: string;
+}
+
 /**
  * Path validation result.
  */
@@ -388,6 +394,74 @@ export class WizardOrchestrator {
       message: t("session.starting", language),
       sessionId: result.sessionId,
       spaceResult,
+    };
+  }
+
+  /**
+   * Handle Slack modal submission and start a session directly.
+   */
+  async handleModalSubmission(
+    ctx: WizardContext,
+    submission: WizardModalSubmission,
+  ): Promise<WizardResult> {
+    const { language } = ctx;
+
+    const canStart = await this.deps.canStartSession(ctx);
+    if (!canStart.allowed) {
+      return {
+        state: "error",
+        message: canStart.error || t("error.generic", language, { message: "Cannot start session" }),
+        error: canStart.error,
+      };
+    }
+
+    const project = this.deps.getProject(submission.projectId);
+    if (!project) {
+      return {
+        state: "error",
+        message: t("wizard.expired", language),
+        error: "Project not found",
+      };
+    }
+
+    let projectPath = project.path;
+    if (project.allowCustomPath) {
+      const customPath = submission.customPath?.trim() || "";
+      if (!customPath) {
+        return {
+          state: "error",
+          message: t("wizard.path_invalid", language),
+          error: "Path is required",
+        };
+      }
+      const validation = await this.deps.validatePath(project, customPath);
+      if (!validation.valid) {
+        return {
+          state: "error",
+          message: validation.error || t("wizard.path_invalid", language),
+          error: validation.error,
+        };
+      }
+      if (validation.resolvedPath) {
+        projectPath = validation.resolvedPath;
+      }
+    }
+
+    const result = await this.deps.startSession(ctx, "codex", projectPath, submission.prompt);
+
+    await this.deps.clearWizardState(ctx.platform, ctx.chatId, ctx.userId);
+    if (!result.success) {
+      return {
+        state: "error",
+        message: result.error || t("session.error", language, { error: "Failed to start" }),
+        error: result.error,
+      };
+    }
+
+    return {
+      state: "completed",
+      message: t("session.starting", language),
+      sessionId: result.sessionId,
     };
   }
 

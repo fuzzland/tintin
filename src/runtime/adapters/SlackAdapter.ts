@@ -249,6 +249,53 @@ export class SlackAdapter extends BaseAdapter {
     };
   }
 
+  private parseWizardModalSubmission(payload: unknown): {
+    projectId: string;
+    channelId: string;
+    userId: string;
+    teamId: string | null;
+    prompt: string;
+    customPath: string | null;
+  } | null {
+    const p = payload as {
+      type?: string;
+      view?: {
+        callback_id?: string;
+        private_metadata?: string;
+        state?: { values?: Record<string, any> };
+      };
+    };
+
+    if (p.type !== "view_submission" || p.view?.callback_id !== "codex_wizard") {
+      return null;
+    }
+
+    const metaRaw = p.view?.private_metadata;
+    if (!metaRaw) return null;
+    let meta: { projectId?: string; channelId?: string; userId?: string; teamId?: string | null } | null = null;
+    try {
+      meta = JSON.parse(metaRaw) as { projectId?: string; channelId?: string; userId?: string; teamId?: string | null };
+    } catch {
+      return null;
+    }
+    if (!meta?.projectId || !meta.channelId || !meta.userId) return null;
+
+    const values = p.view?.state?.values as Record<string, any> | undefined;
+    const prompt = values?.prompt?.input?.value as string | undefined;
+    if (!prompt) return null;
+
+    const customPath = (values?.custom_path?.input?.value as string | undefined) ?? null;
+
+    return {
+      projectId: meta.projectId,
+      channelId: meta.channelId,
+      userId: meta.userId,
+      teamId: meta.teamId ?? null,
+      prompt,
+      customPath,
+    };
+  }
+
   /**
    * Handle a Slack interaction payload (block_actions).
    * Returns whether the interaction was handled by the new adapter.
@@ -258,6 +305,42 @@ export class SlackAdapter extends BaseAdapter {
     // Skip if no slack client
     if (!this.deps.slack) {
       return { handled: false, error: "No slack client" };
+    }
+
+    const modal = this.parseWizardModalSubmission(payload);
+    if (modal && this.deps.wizardOrchestrator) {
+      try {
+        const language = this.deps.getUserLanguage
+          ? await this.deps.getUserLanguage(modal.userId)
+          : ("en" as UserLanguage);
+        const wizardCtx: WizardContext = {
+          platform: "slack",
+          chatId: modal.channelId,
+          userId: modal.userId,
+          language,
+          workspaceId: modal.teamId,
+          spaceId: modal.channelId,
+        };
+        const result = await this.deps.wizardOrchestrator.handleModalSubmission(wizardCtx, {
+          projectId: modal.projectId,
+          customPath: modal.customPath,
+          prompt: modal.prompt,
+        });
+        const messageCtx: SlackMessageContext = {
+          platform: "slack",
+          chatId: modal.channelId,
+          userId: modal.userId,
+          language,
+          workspaceId: modal.teamId,
+          isDirect: true,
+        };
+        await this.sendWizardResponse(messageCtx, result);
+        return { handled: true };
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        this.deps.logger.error(`SlackAdapter handleModalSubmission error: ${msg}`);
+        return { handled: false, error: msg };
+      }
     }
 
     // Parse the payload
