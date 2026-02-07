@@ -561,6 +561,8 @@ export async function createBotService(deps: BotServiceDeps) {
     notifyOAuthComplete,
     notifyNotionConnected,
     notifyChatgptConnected,
+    telegramAdapter: telegramAdapter ?? undefined,
+    slackAdapter: slackAdapter ?? undefined,
   });
 
   // WebSocket upgrade handler

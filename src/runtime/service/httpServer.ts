@@ -444,7 +444,7 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
               }
             }
             if (!handled) {
-              await deps.controller.handleTelegramUpdate(body as any);
+              logger.debug(`[tg] update_id=${updateId} unhandled by adapter`);
             }
           } catch (e) {
             logger.error("Telegram update handler error", e);
@@ -494,7 +494,7 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
               }
             }
             if (!handled) {
-              await deps.controller.handleSlackEvent(body);
+              logger.debug(`[slack] event type=${String(evType)} unhandled by adapter`);
             }
           } catch (e) {
             logger.error("Slack event handler error", e);
@@ -538,7 +538,7 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
               }
             }
             if (!handled) {
-              await deps.controller.handleSlackInteraction(payload);
+              logger.debug(`[slack] interaction type=${String(payload?.type ?? "?")} unhandled by adapter`);
             }
           } catch (e) {
             logger.error("Slack interaction handler error", e);
