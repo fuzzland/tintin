@@ -210,4 +210,133 @@ describe("TelegramAdapter", () => {
       assert.strictEqual(args[1], "Unknown action");
     });
   });
+
+  describe("handleUpdate", () => {
+    it("should return not handled when no telegram client", async () => {
+      const deps: TelegramAdapterDeps = {
+        telegram: null,
+        logger: mockLogger,
+      };
+      const nullAdapter = new TelegramAdapter(deps);
+
+      const result = await nullAdapter.handleUpdate({ update_id: 1 });
+
+      assert.strictEqual(result.handled, false);
+      assert.strictEqual(result.error, "No telegram client");
+    });
+
+    it("should return not handled when no router", async () => {
+      const deps: TelegramAdapterDeps = {
+        telegram: mockTelegram as any,
+        logger: mockLogger,
+        // No router
+      };
+      const adapterNoRouter = new TelegramAdapter(deps);
+
+      const result = await adapterNoRouter.handleUpdate({
+        update_id: 1,
+        message: {
+          message_id: 1,
+          date: Date.now(),
+          chat: { id: 123, type: "private" },
+          from: { id: 456, first_name: "Test" },
+          text: "Hello",
+        },
+      });
+
+      assert.strictEqual(result.handled, false);
+    });
+
+    it("should return not handled for empty message", async () => {
+      const result = await adapter.handleUpdate({
+        update_id: 1,
+        message: {
+          message_id: 1,
+          date: Date.now(),
+          chat: { id: 123, type: "private" },
+          from: { id: 456, first_name: "Test" },
+          text: "",
+        },
+      });
+
+      assert.strictEqual(result.handled, false);
+    });
+
+    it("should return not handled for unknown intent without session", async () => {
+      const { createRequestRouter } = await import("../../src/runtime/adapters/RequestRouter.js");
+      const router = createRequestRouter({ logger: mockLogger });
+
+      const deps: TelegramAdapterDeps = {
+        telegram: mockTelegram as any,
+        logger: mockLogger,
+        router,
+        findActiveSession: async () => null,
+        hasActiveWizard: async () => false,
+        cloudEnabled: false,
+      };
+      const adapterWithRouter = new TelegramAdapter(deps);
+
+      const result = await adapterWithRouter.handleUpdate({
+        update_id: 1,
+        message: {
+          message_id: 1,
+          date: Date.now(),
+          chat: { id: 123, type: "private" },
+          from: { id: 456, first_name: "Test" },
+          text: "random text",
+        },
+      });
+
+      assert.strictEqual(result.handled, false);
+    });
+
+    it("should return not handled for wizard intent (not yet implemented)", async () => {
+      const { createRequestRouter } = await import("../../src/runtime/adapters/RequestRouter.js");
+      const router = createRequestRouter({ logger: mockLogger });
+
+      const deps: TelegramAdapterDeps = {
+        telegram: mockTelegram as any,
+        logger: mockLogger,
+        router,
+        findActiveSession: async () => null,
+        hasActiveWizard: async () => false,
+        cloudEnabled: false,
+      };
+      const adapterWithRouter = new TelegramAdapter(deps);
+
+      const result = await adapterWithRouter.handleUpdate({
+        update_id: 1,
+        message: {
+          message_id: 1,
+          date: Date.now(),
+          chat: { id: 123, type: "private" },
+          from: { id: 456, first_name: "Test" },
+          text: "/start",
+        },
+      });
+
+      // Wizard not implemented yet, should fall back
+      assert.strictEqual(result.handled, false);
+    });
+
+    it("should return not handled for callback without orchestrator", async () => {
+      const deps: TelegramAdapterDeps = {
+        telegram: mockTelegram as any,
+        logger: mockLogger,
+        // No orchestrator
+      };
+      const adapterNoOrch = new TelegramAdapter(deps);
+
+      const result = await adapterNoOrch.handleUpdate({
+        update_id: 1,
+        callback_query: {
+          id: "callback-123",
+          from: { id: 456, first_name: "Test" },
+          data: "kill:session-123",
+        },
+      });
+
+      assert.strictEqual(result.handled, false);
+    });
+  });
 });

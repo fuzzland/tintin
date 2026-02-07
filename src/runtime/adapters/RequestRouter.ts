@@ -1,0 +1,452 @@
+/**
+ * RequestRouter - Intent detection and request routing.
+ *
+ * Routes incoming messages to the appropriate orchestrator based on content analysis.
+ * This is the central decision point for all platform adapters.
+ */
+
+import type { SessionAgent, SessionStatus } from "../db.js";
+import type { SessionPlatform, SessionInfo } from "../orchestrator/types.js";
+import type { CloudCommand, SessionListIntent, SettingsCommand } from "../shared/types.js";
+import type { Logger } from "../log.js";
+
+// ============================================================================
+// Intent Types
+// ============================================================================
+
+/**
+ * Command types that can be parsed from messages.
+ */
+export type CommandIntent =
+  | { kind: "sessions"; intent: SessionListIntent }
+  | { kind: "settings"; command: SettingsCommand }
+  | { kind: "lang"; target?: string }
+  | { kind: "help" }
+  | { kind: "kill"; sessionId?: string }
+  | { kind: "version" };
+
+/**
+ * Wizard action types.
+ */
+export type WizardAction = "start" | "continue" | "project_select" | "path_input";
+
+/**
+ * Request intent - the detected purpose of an incoming message.
+ */
+export type RequestIntent =
+  | { type: "wizard"; action: WizardAction; agent?: SessionAgent; projectId?: string; path?: string }
+  | { type: "command"; command: CommandIntent }
+  | { type: "cloud"; command: CloudCommand }
+  | { type: "session"; prompt: string }
+  | { type: "unknown" };
+
+// ============================================================================
+// Routing Context
+// ============================================================================
+
+/**
+ * Context needed to route a request.
+ */
+export interface RoutingContext {
+  platform: SessionPlatform;
+  chatId: string;
+  spaceId: string | null;
+  userId: string;
+  /** Whether the user has an active wizard session */
+  hasActiveWizard: boolean;
+  /** The active session if one exists */
+  activeSession: SessionInfo | null;
+  /** Whether cloud features are enabled */
+  cloudEnabled: boolean;
+}
+
+// ============================================================================
+// Router Dependencies
+// ============================================================================
+
+export interface RouterDeps {
+  logger: Logger;
+  /** Get active wizard state for a chat */
+  getWizardState?: (chatId: string, spaceId: string | null) => Promise<WizardAction | null>;
+  /** Find active session for a chat */
+  findActiveSession?: (platform: SessionPlatform, chatId: string, spaceId: string | null) => Promise<SessionInfo | null>;
+}
+
+// ============================================================================
+// Command Patterns
+// ============================================================================
+
+/** Commands that start a new wizard session */
+const WIZARD_START_COMMANDS = new Set(["/start", "/codex", "/cc", "/claude"]);
+
+/** Commands that need special handling */
+const COMMAND_PATTERNS: Array<{ pattern: RegExp; kind: CommandIntent["kind"] }> = [
+  { pattern: /^\/sessions?(?:\s|$)/i, kind: "sessions" },
+  { pattern: /^\/settings?(?:\s|$)/i, kind: "settings" },
+  { pattern: /^\/lang(?:\s|$)/i, kind: "lang" },
+  { pattern: /^\/help(?:\s|$)/i, kind: "help" },
+  { pattern: /^\/kill(?:\s|$)/i, kind: "kill" },
+  { pattern: /^\/stop(?:\s|$)/i, kind: "kill" },
+  { pattern: /^\/version(?:\s|$)/i, kind: "version" },
+];
+
+/** Cloud command patterns */
+const CLOUD_COMMAND_PATTERNS: Array<{ pattern: RegExp; parser: (text: string) => CloudCommand | null }> = [
+  {
+    pattern: /^\/run(?:\s|$)/i,
+    parser: (text) => {
+      const prompt = text.replace(/^\/run\s*/i, "").trim();
+      return { kind: "action_run", prompt, repoIds: [] };
+    },
+  },
+  {
+    pattern: /^\/repos?(?:\s|$)/i,
+    parser: (text) => {
+      const args = text.replace(/^\/repos?\s*/i, "").trim();
+      if (!args) return { kind: "repos" };
+      const selectMatch = args.match(/^(\d+)$/);
+      if (selectMatch) return { kind: "repo_select", target: selectMatch[1]! };
+      return { kind: "repos", search: args };
+    },
+  },
+  {
+    pattern: /^\/connect(?:\s|$)/i,
+    parser: (text) => {
+      const args = text.replace(/^\/connect\s*/i, "").trim();
+      const provider = args.split(/\s+/)[0] || "github";
+      return { kind: "connect", provider };
+    },
+  },
+  {
+    pattern: /^\/disconnect(?:\s|$)/i,
+    parser: (text) => {
+      const args = text.replace(/^\/disconnect\s*/i, "").trim();
+      const provider = args.split(/\s+/)[0] || "github";
+      return { kind: "disconnect", provider };
+    },
+  },
+  {
+    pattern: /^\/connections?(?:\s|$)/i,
+    parser: () => ({ kind: "connections" }),
+  },
+  {
+    pattern: /^\/status(?:\s|$)/i,
+    parser: (text) => {
+      const runId = text.replace(/^\/status\s*/i, "").trim();
+      return runId ? { kind: "action_status", runId } : { kind: "setup_status" };
+    },
+  },
+  {
+    pattern: /^\/pull(?:\s|$)/i,
+    parser: (text) => {
+      const runId = text.replace(/^\/pull\s*/i, "").trim();
+      return { kind: "action_pull", runId };
+    },
+  },
+  {
+    pattern: /^\/secrets?(?:\s|$)/i,
+    parser: (text) => {
+      const args = text.replace(/^\/secrets?\s*/i, "").trim();
+      if (!args) return { kind: "secrets_list" };
+      const setMatch = args.match(/^set\s+(\w+)\s*=\s*(.*)$/i);
+      if (setMatch) return { kind: "secrets_set", name: setMatch[1]!, value: setMatch[2] || null };
+      const delMatch = args.match(/^(?:del|delete|rm|remove)\s+(\w+)$/i);
+      if (delMatch) return { kind: "secrets_delete", name: delMatch[1]! };
+      return { kind: "secrets_list" };
+    },
+  },
+  {
+    pattern: /^\/runs?(?:\s|$)/i,
+    parser: (text) => {
+      const args = text.replace(/^\/runs?\s*/i, "").trim();
+      const limit = parseInt(args, 10);
+      return { kind: "runs", limit: Number.isFinite(limit) ? limit : undefined };
+    },
+  },
+  {
+    pattern: /^\/snapshots?(?:\s|$)/i,
+    parser: (text) => {
+      const args = text.replace(/^\/snapshots?\s*/i, "").trim();
+      if (!args) return { kind: "snapshot_list" };
+      if (args === "save") return { kind: "snapshot_save" };
+      if (args === "clear") return { kind: "snapshot_clear" };
+      const searchMatch = args.match(/^search\s+(.+)$/i);
+      if (searchMatch) return { kind: "snapshot_search", query: searchMatch[1]! };
+      const restoreMatch = args.match(/^restore\s+(.+)$/i);
+      if (restoreMatch) return { kind: "snapshot_restore", target: restoreMatch[1]! };
+      return { kind: "snapshot_list", limit: parseInt(args, 10) || undefined };
+    },
+  },
+  {
+    pattern: /^\/lift(?:\s|$)/i,
+    parser: () => ({ kind: "setup_lift" }),
+  },
+  {
+    pattern: /^\/token(?:\s|$)/i,
+    parser: () => ({ kind: "tinc_token" }),
+  },
+];
+
+// ============================================================================
+// RequestRouter Implementation
+// ============================================================================
+
+export class RequestRouter {
+  constructor(private readonly deps: RouterDeps) {}
+
+  /**
+   * Detect the intent of an incoming message.
+   */
+  async detectIntent(
+    text: string,
+    context: RoutingContext,
+  ): Promise<RequestIntent> {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return { type: "unknown" };
+    }
+
+    // 1. Check for wizard start commands
+    const wizardIntent = this.detectWizardIntent(trimmed, context);
+    if (wizardIntent) {
+      return wizardIntent;
+    }
+
+    // 2. Check for cloud commands (if enabled)
+    if (context.cloudEnabled) {
+      const cloudIntent = this.detectCloudIntent(trimmed);
+      if (cloudIntent) {
+        return cloudIntent;
+      }
+    }
+
+    // 3. Check for local commands
+    const commandIntent = this.detectCommandIntent(trimmed);
+    if (commandIntent) {
+      return commandIntent;
+    }
+
+    // 4. If in wizard mode, treat as wizard continuation
+    if (context.hasActiveWizard) {
+      return { type: "wizard", action: "continue" };
+    }
+
+    // 5. If has active session, treat as session message
+    if (context.activeSession) {
+      return { type: "session", prompt: trimmed };
+    }
+
+    // 6. Unknown intent - could be starting a new conversation
+    return { type: "unknown" };
+  }
+
+  /**
+   * Detect wizard-related intents.
+   */
+  private detectWizardIntent(
+    text: string,
+    context: RoutingContext,
+  ): RequestIntent | null {
+    const firstWord = text.split(/\s+/)[0]?.toLowerCase() || "";
+
+    // Check for wizard start commands
+    if (WIZARD_START_COMMANDS.has(firstWord)) {
+      const agent = this.extractAgentFromCommand(firstWord);
+      return { type: "wizard", action: "start", agent };
+    }
+
+    // If already in wizard, check for project selection or path input
+    if (context.hasActiveWizard) {
+      // Project selection (numeric or id-based)
+      const projectMatch = text.match(/^(?:project[:\s]*)?(\d+|[a-z0-9_-]+)$/i);
+      if (projectMatch && !text.startsWith("/")) {
+        return { type: "wizard", action: "project_select", projectId: projectMatch[1] };
+      }
+
+      // Path input (looks like a file path)
+      if (text.startsWith("/") && !this.looksLikeCommand(text)) {
+        return { type: "wizard", action: "path_input", path: text };
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Detect cloud command intents.
+   */
+  private detectCloudIntent(text: string): RequestIntent | null {
+    for (const { pattern, parser } of CLOUD_COMMAND_PATTERNS) {
+      if (pattern.test(text)) {
+        const command = parser(text);
+        if (command) {
+          return { type: "cloud", command };
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Detect local command intents.
+   */
+  private detectCommandIntent(text: string): RequestIntent | null {
+    for (const { pattern, kind } of COMMAND_PATTERNS) {
+      if (pattern.test(text)) {
+        const command = this.parseCommand(text, kind);
+        if (command) {
+          return { type: "command", command };
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Parse a command based on its kind.
+   */
+  private parseCommand(text: string, kind: CommandIntent["kind"]): CommandIntent | null {
+    switch (kind) {
+      case "sessions": {
+        const args = text.replace(/^\/sessions?\s*/i, "").trim();
+        return { kind: "sessions", intent: this.parseSessionsArgs(args) };
+      }
+      case "settings": {
+        const args = text.replace(/^\/settings?\s*/i, "").trim();
+        return { kind: "settings", command: this.parseSettingsArgs(args) };
+      }
+      case "lang": {
+        const target = text.replace(/^\/lang\s*/i, "").trim() || undefined;
+        return { kind: "lang", target };
+      }
+      case "help":
+        return { kind: "help" };
+      case "kill": {
+        const sessionId = text.replace(/^\/(?:kill|stop)\s*/i, "").trim() || undefined;
+        return { kind: "kill", sessionId };
+      }
+      case "version":
+        return { kind: "version" };
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * Parse /sessions command arguments.
+   */
+  private parseSessionsArgs(args: string): SessionListIntent {
+    const tokens = args.split(/\s+/).filter(Boolean);
+    let page = 1;
+    const statuses: SessionStatus[] = [];
+
+    for (const token of tokens) {
+      const pageMatch = token.match(/^(?:page|p)=?(\d+)$/i);
+      if (pageMatch) {
+        page = parseInt(pageMatch[1]!, 10);
+        continue;
+      }
+      if (/^\d+$/.test(token)) {
+        page = parseInt(token, 10);
+        continue;
+      }
+      // Treat as status filter
+      const status = this.parseSessionStatus(token);
+      if (status) {
+        statuses.push(status);
+      }
+    }
+
+    return { page, statuses: statuses.length > 0 ? statuses : undefined };
+  }
+
+  /**
+   * Parse a session status string.
+   */
+  private parseSessionStatus(token: string): SessionStatus | null {
+    const normalized = token.toLowerCase();
+    const statusMap: Record<string, SessionStatus> = {
+      running: "running",
+      run: "running",
+      active: "running",
+      finished: "finished",
+      done: "finished",
+      complete: "finished",
+      completed: "finished",
+      error: "error",
+      err: "error",
+      failed: "error",
+      killed: "killed",
+      kill: "killed",
+      stopped: "killed",
+      wizard: "wizard",
+      starting: "starting",
+    };
+    return statusMap[normalized] || null;
+  }
+
+  /**
+   * Parse /settings command arguments.
+   */
+  private parseSettingsArgs(args: string): SettingsCommand {
+    if (!args) {
+      return { kind: "list" };
+    }
+    const setMatch = args.match(/^set\s+(\S+)\s+(.+)$/i);
+    if (setMatch) {
+      return { kind: "set", target: setMatch[1]!, value: setMatch[2]! };
+    }
+    const unsetMatch = args.match(/^(?:unset|del|delete|rm)\s+(\S+)$/i);
+    if (unsetMatch) {
+      return { kind: "unset", target: unsetMatch[1]! };
+    }
+    return { kind: "list" };
+  }
+
+  /**
+   * Extract agent type from wizard start command.
+   */
+  private extractAgentFromCommand(command: string): SessionAgent | undefined {
+    switch (command) {
+      case "/codex":
+        return "codex";
+      case "/cc":
+      case "/claude":
+        return "claude_code";
+      default:
+        return undefined;
+    }
+  }
+
+  /**
+   * Check if text looks like a command (known command pattern).
+   * Returns true for known commands, false for file paths.
+   */
+  private looksLikeCommand(text: string): boolean {
+    // Must start with /letter
+    if (!/^\/[a-z]/i.test(text)) {
+      return false;
+    }
+    // Check against all known command patterns
+    const firstWord = text.split(/\s+/)[0]?.toLowerCase() || "";
+    // Known single-word commands
+    const knownCommands = new Set([
+      "/start", "/codex", "/cc", "/claude",
+      "/sessions", "/session", "/settings", "/setting",
+      "/lang", "/help", "/kill", "/stop", "/version",
+      "/run", "/repos", "/repo", "/connect", "/disconnect",
+      "/connections", "/connection", "/status", "/pull",
+      "/secrets", "/secret", "/runs", "/snapshots", "/snapshot",
+      "/lift", "/token",
+    ]);
+    return knownCommands.has(firstWord);
+  }
+}
+
+// ============================================================================
+// Factory Function
+// ============================================================================
+
+export function createRequestRouter(deps: RouterDeps): RequestRouter {
+  return new RequestRouter(deps);
+}

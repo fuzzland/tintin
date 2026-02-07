@@ -7,11 +7,12 @@ import type { Db } from "../db.js";
 import type { Logger } from "../log.js";
 import type { BotController } from "../controller2.js";
 import type { CloudManager } from "../cloud/manager.js";
-import type { TelegramClient } from "../platform/telegram.js";
+import type { TelegramClient, TelegramUpdate } from "../platform/telegram.js";
 import type { SlackClient } from "../platform/slack.js";
 import type { InstallProvider } from "@slack/oauth";
 import type { WebSocketManager } from "../websocket/manager.js";
 import type { TaskQueue } from "../util.js";
+import type { TelegramAdapter, SlackAdapter, SlackEventBody } from "../adapters/index.js";
 import { t, type UserLanguage } from "../../locales/index.js";
 import { contentTypeForPath, readHeader, readRequestBody, sendJson, sendText } from "./httpUtils.js";
 import { createProxyToken, handleProxyRequest } from "../cloud/proxy.js";
@@ -94,6 +95,10 @@ export type CreateHttpServerDeps = {
   notifyOAuthComplete: (metadataJson: string | null, provider: string, identityId: string) => Promise<void>;
   notifyNotionConnected: (metadataJson: string | null) => Promise<void>;
   notifyChatgptConnected: (metadataJson: string | null) => Promise<void>;
+  /** New adapter for Telegram (Phase 1) - optional for backward compatibility */
+  telegramAdapter?: TelegramAdapter;
+  /** New adapter for Slack (Phase 1) - optional for backward compatibility */
+  slackAdapter?: SlackAdapter;
 };
 
 export function createHttpServer(deps: CreateHttpServerDeps) {
@@ -429,7 +434,18 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
         logger.debug(`[tg] webhook update_id=${updateId} keys=${keys}`);
         deps.queue.enqueue(async () => {
           try {
-            await deps.controller.handleTelegramUpdate(body as any);
+            // Phase 1: Try new adapter first, fall back to old controller
+            let handled = false;
+            if (deps.telegramAdapter) {
+              const result = await deps.telegramAdapter.handleUpdate(body as TelegramUpdate);
+              handled = result.handled;
+              if (result.handled) {
+                logger.debug(`[tg] update_id=${updateId} handled by new adapter`);
+              }
+            }
+            if (!handled) {
+              await deps.controller.handleTelegramUpdate(body as any);
+            }
           } catch (e) {
             logger.error("Telegram update handler error", e);
           }
@@ -468,7 +484,18 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
         logger.debug(`[slack] events type=${String(evType)}`);
         deps.queue.enqueue(async () => {
           try {
-            await deps.controller.handleSlackEvent(body);
+            // Phase 1: Try new adapter first, fall back to old controller
+            let handled = false;
+            if (deps.slackAdapter) {
+              const result = await deps.slackAdapter.handleEvent(body as SlackEventBody);
+              handled = result.handled;
+              if (result.handled) {
+                logger.debug(`[slack] event type=${String(evType)} handled by new adapter`);
+              }
+            }
+            if (!handled) {
+              await deps.controller.handleSlackEvent(body);
+            }
           } catch (e) {
             logger.error("Slack event handler error", e);
           }

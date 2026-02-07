@@ -30,6 +30,26 @@ export type {
 export { BaseAdapter } from "./BaseAdapter.js";
 
 // Platform adapters
-export { TelegramAdapter, type TelegramAdapterDeps } from "./TelegramAdapter.js";
-export { SlackAdapter, type SlackAdapterDeps } from "./SlackAdapter.js";
+export {
+  TelegramAdapter,
+  type TelegramAdapterDeps,
+  type HandleUpdateResult,
+} from "./TelegramAdapter.js";
+export {
+  SlackAdapter,
+  type SlackAdapterDeps,
+  type HandleEventResult,
+  type SlackEventBody,
+} from "./SlackAdapter.js";
 export { WebSocketAdapter, type WebSocketAdapterDeps } from "./WebSocketAdapter.js";
+
+// Request routing
+export {
+  RequestRouter,
+  createRequestRouter,
+  type RouterDeps,
+  type RoutingContext,
+  type RequestIntent,
+  type CommandIntent,
+  type WizardAction,
+} from "./RequestRouter.js";

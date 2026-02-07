@@ -188,4 +188,172 @@ describe("SlackAdapter", () => {
       assert.strictEqual(result.messageId, "1234567890.123456");
     });
   });
+
+  describe("handleEvent", () => {
+    it("should return not handled when no slack client", async () => {
+      const deps: SlackAdapterDeps = {
+        slack: null,
+        logger: mockLogger,
+      };
+      const nullAdapter = new SlackAdapter(deps);
+
+      const result = await nullAdapter.handleEvent({ type: "event_callback", event: {} });
+
+      assert.strictEqual(result.handled, false);
+      assert.strictEqual(result.error, "No slack client");
+    });
+
+    it("should return not handled for non-event_callback type", async () => {
+      const result = await adapter.handleEvent({ type: "url_verification" });
+
+      assert.strictEqual(result.handled, false);
+    });
+
+    it("should return not handled when no router", async () => {
+      const deps: SlackAdapterDeps = {
+        slack: mockSlack as any,
+        logger: mockLogger,
+        // No router
+      };
+      const adapterNoRouter = new SlackAdapter(deps);
+
+      const result = await adapterNoRouter.handleEvent({
+        type: "event_callback",
+        event: {
+          type: "message",
+          channel: "D123456",
+          user: "U123456",
+          text: "Hello",
+        },
+        team_id: "T123456",
+      });
+
+      assert.strictEqual(result.handled, false);
+    });
+
+    it("should return not handled for bot messages", async () => {
+      const result = await adapter.handleEvent({
+        type: "event_callback",
+        event: {
+          type: "message",
+          channel: "D123456",
+          user: "U123456",
+          text: "Bot message",
+          bot_id: "B123456",
+        },
+        team_id: "T123456",
+      });
+
+      assert.strictEqual(result.handled, false);
+    });
+
+    it("should return not handled for non-DM channels", async () => {
+      const { createRequestRouter } = await import("../../src/runtime/adapters/RequestRouter.js");
+      const router = createRequestRouter({ logger: mockLogger });
+
+      const deps: SlackAdapterDeps = {
+        slack: mockSlack as any,
+        logger: mockLogger,
+        router,
+        findActiveSession: async () => null,
+        hasActiveWizard: async () => false,
+        cloudEnabled: false,
+      };
+      const adapterWithRouter = new SlackAdapter(deps);
+
+      const result = await adapterWithRouter.handleEvent({
+        type: "event_callback",
+        event: {
+          type: "message",
+          channel: "C123456", // Channel, not DM
+          user: "U123456",
+          text: "Hello",
+        },
+        team_id: "T123456",
+      });
+
+      assert.strictEqual(result.handled, false);
+    });
+
+    it("should return not handled for unknown intent without session", async () => {
+      const { createRequestRouter } = await import("../../src/runtime/adapters/RequestRouter.js");
+      const router = createRequestRouter({ logger: mockLogger });
+
+      const deps: SlackAdapterDeps = {
+        slack: mockSlack as any,
+        logger: mockLogger,
+        router,
+        findActiveSession: async () => null,
+        hasActiveWizard: async () => false,
+        cloudEnabled: false,
+      };
+      const adapterWithRouter = new SlackAdapter(deps);
+
+      const result = await adapterWithRouter.handleEvent({
+        type: "event_callback",
+        event: {
+          type: "message",
+          channel: "D123456",
+          user: "U123456",
+          text: "random text",
+        },
+        team_id: "T123456",
+      });
+
+      assert.strictEqual(result.handled, false);
+    });
+
+    it("should return not handled for wizard intent (not yet implemented)", async () => {
+      const { createRequestRouter } = await import("../../src/runtime/adapters/RequestRouter.js");
+      const router = createRequestRouter({ logger: mockLogger });
+
+      const deps: SlackAdapterDeps = {
+        slack: mockSlack as any,
+        logger: mockLogger,
+        router,
+        findActiveSession: async () => null,
+        hasActiveWizard: async () => false,
+        cloudEnabled: false,
+      };
+      const adapterWithRouter = new SlackAdapter(deps);
+
+      const result = await adapterWithRouter.handleEvent({
+        type: "event_callback",
+        event: {
+          type: "message",
+          channel: "D123456",
+          user: "U123456",
+          text: "/start",
+        },
+        team_id: "T123456",
+      });
+
+      // Wizard not implemented yet, should fall back
+      assert.strictEqual(result.handled, false);
+    });
+  });
+
+  describe("handleInteraction", () => {
+    it("should return not handled when no orchestrator", async () => {
+      const deps: SlackAdapterDeps = {
+        slack: mockSlack as any,
+        logger: mockLogger,
+        // No orchestrator
+      };
+      const adapterNoOrch = new SlackAdapter(deps);
+      const ctx = createInteractionContext();
+
+      const result = await adapterNoOrch.handleInteraction(ctx);
+
+      assert.strictEqual(result.handled, false);
+    });
+
+    it("should return not handled for unknown action", async () => {
+      const ctx = createInteractionContext({ actionId: "unknown_action", value: "test" });
+
+      const result = await adapter.handleInteraction(ctx);
+
+      assert.strictEqual(result.handled, false);
+    });
+  });
 });

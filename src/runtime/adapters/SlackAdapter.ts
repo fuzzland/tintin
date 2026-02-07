@@ -5,10 +5,13 @@
  * and delegates to SessionOrchestrator.
  */
 
+import type { UserLanguage } from "../../locales/index.js";
 import type { Logger } from "../log.js";
 import type { SlackClient } from "../platform/slack.js";
-import type { ChatRequest, ChatResult, ActionContext } from "../orchestrator/index.js";
+import type { ChatRequest, ChatResult, ActionContext, SessionInfo } from "../orchestrator/index.js";
+import type { SessionOrchestrator } from "../orchestrator/SessionOrchestrator.js";
 import { parseSlackAction } from "../shared/ActionParser.js";
+import { RequestRouter, type RoutingContext } from "./RequestRouter.js";
 import { BaseAdapter } from "./BaseAdapter.js";
 import type {
   SlackMessageContext,
@@ -16,9 +19,51 @@ import type {
   ResponseStrategy,
 } from "./types.js";
 
+/**
+ * Result of handling a Slack event.
+ */
+export interface HandleEventResult {
+  /** Whether the event was handled by the new adapter */
+  handled: boolean;
+  /** Error message if handling failed */
+  error?: string;
+}
+
+/**
+ * Slack event body structure (simplified).
+ */
+export interface SlackEventBody {
+  type?: string;
+  event?: {
+    type?: string;
+    subtype?: string;
+    channel?: string;
+    user?: string;
+    text?: string;
+    thread_ts?: string;
+    ts?: string;
+    bot_id?: string;
+    bot_profile?: unknown;
+  };
+  team_id?: string;
+  enterprise_id?: string;
+}
+
 export interface SlackAdapterDeps {
   slack: SlackClient | null;
   logger: Logger;
+  /** Session orchestrator for handling messages */
+  orchestrator?: SessionOrchestrator;
+  /** Request router for intent detection */
+  router?: RequestRouter;
+  /** Get user's language preference */
+  getUserLanguage?: (userId: string) => Promise<UserLanguage>;
+  /** Find active session for a chat/space */
+  findActiveSession?: (chatId: string, spaceId: string | null) => Promise<SessionInfo | null>;
+  /** Check if user has an active wizard */
+  hasActiveWizard?: (chatId: string, spaceId: string | null) => Promise<boolean>;
+  /** Whether cloud features are enabled */
+  cloudEnabled?: boolean;
 }
 
 export class SlackAdapter extends BaseAdapter {
@@ -123,5 +168,224 @@ export class SlackAdapter extends BaseAdapter {
       thread_ts: ctx.threadTs,
       workspaceId: ctx.workspaceId,
     });
+  }
+
+  // ==========================================================================
+  // Event Handling (Phase 1 Entry Point)
+  // ==========================================================================
+
+  /**
+   * Handle a Slack event.
+   * Returns whether the event was handled by the new adapter.
+   * If false, the caller should fall back to the old handler.
+   */
+  async handleEvent(body: SlackEventBody): Promise<HandleEventResult> {
+    // Skip if no slack client
+    if (!this.deps.slack) {
+      return { handled: false, error: "No slack client" };
+    }
+
+    // Only handle event_callback type
+    if (body.type !== "event_callback" || !body.event) {
+      return { handled: false };
+    }
+
+    const event = body.event;
+
+    // Only handle message events
+    if (event.type === "message") {
+      return this.handleMessageEvent(event, body.team_id || null, body.enterprise_id || null);
+    }
+
+    // Not handled - let old handler deal with other events
+    return { handled: false };
+  }
+
+  /**
+   * Handle a message event.
+   */
+  private async handleMessageEvent(
+    event: NonNullable<SlackEventBody["event"]>,
+    teamId: string | null,
+    enterpriseId: string | null,
+  ): Promise<HandleEventResult> {
+    // Skip if no router or orchestrator
+    if (!this.deps.router || !this.deps.orchestrator) {
+      return { handled: false };
+    }
+
+    // Skip bot messages and subtypes
+    if (event.subtype || event.bot_id || event.bot_profile) {
+      return { handled: false };
+    }
+
+    const channelId = event.channel;
+    const userId = event.user;
+    const text = event.text?.trim() || "";
+
+    if (!channelId || !userId || !text) {
+      return { handled: false };
+    }
+
+    // Only handle DM messages
+    if (!channelId.startsWith("D")) {
+      return { handled: false };
+    }
+
+    try {
+      // Build routing context
+      const spaceId = channelId; // Use channel as space for Slack
+      const ctx = await this.buildRoutingContext(channelId, spaceId, userId, teamId);
+
+      // Detect intent
+      const intent = await this.deps.router.detectIntent(text, ctx);
+
+      // Handle based on intent type
+      switch (intent.type) {
+        case "session": {
+          // Handle session message through orchestrator
+          if (ctx.activeSession) {
+            const messageCtx = this.buildMessageContext(channelId, userId, teamId, enterpriseId, event.thread_ts);
+            const request = this.toChatRequest(messageCtx, intent.prompt);
+            const result = await this.deps.orchestrator.handleSessionMessage(
+              ctx.activeSession,
+              request,
+            );
+            await this.sendResponse(messageCtx, result);
+            return { handled: true };
+          }
+          return { handled: false };
+        }
+
+        case "wizard":
+        case "command":
+        case "cloud":
+          // Not yet implemented - fall back to old handler
+          return { handled: false };
+
+        case "unknown":
+        default:
+          return { handled: false };
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      this.deps.logger.error(`SlackAdapter handleMessageEvent error: ${msg}`);
+      return { handled: false, error: msg };
+    }
+  }
+
+  /**
+   * Handle a Slack interaction (button press).
+   * Returns whether the interaction was handled.
+   */
+  async handleInteraction(ctx: SlackInteractionContext): Promise<HandleEventResult> {
+    // Skip if no orchestrator
+    if (!this.deps.orchestrator) {
+      return { handled: false };
+    }
+
+    try {
+      // Parse the action
+      const action = this.parseInteraction(ctx.actionId, ctx.value);
+      if (!action) {
+        return { handled: false };
+      }
+
+      // Convert to SessionAction if applicable
+      const sessionAction = this.toSessionAction(action);
+      if (!sessionAction) {
+        // Not a session action - fall back to old handler
+        return { handled: false };
+      }
+
+      // Handle through orchestrator
+      const actionCtx = this.toActionContext(ctx);
+      const result = await this.deps.orchestrator.handleAction(sessionAction, actionCtx);
+
+      // Send response
+      const responder = this.createInteractionResponder(ctx);
+      await this.sendActionResponse(result, responder);
+
+      return { handled: true };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      this.deps.logger.error(`SlackAdapter handleInteraction error: ${msg}`);
+      return { handled: false, error: msg };
+    }
+  }
+
+  /**
+   * Build routing context for intent detection.
+   */
+  private async buildRoutingContext(
+    chatId: string,
+    spaceId: string | null,
+    userId: string,
+    workspaceId: string | null,
+  ): Promise<RoutingContext> {
+    const hasActiveWizard = this.deps.hasActiveWizard
+      ? await this.deps.hasActiveWizard(chatId, spaceId)
+      : false;
+
+    const activeSession = this.deps.findActiveSession
+      ? await this.deps.findActiveSession(chatId, spaceId)
+      : null;
+
+    return {
+      platform: "slack",
+      chatId,
+      spaceId,
+      userId,
+      hasActiveWizard,
+      activeSession,
+      cloudEnabled: this.deps.cloudEnabled ?? false,
+    };
+  }
+
+  /**
+   * Build message context from Slack event.
+   */
+  private buildMessageContext(
+    channelId: string,
+    userId: string,
+    teamId: string | null,
+    enterpriseId: string | null,
+    threadTs?: string,
+  ): SlackMessageContext {
+    return {
+      platform: "slack",
+      chatId: channelId,
+      userId,
+      language: "en", // Will be resolved by caller
+      workspaceId: teamId,
+      isDirect: channelId.startsWith("D"),
+      threadTs,
+      enterpriseId,
+    };
+  }
+
+  /**
+   * Convert InteractionAction to SessionAction.
+   */
+  private toSessionAction(
+    action: ReturnType<typeof parseSlackAction>,
+  ): import("../orchestrator/types.js").SessionAction | null {
+    if (!action) return null;
+
+    switch (action.kind) {
+      case "kill":
+        return { kind: "kill", sessionId: action.sessionId };
+      case "review":
+        return { kind: "review", sessionId: action.sessionId };
+      case "commit":
+        return { kind: "commit", sessionId: action.sessionId };
+      case "run_status":
+        return { kind: "run_status", runId: action.runId };
+      case "stop_sandbox":
+        return { kind: "stop_sandbox", sessionId: action.sessionId };
+      default:
+        // lang, commit_proposal not handled by SessionOrchestrator
+        return null;
+    }
   }
 }
