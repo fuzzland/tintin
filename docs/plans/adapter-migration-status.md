@@ -6,7 +6,7 @@
 
 ## Migration Progress
 
-### ✅ Completed (Phases 1-8)
+### ✅ Completed (Phases 1-9)
 
 | Feature | Old Handler | New Location | Status |
 |---------|-------------|--------------|--------|
@@ -18,14 +18,15 @@
 | Commands (basic) | `commands.ts` parsers | `orchestrator/CommandOrchestrator.ts` | ✅ Migrated |
 | Telegram callbacks (basic) | `telegramHandler.handleTelegramCallback` | `adapters/TelegramAdapter.ts` | ✅ Migrated |
 | Slack interactions (basic) | `slackHandler.handleSlackInteraction` | `adapters/SlackAdapter.ts` | ✅ Migrated |
+| Session list formatting | `sessions.ts` | `shared/SessionListFormatter.ts` | ✅ Migrated (Phase 9) |
+| Cloud commands (most) | `cloudHandler.ts` | `adapters/RequestRouter.ts` | ✅ Migrated (Phase 9) |
 
-### ⏸️ Partially Migrated (Phase 9+)
+### ⏸️ Partially Migrated / Remaining
 
 | Feature | Old Handler | New Location | Status |
 |---------|-------------|--------------|--------|
-| Cloud commands (`/cloud`) | `cloudHandler.ts` | `orchestrator/CloudOrchestrator.ts` | ⏸️ Partial - needs `/cloud help` |
-| Settings (`/settings`) | `settings.ts` | `orchestrator/CommandOrchestrator.ts` | ⏸️ Partial - needs identity/git config |
-| Session list formatting | `sessions.ts` | - | ❌ Not migrated |
+| Cloud help (`/cloud help`) | `cloudHandler.ts` | - | ⏸️ Handled via fallback |
+| Settings (identity/git) | `settings.ts` | `orchestrator/CommandOrchestrator.ts` | ⏸️ Partial |
 | Commit proposals | `interactionHandler.ts` | - | ❌ Not migrated (complex) |
 | Channel posts | `telegramHandler` | - | ❌ Not migrated |
 
@@ -140,6 +141,6 @@
 
 ---
 
-**Last Updated:** 2026-02-07
+**Last Updated:** 2026-02-07 (Phase 9 progress)
 **Branch:** `feat/support_websocket`
 **Test Status:** 705/706 passing (1 pre-existing failure)
