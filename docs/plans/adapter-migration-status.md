@@ -20,15 +20,15 @@
 | Slack interactions (basic) | `slackHandler.handleSlackInteraction` | `adapters/SlackAdapter.ts` | ✅ Migrated |
 | Session list formatting | `sessions.ts` | `shared/SessionListFormatter.ts` | ✅ Migrated (Phase 9) |
 | Cloud commands (most) | `cloudHandler.ts` | `adapters/RequestRouter.ts` | ✅ Migrated (Phase 9) |
+| Settings (identity/git) | `settings.ts` | `orchestrator/CommandOrchestrator.ts` | ✅ Migrated (Phase 9) |
 
-### ⏸️ Partially Migrated / Remaining
+### ⏸️ Remaining (Low Priority)
 
-| Feature | Old Handler | New Location | Status |
-|---------|-------------|--------------|--------|
-| Cloud help (`/cloud help`) | `cloudHandler.ts` | - | ⏸️ Handled via fallback |
-| Settings (identity/git) | `settings.ts` | `orchestrator/CommandOrchestrator.ts` | ⏸️ Partial |
-| Commit proposals | `interactionHandler.ts` | - | ❌ Not migrated (complex) |
-| Channel posts | `telegramHandler` | - | ❌ Not migrated |
+| Feature | Old Handler | Reason | Priority |
+|---------|-------------|--------|----------|
+| `/cloud help` | `cloudHandler.ts` | Fallback works fine | Low |
+| Commit proposals | `interactionHandler.ts` | Complex feature, rarely used | Low |
+| Channel posts | `telegramHandler` | Rarely used feature | Low |
 
 ---
 
