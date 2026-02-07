@@ -5,7 +5,6 @@ import { readFile } from "node:fs/promises";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db.js";
 import type { Logger } from "../log.js";
-import type { BotController } from "../controller2.js";
 import type { CloudManager } from "../cloud/manager.js";
 import type { TelegramClient, TelegramUpdate } from "../platform/telegram.js";
 import type { SlackClient } from "../platform/slack.js";
@@ -80,7 +79,6 @@ export type CreateHttpServerDeps = {
   config: AppConfig;
   db: Db;
   logger: Logger;
-  controller: BotController;
   cloudManager: CloudManager | null;
   telegram: TelegramClient | null;
   slack: SlackClient | null;
@@ -434,7 +432,7 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
         logger.debug(`[tg] webhook update_id=${updateId} keys=${keys}`);
         deps.queue.enqueue(async () => {
           try {
-            // Phase 1: Try new adapter first, fall back to old controller
+            // Adapter-only: route through adapter if available
             let handled = false;
             if (deps.telegramAdapter) {
               const result = await deps.telegramAdapter.handleUpdate(body as TelegramUpdate);
@@ -484,7 +482,7 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
         logger.debug(`[slack] events type=${String(evType)}`);
         deps.queue.enqueue(async () => {
           try {
-            // Phase 1: Try new adapter first, fall back to old controller
+            // Adapter-only: route through adapter if available
             let handled = false;
             if (deps.slackAdapter) {
               const result = await deps.slackAdapter.handleEvent(body as SlackEventBody);
@@ -528,7 +526,7 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
         logger.debug(`[slack] interaction type=${String(payload?.type ?? "?")}`);
         deps.queue.enqueue(async () => {
           try {
-            // Phase 1: Try new adapter first, fall back to old controller
+            // Adapter-only: route through adapter if available
             let handled = false;
             if (deps.slackAdapter) {
               const result = await deps.slackAdapter.handleInteractionPayload(payload);

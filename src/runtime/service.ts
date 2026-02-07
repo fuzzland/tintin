@@ -5,7 +5,6 @@ import { sleep, TaskQueue } from "./util.js";
 import { TelegramClient } from "./platform/telegram.js";
 import { SlackClient, type SlackTokenProvider } from "./platform/slack.js";
 import type { InteractiveMarkup } from "./platform/base.js";
-import { BotController } from "./controller2.js";
 import { createCommitProposalRuntime } from "./service/commitProposals.js";
 import { CloudManager } from "./cloud/manager.js";
 import {
@@ -398,19 +397,6 @@ export async function createBotService(deps: BotServiceDeps) {
   if (cloudManager) cloudManager.attachSessionManager(sessionManager);
   if (cloudManager) await cloudManager.start();
   await sessionManager.reconcileStaleSessions();
-  const controller = new BotController(
-    config,
-    db,
-    logger,
-    sessionManager,
-    telegram,
-    slack,
-    sendToSession,
-    reviewCommitDisabled,
-    cloudManager,
-    commitProposalStore,
-    telegram ? lookupTelegramSessionId : null,
-  );
 
   // Create sendPlatformMessage helper for adapters
   const sendPlatformMessage = async (opts: {
@@ -519,7 +505,6 @@ export async function createBotService(deps: BotServiceDeps) {
             offset = update.update_id + 1;
             queue.enqueue(async () => {
               try {
-                // Try new adapter first
                 if (telegramAdapter) {
                   const result = await telegramAdapter.handleUpdate(update);
                   if (result.handled) {
@@ -527,8 +512,7 @@ export async function createBotService(deps: BotServiceDeps) {
                     return;
                   }
                 }
-                // Fall back to old controller
-                await controller.handleTelegramUpdate(update);
+                logger.debug(`[telegram] update_id=${update.update_id} unhandled by adapter`);
               } catch (e) {
                 logger.error("Telegram poll handler error", e);
               }
@@ -546,7 +530,6 @@ export async function createBotService(deps: BotServiceDeps) {
     config,
     db,
     logger,
-    controller,
     cloudManager,
     telegram,
     slack,

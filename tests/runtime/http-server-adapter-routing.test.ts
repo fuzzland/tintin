@@ -4,13 +4,11 @@ import { createHttpServer } from "../../src/runtime/service/httpServer.js";
 
 describe("httpServer adapter-only routing", () => {
   it("does not call controller when adapter handles update", async () => {
-    const controller = { handleTelegramUpdate: () => { throw new Error("controller called"); } };
     const telegramAdapter = { handleUpdate: async () => ({ handled: true }) };
     const { server } = createHttpServer({
       config: {} as any,
       db: {} as any,
       logger: { debug() {}, info() {}, warn() {}, error() {} } as any,
-      controller: controller as any,
       cloudManager: null,
       telegram: {} as any,
       slack: null,
