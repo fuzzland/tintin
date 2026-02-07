@@ -45,3 +45,15 @@ export {
   parseWebSocketIdentity,
   createAnonymousIdentity,
 } from "./IdentityResolver.js";
+
+// Session list formatting
+export {
+  formatSessionList,
+  agentDisplayName,
+  agentShortName,
+  formatSessionFilterLabel,
+  buildMenuText,
+  buildCommandExamples,
+  buildCloudHelpText,
+  type FormatSessionListOptions,
+} from "./SessionListFormatter.js";
