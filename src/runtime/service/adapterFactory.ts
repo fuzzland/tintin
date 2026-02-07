@@ -9,7 +9,7 @@ import crypto from "node:crypto";
 import type { AppConfig, ProjectEntry } from "../config.js";
 import type { Db, SessionAgent } from "../db.js";
 import type { Logger } from "../log.js";
-import type { TelegramClient, TelegramChat } from "../platform/telegram.js";
+import type { TelegramClient, TelegramChat, TelegramMessageEntity } from "../platform/telegram.js";
 import type { SlackClient } from "../platform/slack.js";
 import type { SessionManager } from "../sessionManager.js";
 import type { CloudManager } from "../cloud/manager.js";
@@ -26,7 +26,7 @@ import { createWizardOrchestrator } from "../orchestrator/WizardOrchestrator.js"
 import { createCommandOrchestrator } from "../orchestrator/CommandOrchestrator.js";
 import { createCloudOrchestrator } from "../orchestrator/CloudOrchestrator.js";
 import { CommitProposalOrchestrator } from "../orchestrator/CommitProposalOrchestrator.js";
-import { createForumTopicManager, type ForumTopicManager } from "../adapters/telegram/ForumTopicManager.js";
+import { createForumTopicManager } from "../adapters/telegram/ForumTopicManager.js";
 import type { CommitProposalStore } from "../controller/types.js";
 import {
   getUserLanguage,
@@ -86,6 +86,15 @@ export function createAdapters(deps: AdapterFactoryDeps): AdapterFactoryResult {
   // Create request router
   const router = new RequestRouter({ logger });
 
+  const forumTopicManager = telegram
+    ? createForumTopicManager({
+        telegram,
+        logger,
+        useTopics: config.telegram?.use_topics ?? true,
+        maxChars: telegram.maxChars,
+      })
+    : null;
+
   // Resolve user language helper
   const resolveUserLanguage = async (
     platform: "telegram" | "slack",
@@ -96,6 +105,16 @@ export function createAdapters(deps: AdapterFactoryDeps): AdapterFactoryResult {
     } catch {
       return "en";
     }
+  };
+
+  const buildTelegramCustomEmojiEntity = (
+    text: string,
+    emoji: string,
+    customEmojiId: string,
+  ): TelegramMessageEntity | null => {
+    const offset = text.lastIndexOf(emoji);
+    if (offset < 0) return null;
+    return { type: "custom_emoji", offset, length: emoji.length, custom_emoji_id: customEmojiId };
   };
 
   // Convert ProjectEntry to ProjectInfo
@@ -280,6 +299,35 @@ export function createAdapters(deps: AdapterFactoryDeps): AdapterFactoryResult {
       }
       return { allowed: true };
     },
+    prepareSessionSpace: forumTopicManager
+      ? async (ctx, agent, projectName) => {
+          if (ctx.platform !== "telegram" || !forumTopicManager) {
+            return { spaceId: ctx.spaceId ?? ctx.chatId, announce: false };
+          }
+          if (!ctx.telegramChat || typeof ctx.anchorMessageId !== "number") {
+            const fallbackSpaceId =
+              ctx.spaceId ?? (typeof ctx.anchorMessageId === "number" ? String(ctx.anchorMessageId) : ctx.chatId);
+            return { spaceId: fallbackSpaceId, announce: false };
+          }
+          const result = await forumTopicManager.createSessionSpace({
+            chat: ctx.telegramChat,
+            projectName,
+            anchorMessageId: ctx.anchorMessageId,
+            anchorMessageThreadId: ctx.anchorMessageThreadId,
+            agent,
+            lang: ctx.language,
+          });
+          return {
+            spaceId: result.spaceId,
+            announce: result.announce,
+            spaceEmoji: result.topicEmoji,
+            topicId: result.topicId,
+            customEmojiId: result.topicCustomEmojiId,
+            projectName,
+            agent,
+          };
+        }
+      : undefined,
     startSession: async (ctx, agent, projectPath, prompt) => {
       try {
         // Get project by path
@@ -296,12 +344,65 @@ export function createAdapters(deps: AdapterFactoryDeps): AdapterFactoryResult {
           projectPathResolved: projectPath,
           workspaceId: ctx.workspaceId,
           spaceId: ctx.spaceId ?? "",
+          spaceEmoji: ctx.spaceEmoji ?? null,
         });
         return { success: true, sessionId };
       } catch (err) {
         return { success: false, error: String(err) };
       }
     },
+    finalizeSessionStart: forumTopicManager
+      ? async (ctx, sessionId, spaceResult, prompt) => {
+          if (ctx.platform !== "telegram" || !forumTopicManager || !telegram) return;
+
+          if (spaceResult.topicId) {
+            await forumTopicManager.pinTopicHeader({
+              chatId: ctx.chatId,
+              topicId: spaceResult.topicId,
+              initialPrompt: prompt,
+              sessionId,
+              lang: ctx.language,
+            });
+          }
+
+          if (spaceResult.announce) {
+            const emoji = spaceResult.spaceEmoji ?? "";
+            const announceText = t("session.started_topic_hint", ctx.language, { emoji });
+            const entity =
+              spaceResult.customEmojiId && spaceResult.spaceEmoji
+                ? buildTelegramCustomEmojiEntity(announceText, spaceResult.spaceEmoji, spaceResult.customEmojiId)
+                : null;
+            try {
+              await telegram.sendMessageSingle({
+                chatId: ctx.chatId,
+                messageThreadId: ctx.anchorMessageThreadId,
+                replyToMessageId: ctx.anchorMessageId,
+                text: announceText,
+                entities: entity ? [entity] : undefined,
+                priority: "user",
+              });
+            } catch {
+              await telegram.sendMessage({
+                chatId: ctx.chatId,
+                messageThreadId: ctx.anchorMessageThreadId,
+                replyToMessageId: ctx.anchorMessageId,
+                text: announceText,
+                priority: "user",
+              });
+            }
+          }
+
+          if (spaceResult.topicId && spaceResult.spaceEmoji && spaceResult.projectName && spaceResult.agent) {
+            void forumTopicManager.updateTopicTitle({
+              chatId: ctx.chatId,
+              topicId: spaceResult.topicId,
+              topicEmoji: spaceResult.spaceEmoji,
+              projectName: spaceResult.projectName,
+              agent: spaceResult.agent,
+            });
+          }
+        }
+      : undefined,
     generateId: () => crypto.randomUUID(),
     nowMs: () => Date.now(),
   });
@@ -447,6 +548,7 @@ export function createAdapters(deps: AdapterFactoryDeps): AdapterFactoryResult {
         cloudOrchestrator,
         commitProposalOrchestrator,
         router,
+        forumTopicManager: forumTopicManager ?? undefined,
         getUserLanguage: (userId) => resolveUserLanguage("telegram", userId),
         findActiveSession: (chatId, spaceId) => findActiveSession("telegram", chatId, spaceId),
         hasActiveWizard: async (chatId, spaceId) => {

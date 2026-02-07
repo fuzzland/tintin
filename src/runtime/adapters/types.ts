@@ -11,6 +11,7 @@
 import type { UserLanguage } from "../../locales/index.js";
 import type { SessionPlatform, ChatRequest, ChatResult, ActionResult } from "../orchestrator/types.js";
 import type { InteractionAction } from "../shared/types.js";
+import type { TelegramChat } from "../platform/telegram.js";
 
 /**
  * Platform-specific message context.
@@ -30,6 +31,7 @@ export interface MessageContext {
  */
 export interface TelegramMessageContext extends MessageContext {
   platform: "telegram";
+  chat?: TelegramChat;
   replyToMessageId?: number;
   messageThreadId?: number;
   isForumTopic?: boolean;

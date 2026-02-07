@@ -32,6 +32,7 @@ import { buildTelegramProjectKeyboard, type ProjectOption } from "../shared/UIBu
 import type { TelegramInlineKeyboard } from "../shared/types.js";
 import { RequestRouter, type RoutingContext, type WizardAction } from "./RequestRouter.js";
 import { BaseAdapter } from "./BaseAdapter.js";
+import type { ForumTopicManager } from "./telegram/ForumTopicManager.js";
 import type {
   TelegramMessageContext,
   TelegramCallbackContext,
@@ -61,6 +62,8 @@ export interface TelegramAdapterDeps {
   cloudOrchestrator?: CloudOrchestrator;
   /** Commit proposal orchestrator for push/pr actions */
   commitProposalOrchestrator?: CommitProposalOrchestrator;
+  /** Forum topic manager for Telegram topics */
+  forumTopicManager?: ForumTopicManager;
   /** Request router for intent detection */
   router?: RequestRouter;
   /** Get user's language preference */
@@ -500,6 +503,7 @@ export class TelegramAdapter extends BaseAdapter {
     const chat = message.chat;
     return {
       platform: "telegram",
+      chat,
       chatId: String(chat.id),
       userId: String(message.from?.id || 0),
       language: "en", // Will be resolved by caller
@@ -575,6 +579,9 @@ export class TelegramAdapter extends BaseAdapter {
       language,
       workspaceId: null,
       spaceId: messageCtx.messageThreadId ? `${messageCtx.chatId}:${messageCtx.messageThreadId}` : null,
+      anchorMessageId: messageCtx.replyToMessageId,
+      anchorMessageThreadId: messageCtx.messageThreadId,
+      telegramChat: messageCtx.chat ?? null,
     };
 
     switch (action) {

@@ -13,6 +13,7 @@ import { t } from "../../locales/index.js";
 import type { SessionAgent, WizardState } from "../db.js";
 import type { Logger } from "../log.js";
 import type { SessionPlatform } from "./types.js";
+import type { TelegramChat } from "../platform/telegram.js";
 
 // ============================================================================
 // Types
@@ -29,6 +30,14 @@ export interface WizardContext {
   workspaceId: string | null;
   /** For Telegram forum topics */
   spaceId?: string | null;
+  /** For Telegram forum topics */
+  spaceEmoji?: string | null;
+  /** For Telegram forum topics */
+  anchorMessageId?: number;
+  /** For Telegram forum topics */
+  anchorMessageThreadId?: number;
+  /** Telegram chat metadata when available */
+  telegramChat?: TelegramChat | null;
 }
 
 /**
@@ -113,6 +122,10 @@ export interface PrepareSpaceResult {
   topicId?: number;
   /** Custom emoji ID for the topic icon */
   customEmojiId?: string;
+  /** Project name for topic updates */
+  projectName?: string;
+  /** Agent used for topic updates */
+  agent?: SessionAgent;
 }
 
 // ============================================================================
@@ -358,7 +371,11 @@ export class WizardOrchestrator {
       try {
         spaceResult = await this.deps.prepareSessionSpace(ctx, wizard.agent, project.name, prompt);
         // Update context with the new spaceId
-        sessionCtx = { ...ctx, spaceId: spaceResult.spaceId };
+        sessionCtx = {
+          ...ctx,
+          spaceId: spaceResult.spaceId,
+          spaceEmoji: spaceResult.spaceEmoji ?? ctx.spaceEmoji ?? null,
+        };
       } catch (e) {
         this.deps.logger.warn(`[wizard] prepareSessionSpace failed: ${String(e)}`);
         // Continue without topic creation - fall back to default behavior
