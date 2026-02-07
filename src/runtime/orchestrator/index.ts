@@ -37,4 +37,20 @@ export {
   type ProjectInfo,
   type PathValidationResult,
   type SessionStartResult,
+  type PrepareSpaceResult,
 } from "./WizardOrchestrator.js";
+export {
+  CommandOrchestrator,
+  createCommandOrchestrator,
+  type CommandOrchestratorDeps,
+  type CommandContext,
+  type CommandType,
+  type CommandResult,
+} from "./CommandOrchestrator.js";
+export {
+  CloudOrchestrator,
+  createCloudOrchestrator,
+  type CloudOrchestratorDeps,
+  type CloudContext,
+  type CloudResult,
+} from "./CloudOrchestrator.js";

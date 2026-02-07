@@ -16,6 +16,16 @@ import type {
   WizardResult,
   ProjectInfo,
 } from "../orchestrator/WizardOrchestrator.js";
+import type {
+  CommandOrchestrator,
+  CommandContext,
+  CommandType,
+  CommandResult,
+} from "../orchestrator/CommandOrchestrator.js";
+import type {
+  CloudOrchestrator,
+  CloudContext,
+} from "../orchestrator/CloudOrchestrator.js";
 import { parseSlackAction } from "../shared/ActionParser.js";
 import { buildSlackProjectBlocks, type ProjectOption } from "../shared/UIBuilder.js";
 import type { SlackActionsBlock } from "../shared/types.js";
@@ -64,6 +74,10 @@ export interface SlackAdapterDeps {
   orchestrator?: SessionOrchestrator;
   /** Wizard orchestrator for new session creation */
   wizardOrchestrator?: WizardOrchestrator;
+  /** Command orchestrator for local commands */
+  commandOrchestrator?: CommandOrchestrator;
+  /** Cloud orchestrator for cloud commands */
+  cloudOrchestrator?: CloudOrchestrator;
   /** Request router for intent detection */
   router?: RequestRouter;
   /** Get user's language preference */
@@ -187,6 +201,81 @@ export class SlackAdapter extends BaseAdapter {
   // ==========================================================================
 
   /**
+   * Slack interaction payload structure (simplified).
+   */
+  private parseInteractionPayload(payload: unknown): SlackInteractionContext | null {
+    const p = payload as {
+      type?: string;
+      actions?: Array<{ action_id?: string; value?: string; selected_option?: { value?: string } }>;
+      channel?: { id?: string };
+      user?: { id?: string };
+      team?: { id?: string };
+      message?: { ts?: string; thread_ts?: string; text?: string };
+      container?: { message_ts?: string };
+      response_url?: string;
+    };
+
+    // Only handle block_actions for now
+    if (p.type !== "block_actions") {
+      return null;
+    }
+
+    const action = p.actions?.[0];
+    if (!action) return null;
+
+    const actionId = action.action_id;
+    // Handle both direct value and selected_option.value (for select menus)
+    const value = action.value ?? action.selected_option?.value ?? null;
+    const channelId = p.channel?.id;
+    const userId = p.user?.id;
+    const workspaceId = p.team?.id ?? null;
+    const messageTs = p.message?.ts ?? p.container?.message_ts;
+    const threadTs = p.message?.thread_ts ?? messageTs;
+
+    if (!actionId || !channelId || !userId) {
+      return null;
+    }
+
+    return {
+      channelId,
+      userId,
+      workspaceId,
+      actionId,
+      value: typeof value === "string" ? value : null,
+      messageTs,
+      threadTs,
+      responseUrl: p.response_url,
+      language: "en", // Will be resolved by caller if needed
+    };
+  }
+
+  /**
+   * Handle a Slack interaction payload (block_actions).
+   * Returns whether the interaction was handled by the new adapter.
+   * If false, the caller should fall back to the old handler.
+   */
+  async handleInteractionPayload(payload: unknown): Promise<HandleEventResult> {
+    // Skip if no slack client
+    if (!this.deps.slack) {
+      return { handled: false, error: "No slack client" };
+    }
+
+    // Parse the payload
+    const ctx = this.parseInteractionPayload(payload);
+    if (!ctx) {
+      return { handled: false };
+    }
+
+    // Resolve user language
+    if (this.deps.getUserLanguage) {
+      ctx.language = await this.deps.getUserLanguage(ctx.userId);
+    }
+
+    // Delegate to handleInteraction
+    return this.handleInteraction(ctx);
+  }
+
+  /**
    * Handle a Slack event.
    * Returns whether the event was handled by the new adapter.
    * If false, the caller should fall back to the old handler.
@@ -287,10 +376,32 @@ export class SlackAdapter extends BaseAdapter {
           return { handled: false };
         }
 
-        case "command":
-        case "cloud":
-          // Not yet implemented - fall back to old handler
+        case "command": {
+          // Handle command through command orchestrator
+          const messageCtx = this.buildMessageContext(channelId, userId, teamId, enterpriseId, event.thread_ts);
+          const commandResult = await this.handleCommandIntent(
+            intent.command,
+            messageCtx,
+          );
+          if (commandResult) {
+            await this.sendCommandResponse(messageCtx, commandResult);
+            return { handled: true };
+          }
           return { handled: false };
+        }
+
+        case "cloud": {
+          // Handle cloud command through cloud orchestrator
+          const messageCtx = this.buildMessageContext(channelId, userId, teamId, enterpriseId, event.thread_ts);
+          const cloudResult = await this.handleCloudIntent(
+            intent.command,
+            messageCtx,
+          );
+          if (cloudResult && cloudResult.handled) {
+            return { handled: true };
+          }
+          return { handled: false };
+        }
 
         case "unknown":
         default:
@@ -346,6 +457,39 @@ export class SlackAdapter extends BaseAdapter {
           threadTs: ctx.threadTs,
         };
         await this.sendWizardResponse(messageCtx, result);
+
+        return { handled: true };
+      }
+
+      // Handle language switch action
+      if (action.kind === "lang") {
+        if (!this.deps.commandOrchestrator) {
+          return { handled: false };
+        }
+
+        const commandCtx: CommandContext = {
+          platform: "slack",
+          chatId: ctx.channelId,
+          userId: ctx.userId,
+          language: ctx.language,
+          workspaceId: ctx.workspaceId,
+        };
+
+        const result = await this.deps.commandOrchestrator.handle(
+          commandCtx,
+          { kind: "lang", target: action.value },
+        );
+
+        // Send ephemeral response
+        if (this.deps.slack) {
+          await this.deps.slack.postEphemeral({
+            channel: ctx.channelId,
+            user: ctx.userId,
+            text: result.text,
+            thread_ts: ctx.threadTs,
+            workspaceId: ctx.workspaceId,
+          });
+        }
 
         return { handled: true };
       }
@@ -529,5 +673,113 @@ export class SlackAdapter extends BaseAdapter {
       workspaceId: ctx.workspaceId,
       blocks: blocks as unknown as import("@slack/web-api").Block[],
     });
+  }
+
+  // ==========================================================================
+  // Command Handling
+  // ==========================================================================
+
+  /**
+   * Handle command intent.
+   */
+  private async handleCommandIntent(
+    command: import("./RequestRouter.js").CommandIntent,
+    messageCtx: SlackMessageContext,
+  ): Promise<CommandResult | null> {
+    if (!this.deps.commandOrchestrator) {
+      return null;
+    }
+
+    const language = this.deps.getUserLanguage
+      ? await this.deps.getUserLanguage(messageCtx.userId)
+      : "en" as UserLanguage;
+
+    const commandCtx: CommandContext = {
+      platform: "slack",
+      chatId: messageCtx.chatId,
+      userId: messageCtx.userId,
+      language,
+      workspaceId: messageCtx.workspaceId ?? null,
+    };
+
+    // Map CommandIntent to CommandType
+    const commandType: CommandType = command;
+
+    return this.deps.commandOrchestrator.handle(commandCtx, commandType);
+  }
+
+  /**
+   * Send command response to Slack.
+   */
+  private async sendCommandResponse(
+    ctx: SlackMessageContext,
+    result: CommandResult,
+  ): Promise<void> {
+    if (!this.deps.slack) return;
+
+    // Build language selection blocks if needed
+    let blocks: SlackActionsBlock[] | undefined;
+    if (result.showLanguageKeyboard) {
+      blocks = [
+        {
+          type: "actions",
+          elements: [
+            {
+              type: "button",
+              text: { type: "plain_text", text: "🇬🇧 English" },
+              action_id: "switch_language",
+              value: "en",
+            },
+            {
+              type: "button",
+              text: { type: "plain_text", text: "🇨🇳 中文" },
+              action_id: "switch_language",
+              value: "zh",
+            },
+          ],
+        },
+      ];
+    }
+
+    await this.deps.slack.postMessage({
+      channel: ctx.chatId,
+      text: result.text,
+      thread_ts: ctx.threadTs,
+      workspaceId: ctx.workspaceId,
+      blocks: blocks as unknown as import("@slack/web-api").Block[],
+    });
+  }
+
+  // ==========================================================================
+  // Cloud Handling
+  // ==========================================================================
+
+  /**
+   * Handle cloud intent.
+   */
+  private async handleCloudIntent(
+    command: import("../controller/commands.js").CloudCommand,
+    messageCtx: SlackMessageContext,
+  ): Promise<import("../orchestrator/CloudOrchestrator.js").CloudResult | null> {
+    if (!this.deps.cloudOrchestrator) {
+      return null;
+    }
+
+    const language = this.deps.getUserLanguage
+      ? await this.deps.getUserLanguage(messageCtx.userId)
+      : "en" as UserLanguage;
+
+    const cloudCtx: CloudContext = {
+      platform: "slack",
+      chatId: messageCtx.chatId,
+      userId: messageCtx.userId,
+      language,
+      workspaceId: messageCtx.workspaceId ?? null,
+      isDirect: messageCtx.isDirect ?? false,
+      spaceId: messageCtx.chatId,
+      slackThreadTs: messageCtx.threadTs,
+    };
+
+    return this.deps.cloudOrchestrator.handle(cloudCtx, command);
   }
 }

@@ -528,7 +528,18 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
         logger.debug(`[slack] interaction type=${String(payload?.type ?? "?")}`);
         deps.queue.enqueue(async () => {
           try {
-            await deps.controller.handleSlackInteraction(payload);
+            // Phase 1: Try new adapter first, fall back to old controller
+            let handled = false;
+            if (deps.slackAdapter) {
+              const result = await deps.slackAdapter.handleInteractionPayload(payload);
+              handled = result.handled;
+              if (result.handled) {
+                logger.debug(`[slack] interaction type=${String(payload?.type ?? "?")} handled by new adapter`);
+              }
+            }
+            if (!handled) {
+              await deps.controller.handleSlackInteraction(payload);
+            }
           } catch (e) {
             logger.error("Slack interaction handler error", e);
           }

@@ -16,6 +16,16 @@ import type {
   WizardResult,
   ProjectInfo,
 } from "../orchestrator/WizardOrchestrator.js";
+import type {
+  CommandOrchestrator,
+  CommandContext,
+  CommandType,
+  CommandResult,
+} from "../orchestrator/CommandOrchestrator.js";
+import type {
+  CloudOrchestrator,
+  CloudContext,
+} from "../orchestrator/CloudOrchestrator.js";
 import { parseTelegramAction } from "../shared/ActionParser.js";
 import { buildTelegramProjectKeyboard, type ProjectOption } from "../shared/UIBuilder.js";
 import type { TelegramInlineKeyboard } from "../shared/types.js";
@@ -44,6 +54,10 @@ export interface TelegramAdapterDeps {
   orchestrator?: SessionOrchestrator;
   /** Wizard orchestrator for new session creation */
   wizardOrchestrator?: WizardOrchestrator;
+  /** Command orchestrator for local commands */
+  commandOrchestrator?: CommandOrchestrator;
+  /** Cloud orchestrator for cloud commands */
+  cloudOrchestrator?: CloudOrchestrator;
   /** Request router for intent detection */
   router?: RequestRouter;
   /** Get user's language preference */
@@ -56,6 +70,8 @@ export interface TelegramAdapterDeps {
   getProjects?: () => ProjectInfo[];
   /** Whether cloud features are enabled */
   cloudEnabled?: boolean;
+  /** Look up session ID by reply message (for reply-based session routing) */
+  lookupSessionByReply?: (chatId: string, messageId: number) => string | null;
 }
 
 export class TelegramAdapter extends BaseAdapter {
@@ -239,11 +255,27 @@ export class TelegramAdapter extends BaseAdapter {
 
         case "session": {
           // Handle session message through orchestrator
-          if (ctx.activeSession) {
+          let session = ctx.activeSession;
+
+          // Fallback: look up session by reply message if no active session found
+          if (!session && message.reply_to_message?.message_id && this.deps.lookupSessionByReply) {
+            const replyId = message.reply_to_message.message_id;
+            const sessionId = this.deps.lookupSessionByReply(chatId, replyId);
+            if (sessionId && this.deps.orchestrator) {
+              // Get session info from orchestrator
+              session = await this.deps.orchestrator.getSession(sessionId);
+              // Validate session matches platform/chat
+              if (session && (session.platform !== "telegram" || session.chatId !== chatId)) {
+                session = null;
+              }
+            }
+          }
+
+          if (session) {
             const messageCtx = this.buildMessageContext(message);
             const request = this.toChatRequest(messageCtx, intent.prompt);
             const result = await this.deps.orchestrator.handleSessionMessage(
-              ctx.activeSession,
+              session,
               request,
             );
             await this.sendResponse(messageCtx, result);
@@ -252,10 +284,32 @@ export class TelegramAdapter extends BaseAdapter {
           return { handled: false };
         }
 
-        case "command":
-        case "cloud":
-          // Not yet implemented - fall back to old handler
+        case "command": {
+          // Handle command through command orchestrator
+          const messageCtx = this.buildMessageContext(message);
+          const commandResult = await this.handleCommandIntent(
+            intent.command,
+            messageCtx,
+          );
+          if (commandResult) {
+            await this.sendCommandResponse(messageCtx, commandResult);
+            return { handled: true };
+          }
           return { handled: false };
+        }
+
+        case "cloud": {
+          // Handle cloud command through cloud orchestrator
+          const messageCtx = this.buildMessageContext(message);
+          const cloudResult = await this.handleCloudIntent(
+            intent.command,
+            messageCtx,
+          );
+          if (cloudResult && cloudResult.handled) {
+            return { handled: true };
+          }
+          return { handled: false };
+        }
 
         case "unknown":
         default:
@@ -327,6 +381,33 @@ export class TelegramAdapter extends BaseAdapter {
           isDirect: true,
         };
         await this.sendWizardResponse(messageCtx, result);
+
+        return { handled: true };
+      }
+
+      // Handle language switch action
+      if (action.kind === "lang") {
+        if (!this.deps.commandOrchestrator) {
+          return { handled: false };
+        }
+
+        const commandCtx: CommandContext = {
+          platform: "telegram",
+          chatId: ctx.chatId,
+          userId: ctx.userId,
+          language: ctx.language,
+          workspaceId: null,
+        };
+
+        const result = await this.deps.commandOrchestrator.handle(
+          commandCtx,
+          { kind: "lang", target: action.value },
+        );
+
+        // Answer callback and send response if needed
+        if (this.deps.telegram) {
+          await this.deps.telegram.answerCallbackQuery(ctx.callbackQueryId, result.text);
+        }
 
         return { handled: true };
       }
@@ -515,6 +596,109 @@ export class TelegramAdapter extends BaseAdapter {
       priority: "user",
       replyMarkup,
     });
+  }
+
+  // ==========================================================================
+  // Command Handling
+  // ==========================================================================
+
+  /**
+   * Handle command intent.
+   */
+  private async handleCommandIntent(
+    command: import("./RequestRouter.js").CommandIntent,
+    messageCtx: TelegramMessageContext,
+  ): Promise<CommandResult | null> {
+    if (!this.deps.commandOrchestrator) {
+      return null;
+    }
+
+    const language = this.deps.getUserLanguage
+      ? await this.deps.getUserLanguage(messageCtx.userId)
+      : "en" as UserLanguage;
+
+    const commandCtx: CommandContext = {
+      platform: "telegram",
+      chatId: messageCtx.chatId,
+      userId: messageCtx.userId,
+      language,
+      workspaceId: null,
+    };
+
+    // Map CommandIntent to CommandType
+    const commandType: CommandType = command;
+
+    return this.deps.commandOrchestrator.handle(commandCtx, commandType);
+  }
+
+  /**
+   * Send command response to Telegram.
+   */
+  private async sendCommandResponse(
+    ctx: TelegramMessageContext,
+    result: CommandResult,
+  ): Promise<void> {
+    if (!this.deps.telegram) return;
+
+    // Build language keyboard if needed
+    let replyMarkup: TelegramInlineKeyboard | undefined;
+    if (result.showLanguageKeyboard) {
+      replyMarkup = {
+        inline_keyboard: [
+          [
+            { text: "🇬🇧 English", callback_data: "lang:en" },
+            { text: "🇨🇳 中文", callback_data: "lang:zh" },
+          ],
+        ],
+      };
+    }
+
+    await this.deps.telegram.sendMessage({
+      chatId: ctx.chatId,
+      text: result.text,
+      replyToMessageId: ctx.replyToMessageId,
+      messageThreadId: ctx.messageThreadId,
+      priority: "user",
+      replyMarkup,
+    });
+  }
+
+  // ==========================================================================
+  // Cloud Handling
+  // ==========================================================================
+
+  /**
+   * Handle cloud intent.
+   */
+  private async handleCloudIntent(
+    command: import("../controller/commands.js").CloudCommand,
+    messageCtx: TelegramMessageContext,
+  ): Promise<import("../orchestrator/CloudOrchestrator.js").CloudResult | null> {
+    if (!this.deps.cloudOrchestrator) {
+      return null;
+    }
+
+    const language = this.deps.getUserLanguage
+      ? await this.deps.getUserLanguage(messageCtx.userId)
+      : "en" as UserLanguage;
+
+    const spaceId = messageCtx.messageThreadId
+      ? `${messageCtx.chatId}:${messageCtx.messageThreadId}`
+      : messageCtx.chatId;
+
+    const cloudCtx: CloudContext = {
+      platform: "telegram",
+      chatId: messageCtx.chatId,
+      userId: messageCtx.userId,
+      language,
+      workspaceId: null,
+      isDirect: messageCtx.isDirect ?? false,
+      spaceId,
+      replyToMessageId: messageCtx.replyToMessageId,
+      messageThreadId: messageCtx.messageThreadId,
+    };
+
+    return this.deps.cloudOrchestrator.handle(cloudCtx, command);
   }
 
   /**

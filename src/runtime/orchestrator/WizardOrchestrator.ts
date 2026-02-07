@@ -71,6 +71,8 @@ export interface WizardResult {
   sessionId?: string;
   /** Error message if state is 'error' */
   error?: string;
+  /** Session space result (e.g., topic creation) */
+  spaceResult?: PrepareSpaceResult;
 }
 
 /**
@@ -89,6 +91,22 @@ export interface SessionStartResult {
   success: boolean;
   sessionId?: string;
   error?: string;
+}
+
+/**
+ * Result from preparing session space (e.g., forum topic creation).
+ */
+export interface PrepareSpaceResult {
+  /** The space ID (topic ID or message ID) */
+  spaceId: string;
+  /** Whether to announce the space creation */
+  announce: boolean;
+  /** The emoji used for the space (e.g., topic emoji) */
+  spaceEmoji?: string;
+  /** Topic ID if a forum topic was created */
+  topicId?: number;
+  /** Custom emoji ID for the topic icon */
+  customEmojiId?: string;
 }
 
 // ============================================================================
@@ -123,6 +141,14 @@ export interface WizardOrchestratorDeps {
   /** Check if a new session can be started */
   canStartSession: (ctx: WizardContext) => Promise<{ allowed: boolean; error?: string }>;
 
+  /** Prepare session space (e.g., create forum topic) before starting session */
+  prepareSessionSpace?: (
+    ctx: WizardContext,
+    agent: SessionAgent,
+    projectName: string,
+    prompt: string,
+  ) => Promise<PrepareSpaceResult>;
+
   /** Start a new session */
   startSession: (
     ctx: WizardContext,
@@ -130,6 +156,14 @@ export interface WizardOrchestratorDeps {
     projectPath: string,
     prompt: string,
   ) => Promise<SessionStartResult>;
+
+  /** Finalize session start (e.g., pin topic header) after session is created */
+  finalizeSessionStart?: (
+    ctx: WizardContext,
+    sessionId: string,
+    spaceResult: PrepareSpaceResult,
+    prompt: string,
+  ) => Promise<void>;
 
   /** Generate a unique ID */
   generateId: () => string;
@@ -311,8 +345,22 @@ export class WizardOrchestrator {
     // Determine the project path
     const projectPath = wizard.customPathCandidate || project.path;
 
+    // Prepare session space (e.g., create forum topic) if hook is provided
+    let spaceResult: PrepareSpaceResult | undefined;
+    let sessionCtx = ctx;
+    if (this.deps.prepareSessionSpace) {
+      try {
+        spaceResult = await this.deps.prepareSessionSpace(ctx, wizard.agent, project.name, prompt);
+        // Update context with the new spaceId
+        sessionCtx = { ...ctx, spaceId: spaceResult.spaceId };
+      } catch (e) {
+        this.deps.logger.warn(`[wizard] prepareSessionSpace failed: ${String(e)}`);
+        // Continue without topic creation - fall back to default behavior
+      }
+    }
+
     // Start the session
-    const result = await this.deps.startSession(ctx, wizard.agent, projectPath, prompt);
+    const result = await this.deps.startSession(sessionCtx, wizard.agent, projectPath, prompt);
 
     // Clear wizard state
     await this.deps.clearWizardState(platform, chatId, userId);
@@ -325,10 +373,21 @@ export class WizardOrchestrator {
       };
     }
 
+    // Finalize session start (e.g., pin topic header) if hook is provided
+    if (this.deps.finalizeSessionStart && spaceResult && result.sessionId) {
+      try {
+        await this.deps.finalizeSessionStart(ctx, result.sessionId, spaceResult, prompt);
+      } catch (e) {
+        this.deps.logger.warn(`[wizard] finalizeSessionStart failed: ${String(e)}`);
+        // Continue - session is already started
+      }
+    }
+
     return {
       state: "completed",
       message: t("session.starting", language),
       sessionId: result.sessionId,
+      spaceResult,
     };
   }
 

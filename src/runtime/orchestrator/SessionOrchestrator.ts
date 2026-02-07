@@ -181,6 +181,16 @@ export class SessionOrchestrator {
   }
 
   /**
+   * Get a session by ID.
+   *
+   * @param sessionId - The session ID
+   * @returns Session info or null if not found
+   */
+  async getSession(sessionId: string): Promise<SessionInfo | null> {
+    return this.deps.getSession(sessionId);
+  }
+
+  /**
    * Kill a running session.
    */
   private async handleKillAction(

@@ -34,6 +34,7 @@ import {
   SlackSender,
   WebSocketSender,
 } from "./notification/index.js";
+import { createAdapters } from "./service/adapterFactory.js";
 
 export interface BotServiceDeps {
   config: AppConfig;
@@ -411,6 +412,62 @@ export async function createBotService(deps: BotServiceDeps) {
     telegram ? lookupTelegramSessionId : null,
   );
 
+  // Create sendPlatformMessage helper for adapters
+  const sendPlatformMessage = async (opts: {
+    platform: import("./platform/base.js").IMessagingPlatform | null;
+    chatId: string;
+    text: string;
+    markup?: InteractiveMarkup;
+    threadId?: string | number;
+    replyToMessageId?: string | number;
+    priority?: "user" | "background";
+    workspaceId?: string | null;
+  }) => {
+    if (!opts.platform) return;
+    const priority = opts.priority ?? "user";
+    const threadId =
+      typeof opts.threadId === "number" ? (Number.isFinite(opts.threadId) ? String(opts.threadId) : undefined) : opts.threadId;
+    const replyToMessageId =
+      typeof opts.replyToMessageId === "number"
+        ? Number.isFinite(opts.replyToMessageId)
+          ? String(opts.replyToMessageId)
+          : undefined
+        : opts.replyToMessageId;
+    if (opts.platform.platformName === "slack") {
+      await (opts.platform as SlackClient).sendMessage({
+        chatId: opts.chatId,
+        text: opts.text,
+        threadId: undefined,
+        replyToMessageId,
+        markup: opts.markup,
+        priority,
+        workspaceId: opts.workspaceId,
+      });
+      return;
+    }
+    await opts.platform.sendMessage({
+      chatId: opts.chatId,
+      text: opts.text,
+      threadId,
+      replyToMessageId,
+      markup: opts.markup,
+      priority,
+    });
+  };
+
+  // Create adapters with full orchestrator support
+  const { telegramAdapter, slackAdapter } = createAdapters({
+    config,
+    db,
+    logger,
+    telegram,
+    slack,
+    sessionManager,
+    cloudManager,
+    sendPlatformMessage,
+    lookupTelegramSessionByReply: telegram ? lookupTelegramSessionId : undefined,
+  });
+
   // WebSocket manager initialization
   let wsHandler: WebSocketHandler | null = null;
   if (config.websocket?.enabled) {
@@ -462,6 +519,15 @@ export async function createBotService(deps: BotServiceDeps) {
             offset = update.update_id + 1;
             queue.enqueue(async () => {
               try {
+                // Try new adapter first
+                if (telegramAdapter) {
+                  const result = await telegramAdapter.handleUpdate(update);
+                  if (result.handled) {
+                    logger.debug(`[telegram] handled by adapter update_id=${update.update_id}`);
+                    return;
+                  }
+                }
+                // Fall back to old controller
                 await controller.handleTelegramUpdate(update);
               } catch (e) {
                 logger.error("Telegram poll handler error", e);
