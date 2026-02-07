@@ -229,18 +229,12 @@ export class TelegramAdapter extends BaseAdapter {
       return { handled: false };
     }
 
-    // For channel posts, there may be no `from` user
     const chat = message.chat;
-    if (chat?.type === "channel") {
-      // Channel posts are handled differently - they don't have a user context
-      // For now, let the old handler deal with channel posts
-      return { handled: false };
-    }
 
     try {
       // Build routing context
       const chatId = String(message.chat.id);
-      const userId = String(message.from?.id || 0);
+      const userId = String(message.from?.id ?? message.sender_chat?.id ?? message.chat.id ?? 0);
       const spaceId = this.getSpaceId(message);
       const ctx = await this.buildRoutingContext(chatId, spaceId, userId);
 
@@ -501,11 +495,12 @@ export class TelegramAdapter extends BaseAdapter {
    */
   private buildMessageContext(message: TelegramMessage): TelegramMessageContext {
     const chat = message.chat;
+    const userId = message.from?.id ?? message.sender_chat?.id ?? chat.id ?? 0;
     return {
       platform: "telegram",
       chat,
       chatId: String(chat.id),
-      userId: String(message.from?.id || 0),
+      userId: String(userId),
       language: "en", // Will be resolved by caller
       replyToMessageId: message.message_id,
       messageThreadId: message.message_thread_id,

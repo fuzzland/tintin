@@ -79,6 +79,17 @@ export interface RouterDeps {
 /** Commands that start a new wizard session */
 const WIZARD_START_COMMANDS = new Set(["/start", "/codex", "/cc", "/claude"]);
 
+/** Known command tokens (normalized, without @bot suffix) */
+const KNOWN_COMMANDS = new Set([
+  "/start", "/codex", "/cc", "/claude",
+  "/sessions", "/session", "/settings", "/setting",
+  "/lang", "/help", "/kill", "/stop", "/version",
+  "/run", "/repos", "/repo", "/connect", "/disconnect",
+  "/connections", "/connection", "/status", "/pull",
+  "/secrets", "/secret", "/runs", "/snapshots", "/snapshot",
+  "/lift", "/token",
+]);
+
 /** Commands that need special handling */
 const COMMAND_PATTERNS: Array<{ pattern: RegExp; kind: CommandIntent["kind"] }> = [
   { pattern: /^\/sessions?(?:\s|$)/i, kind: "sessions" },
@@ -238,23 +249,24 @@ export class RequestRouter {
     if (!trimmed) {
       return { type: "unknown" };
     }
+    const normalized = this.normalizeCommandText(trimmed);
 
     // 1. Check for wizard start commands
-    const wizardIntent = this.detectWizardIntent(trimmed, context);
+    const wizardIntent = this.detectWizardIntent(normalized, context);
     if (wizardIntent) {
       return wizardIntent;
     }
 
     // 2. Check for cloud commands (if enabled)
     if (context.cloudEnabled) {
-      const cloudIntent = this.detectCloudIntent(trimmed);
+      const cloudIntent = this.detectCloudIntent(normalized);
       if (cloudIntent) {
         return cloudIntent;
       }
     }
 
     // 3. Check for local commands
-    const commandIntent = this.detectCommandIntent(trimmed);
+    const commandIntent = this.detectCommandIntent(normalized);
     if (commandIntent) {
       return commandIntent;
     }
@@ -461,18 +473,25 @@ export class RequestRouter {
       return false;
     }
     // Check against all known command patterns
-    const firstWord = text.split(/\s+/)[0]?.toLowerCase() || "";
-    // Known single-word commands
-    const knownCommands = new Set([
-      "/start", "/codex", "/cc", "/claude",
-      "/sessions", "/session", "/settings", "/setting",
-      "/lang", "/help", "/kill", "/stop", "/version",
-      "/run", "/repos", "/repo", "/connect", "/disconnect",
-      "/connections", "/connection", "/status", "/pull",
-      "/secrets", "/secret", "/runs", "/snapshots", "/snapshot",
-      "/lift", "/token",
-    ]);
-    return knownCommands.has(firstWord);
+    const normalized = this.normalizeCommandText(text);
+    const firstWord = normalized.split(/\s+/)[0]?.toLowerCase() || "";
+    return KNOWN_COMMANDS.has(firstWord);
+  }
+
+  /**
+   * Normalize Telegram /cmd@bot to /cmd when it matches known commands.
+   */
+  private normalizeCommandText(text: string): string {
+    if (!text.startsWith("/")) return text;
+    const firstSpace = text.search(/\s/);
+    const token = firstSpace === -1 ? text : text.slice(0, firstSpace);
+    if (!token.includes("@")) return text;
+    const base = token.split("@")[0] ?? token;
+    if (!base) return text;
+    const normalized = base.toLowerCase();
+    if (!KNOWN_COMMANDS.has(normalized)) return text;
+    const rest = firstSpace === -1 ? "" : text.slice(firstSpace);
+    return `${base}${rest}`;
   }
 }
 
