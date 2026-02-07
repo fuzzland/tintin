@@ -185,6 +185,39 @@ const CLOUD_COMMAND_PATTERNS: Array<{ pattern: RegExp; parser: (text: string) =>
     pattern: /^\/token(?:\s|$)/i,
     parser: () => ({ kind: "tinc_token" }),
   },
+  {
+    pattern: /^\/mcp(?:\s|$)/i,
+    parser: (text) => {
+      const args = text.replace(/^\/mcp\s*/i, "").trim();
+      const parts = args.split(/\s+/);
+      if (parts[0] === "github" && parts[1] === "token" && parts[2] === "set") {
+        const token = parts.slice(3).join(" ") || null;
+        return { kind: "mcp_github_token_set", token };
+      }
+      if (parts[0] === "notion" && parts[1] === "connect") {
+        return { kind: "mcp_notion_connect" };
+      }
+      if (parts[0] === "notion" && parts[1] === "status") {
+        return { kind: "mcp_notion_status" };
+      }
+      return null;
+    },
+  },
+  {
+    pattern: /^\/repo(?:\s|$)/i,
+    parser: (text) => {
+      const args = text.replace(/^\/repo\s*/i, "").trim();
+      if (!args) return null;
+      const selectMatch = args.match(/^select\s+(\d+)$/i);
+      if (selectMatch) return { kind: "repo_select", target: selectMatch[1]! };
+      const shareMatch = args.match(/^share\s+(\d+)$/i);
+      if (shareMatch) return { kind: "repo_share", target: shareMatch[1]! };
+      const unshareMatch = args.match(/^unshare\s+(\d+)$/i);
+      if (unshareMatch) return { kind: "repo_unshare", target: unshareMatch[1]! };
+      if (args === "current") return { kind: "repo_current" };
+      return null;
+    },
+  },
 ];
 
 // ============================================================================
