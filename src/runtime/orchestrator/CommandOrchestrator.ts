@@ -17,8 +17,8 @@ import type { Logger } from "../log.js";
 import type { SessionPlatform } from "./types.js";
 import type { AppConfig } from "../config.js";
 import type { SessionListPage } from "../store.js";
-import type { SettingsCommand, SessionListIntent } from "../controller/commands.js";
-import { normalizeLanguageToken } from "../controller/commands.js";
+import type { SettingsCommand, SessionListIntent } from "../shared/types.js";
+import { normalizeLanguageToken } from "../shared/commandParser.js";
 import {
   formatSessionList,
   formatSessionFilterLabel,

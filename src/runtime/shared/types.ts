@@ -7,7 +7,7 @@ import type { UserLanguage as _UserLanguage } from "../../locales/index.js";
 
 // Re-export UserLanguage for consumers of the shared layer
 export type UserLanguage = _UserLanguage;
-import type { SessionAgent } from "../db.js";
+import type { SessionAgent, SessionStatus } from "../db.js";
 
 // ============================================================================
 // Access Control
@@ -113,10 +113,17 @@ export interface IdentityContext {
 }
 
 // ============================================================================
-// Command Parsing (re-export relevant types from commands.ts)
+// Command Parsing (shared command types)
 // ============================================================================
 
-export type { CloudCommand, SettingsCommand, SettingsIntent, LanguageCommand, SessionListIntent } from "../controller/commands.js";
+export type SessionListIntent = { statuses?: SessionStatus[]; page: number };
+
+export type SettingsCommand =
+  | { kind: "list" }
+  | { kind: "set"; target: string; value: string }
+  | { kind: "unset"; target: string };
+
+export type { CloudCommand, SettingsIntent, LanguageCommand } from "../controller/commands.js";
 
 // ============================================================================
 // Agent Selection

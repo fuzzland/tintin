@@ -7,8 +7,7 @@
  * - UI building: Platform-specific keyboard/block builders
  * - Identity resolution: IdentityResolver class + WebSocket utilities
  *
- * Command parsing is handled by the existing controller/commands.ts module,
- * which is re-exported through types.ts.
+ * Command parsing is handled by shared parsers in this layer.
  */
 
 // Types

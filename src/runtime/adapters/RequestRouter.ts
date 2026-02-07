@@ -5,9 +5,10 @@
  * This is the central decision point for all platform adapters.
  */
 
-import type { SessionAgent, SessionStatus } from "../db.js";
+import type { SessionAgent } from "../db.js";
 import type { SessionPlatform, SessionInfo } from "../orchestrator/types.js";
 import type { CloudCommand, SessionListIntent, SettingsCommand } from "../shared/types.js";
+import { parseSessionsArgs, parseSettingsArgs } from "../shared/commandParser.js";
 import type { Logger } from "../log.js";
 
 // ============================================================================
@@ -354,11 +355,11 @@ export class RequestRouter {
     switch (kind) {
       case "sessions": {
         const args = text.replace(/^\/sessions?\s*/i, "").trim();
-        return { kind: "sessions", intent: this.parseSessionsArgs(args) };
+        return { kind: "sessions", intent: parseSessionsArgs(args) };
       }
       case "settings": {
         const args = text.replace(/^\/settings?\s*/i, "").trim();
-        return { kind: "settings", command: this.parseSettingsArgs(args) };
+        return { kind: "settings", command: parseSettingsArgs(args) };
       }
       case "lang": {
         const target = text.replace(/^\/lang\s*/i, "").trim() || undefined;
@@ -381,71 +382,11 @@ export class RequestRouter {
    * Parse /sessions command arguments.
    */
   private parseSessionsArgs(args: string): SessionListIntent {
-    const tokens = args.split(/\s+/).filter(Boolean);
-    let page = 1;
-    const statuses: SessionStatus[] = [];
-
-    for (const token of tokens) {
-      const pageMatch = token.match(/^(?:page|p)=?(\d+)$/i);
-      if (pageMatch) {
-        page = parseInt(pageMatch[1]!, 10);
-        continue;
-      }
-      if (/^\d+$/.test(token)) {
-        page = parseInt(token, 10);
-        continue;
-      }
-      // Treat as status filter
-      const status = this.parseSessionStatus(token);
-      if (status) {
-        statuses.push(status);
-      }
-    }
-
-    return { page, statuses: statuses.length > 0 ? statuses : undefined };
+    return parseSessionsArgs(args);
   }
 
-  /**
-   * Parse a session status string.
-   */
-  private parseSessionStatus(token: string): SessionStatus | null {
-    const normalized = token.toLowerCase();
-    const statusMap: Record<string, SessionStatus> = {
-      running: "running",
-      run: "running",
-      active: "running",
-      finished: "finished",
-      done: "finished",
-      complete: "finished",
-      completed: "finished",
-      error: "error",
-      err: "error",
-      failed: "error",
-      killed: "killed",
-      kill: "killed",
-      stopped: "killed",
-      wizard: "wizard",
-      starting: "starting",
-    };
-    return statusMap[normalized] || null;
-  }
-
-  /**
-   * Parse /settings command arguments.
-   */
   private parseSettingsArgs(args: string): SettingsCommand {
-    if (!args) {
-      return { kind: "list" };
-    }
-    const setMatch = args.match(/^set\s+(\S+)\s+(.+)$/i);
-    if (setMatch) {
-      return { kind: "set", target: setMatch[1]!, value: setMatch[2]! };
-    }
-    const unsetMatch = args.match(/^(?:unset|del|delete|rm)\s+(\S+)$/i);
-    if (unsetMatch) {
-      return { kind: "unset", target: unsetMatch[1]! };
-    }
-    return { kind: "list" };
+    return parseSettingsArgs(args);
   }
 
   /**
