@@ -124,6 +124,13 @@ export class WebSocketAdapter extends BaseAdapter {
     };
   }
 
+  // ============================================================================
+  // WebSocket Protocol Helpers
+  // These methods provide typed wrappers around wsManager.sendToConnection()
+  // for common message types. They are WebSocket-specific and not part of
+  // the generic PlatformAdapter interface.
+  // ============================================================================
+
   /**
    * Subscribe connection to session updates.
    */

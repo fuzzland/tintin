@@ -121,21 +121,6 @@ export function parseSlackAction(actionId: string, value: string | null): Intera
   return null;
 }
 
-/**
- * ActionParser class - provides a unified interface for action parsing.
- */
-export class ActionParser {
-  /**
-   * Parse action from Telegram callback_data.
-   */
-  fromTelegram(data: string): InteractionAction | null {
-    return parseTelegramAction(data);
-  }
-
-  /**
-   * Parse action from Slack action_id and value.
-   */
-  fromSlack(actionId: string, value: string | null): InteractionAction | null {
-    return parseSlackAction(actionId, value);
-  }
-}
+// Note: ActionParser class removed - use standalone functions directly:
+// - parseTelegramAction(data)
+// - parseSlackAction(actionId, value)

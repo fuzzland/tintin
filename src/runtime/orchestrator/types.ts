@@ -61,10 +61,14 @@ export interface ChatResult {
 
 /**
  * Session action types for button interactions.
- * Unified from shared/types.ts InteractionAction.
+ * Aligned with shared/types.ts InteractionAction for consistency.
+ *
+ * Note: Uses "kill" (not "stop") to match ActionParser output and
+ * semantic meaning (killing a process). "stop_sandbox" is kept separate
+ * as it's a distinct cloud-specific operation.
  */
 export type SessionAction =
-  | { kind: "stop"; sessionId: string }
+  | { kind: "kill"; sessionId: string }
   | { kind: "review"; sessionId: string }
   | { kind: "commit"; sessionId: string }
   | { kind: "run_status"; runId: string }

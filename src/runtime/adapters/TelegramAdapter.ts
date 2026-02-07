@@ -7,20 +7,18 @@
 
 import type { Logger } from "../log.js";
 import type { TelegramClient } from "../platform/telegram.js";
-import type { ChatRequest, ChatResult, SessionOrchestrator, ActionContext } from "../orchestrator/index.js";
+import type { ChatRequest, ChatResult, ActionContext } from "../orchestrator/index.js";
 import { parseTelegramAction } from "../shared/ActionParser.js";
 import { BaseAdapter } from "./BaseAdapter.js";
 import type {
   TelegramMessageContext,
   TelegramCallbackContext,
   ResponseStrategy,
-  MessageContext,
 } from "./types.js";
 
 export interface TelegramAdapterDeps {
   telegram: TelegramClient | null;
   logger: Logger;
-  orchestrator: SessionOrchestrator;
 }
 
 export class TelegramAdapter extends BaseAdapter {

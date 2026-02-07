@@ -110,4 +110,18 @@ export class SlackAdapter extends BaseAdapter {
       threadTs: ctx.threadTs,
     };
   }
+
+  /**
+   * Send response for unrecognized interaction.
+   */
+  async sendUnknownInteraction(ctx: SlackInteractionContext): Promise<void> {
+    if (!this.deps.slack) return;
+    await this.deps.slack.postEphemeral({
+      channel: ctx.channelId,
+      user: ctx.userId,
+      text: "Unknown action",
+      thread_ts: ctx.threadTs,
+      workspaceId: ctx.workspaceId,
+    });
+  }
 }

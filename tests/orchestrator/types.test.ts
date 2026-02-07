@@ -83,8 +83,8 @@ describe("Orchestrator Types", () => {
 
   describe("SessionAction", () => {
     it("should support stop action", () => {
-      const action: SessionAction = { kind: "stop", sessionId: "session-123" };
-      assert.strictEqual(action.kind, "stop");
+      const action: SessionAction = { kind: "kill", sessionId: "session-123" };
+      assert.strictEqual(action.kind, "kill");
       assert.strictEqual(action.sessionId, "session-123");
     });
 

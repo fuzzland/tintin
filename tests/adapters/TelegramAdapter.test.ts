@@ -4,7 +4,6 @@ import { TelegramAdapter } from "../../src/runtime/adapters/TelegramAdapter.js";
 import type { TelegramAdapterDeps } from "../../src/runtime/adapters/TelegramAdapter.js";
 import type { TelegramMessageContext, TelegramCallbackContext } from "../../src/runtime/adapters/types.js";
 import type { Logger } from "../../src/runtime/log.js";
-import type { SessionOrchestrator } from "../../src/runtime/orchestrator/SessionOrchestrator.js";
 
 function createMockLogger(): Logger {
   return {
@@ -27,10 +26,6 @@ function createMockTelegram(): MockTelegram {
     answerCallbackQuery: mock.fn(async () => {}),
     editMessageText: mock.fn(async () => {}),
   };
-}
-
-function createMockOrchestrator(): SessionOrchestrator {
-  return {} as SessionOrchestrator;
 }
 
 function createMessageContext(overrides: Partial<TelegramMessageContext> = {}): TelegramMessageContext {
@@ -68,7 +63,6 @@ describe("TelegramAdapter", () => {
     const deps: TelegramAdapterDeps = {
       telegram: mockTelegram as any,
       logger: mockLogger,
-      orchestrator: createMockOrchestrator(),
     };
     adapter = new TelegramAdapter(deps);
   });
@@ -131,7 +125,6 @@ describe("TelegramAdapter", () => {
       const deps: TelegramAdapterDeps = {
         telegram: null,
         logger: mockLogger,
-        orchestrator: createMockOrchestrator(),
       };
       const nullAdapter = new TelegramAdapter(deps);
       const ctx = createMessageContext();

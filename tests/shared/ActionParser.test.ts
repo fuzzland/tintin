@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert";
-import { parseTelegramAction, parseSlackAction, ActionParser } from "../../src/runtime/shared/ActionParser.js";
+import { parseTelegramAction, parseSlackAction } from "../../src/runtime/shared/ActionParser.js";
 
 describe("ActionParser", () => {
   describe("parseTelegramAction", () => {
@@ -137,17 +137,5 @@ describe("ActionParser", () => {
     });
   });
 
-  describe("ActionParser class", () => {
-    it("should parse Telegram actions via class method", () => {
-      const parser = new ActionParser();
-      const result = parser.fromTelegram("kill:session-123");
-      assert.deepStrictEqual(result, { kind: "kill", sessionId: "session-123" });
-    });
-
-    it("should parse Slack actions via class method", () => {
-      const parser = new ActionParser();
-      const result = parser.fromSlack("kill_session", "session-123");
-      assert.deepStrictEqual(result, { kind: "kill", sessionId: "session-123" });
-    });
-  });
+  // Note: ActionParser class was removed - use standalone functions directly
 });

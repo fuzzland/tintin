@@ -165,8 +165,8 @@ export class SessionOrchestrator {
     context: ActionContext,
   ): Promise<ActionResult> {
     switch (action.kind) {
-      case "stop":
-        return this.handleStopAction(action.sessionId, context);
+      case "kill":
+        return this.handleKillAction(action.sessionId, context);
       case "review":
         return this.handleReviewAction(action.sessionId, context);
       case "commit":
@@ -181,9 +181,9 @@ export class SessionOrchestrator {
   }
 
   /**
-   * Stop a running session.
+   * Kill a running session.
    */
-  private async handleStopAction(
+  private async handleKillAction(
     sessionId: string,
     context: ActionContext,
   ): Promise<ActionResult> {

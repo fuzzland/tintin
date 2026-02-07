@@ -216,7 +216,7 @@ describe("SessionOrchestrator", () => {
         const context = createActionContext();
 
         const result = await orchestrator.handleAction(
-          { kind: "stop", sessionId: "session-123" },
+          { kind: "kill", sessionId: "session-123" },
           context,
         );
 
@@ -230,7 +230,7 @@ describe("SessionOrchestrator", () => {
         const context = createActionContext();
 
         const result = await orchestrator.handleAction(
-          { kind: "stop", sessionId: "session-123" },
+          { kind: "kill", sessionId: "session-123" },
           context,
         );
 
@@ -243,7 +243,7 @@ describe("SessionOrchestrator", () => {
         const context = createActionContext();
 
         const result = await orchestrator.handleAction(
-          { kind: "stop", sessionId: "session-123" },
+          { kind: "kill", sessionId: "session-123" },
           context,
         );
 
@@ -256,7 +256,7 @@ describe("SessionOrchestrator", () => {
         const context = createActionContext();
 
         const result = await orchestrator.handleAction(
-          { kind: "stop", sessionId: "session-123" },
+          { kind: "kill", sessionId: "session-123" },
           context,
         );
 
@@ -272,7 +272,7 @@ describe("SessionOrchestrator", () => {
         const context = createActionContext();
 
         const result = await orchestrator.handleAction(
-          { kind: "stop", sessionId: "session-123" },
+          { kind: "kill", sessionId: "session-123" },
           context,
         );
 

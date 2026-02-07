@@ -175,73 +175,50 @@ export function buildSlackSessionBlocks(opts: SessionActionOptions): SlackAction
   return [{ type: "actions", elements }];
 }
 
+// ============================================================================
+// Platform-agnostic builders
+// ============================================================================
+
+export type PlatformMarkup =
+  | { type: "inline_keyboard"; payload: TelegramInlineKeyboard }
+  | { type: "blocks"; payload: SlackActionsBlock[] };
+
 /**
- * UIBuilder class - provides a unified interface for UI building.
+ * Build run action UI for any platform.
  */
-export class UIBuilder {
-  /**
-   * Build run action UI for Telegram.
-   */
-  buildTelegramRunKeyboard(opts: RunActionOptions): TelegramInlineKeyboard {
-    return buildTelegramRunKeyboard(opts);
-  }
-
-  /**
-   * Build session action UI for Telegram.
-   */
-  buildTelegramSessionKeyboard(opts: SessionActionOptions): TelegramInlineKeyboard {
-    return buildTelegramSessionKeyboard(opts);
-  }
-
-  /**
-   * Build run action UI for Slack.
-   */
-  buildSlackRunBlocks(opts: RunActionOptions): SlackActionsBlock[] {
-    return buildSlackRunBlocks(opts);
-  }
-
-  /**
-   * Build session action UI for Slack.
-   */
-  buildSlackSessionBlocks(opts: SessionActionOptions): SlackActionsBlock[] {
-    return buildSlackSessionBlocks(opts);
-  }
-
-  /**
-   * Build run action UI for any platform.
-   */
-  buildRunActionMarkup(
-    platform: "telegram" | "slack",
-    opts: RunActionOptions,
-  ): { type: "inline_keyboard"; payload: TelegramInlineKeyboard } | { type: "blocks"; payload: SlackActionsBlock[] } {
-    if (platform === "telegram") {
-      return {
-        type: "inline_keyboard",
-        payload: this.buildTelegramRunKeyboard(opts),
-      };
-    }
+export function buildRunActionMarkup(
+  platform: "telegram" | "slack",
+  opts: RunActionOptions,
+): PlatformMarkup {
+  if (platform === "telegram") {
     return {
-      type: "blocks",
-      payload: this.buildSlackRunBlocks(opts),
+      type: "inline_keyboard",
+      payload: buildTelegramRunKeyboard(opts),
     };
   }
-
-  /**
-   * Build session action UI for any platform.
-   */
-  buildSessionActionMarkup(
-    platform: "telegram" | "slack",
-    opts: SessionActionOptions,
-  ): { type: "inline_keyboard"; payload: TelegramInlineKeyboard } | { type: "blocks"; payload: SlackActionsBlock[] } {
-    if (platform === "telegram") {
-      return {
-        type: "inline_keyboard",
-        payload: this.buildTelegramSessionKeyboard(opts),
-      };
-    }
-    return {
-      type: "blocks",
-      payload: this.buildSlackSessionBlocks(opts),
-    };
-  }
+  return {
+    type: "blocks",
+    payload: buildSlackRunBlocks(opts),
+  };
 }
+
+/**
+ * Build session action UI for any platform.
+ */
+export function buildSessionActionMarkup(
+  platform: "telegram" | "slack",
+  opts: SessionActionOptions,
+): PlatformMarkup {
+  if (platform === "telegram") {
+    return {
+      type: "inline_keyboard",
+      payload: buildTelegramSessionKeyboard(opts),
+    };
+  }
+  return {
+    type: "blocks",
+    payload: buildSlackSessionBlocks(opts),
+  };
+}
+
+// Note: UIBuilder class removed - use standalone functions directly

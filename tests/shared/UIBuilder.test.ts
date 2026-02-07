@@ -3,7 +3,7 @@ import assert from "node:assert";
 import {
   buildTelegramRunKeyboard,
   buildSlackRunBlocks,
-  UIBuilder,
+  buildRunActionMarkup,
 } from "../../src/runtime/shared/UIBuilder.js";
 
 describe("UIBuilder", () => {
@@ -125,32 +125,9 @@ describe("UIBuilder", () => {
     });
   });
 
-  describe("UIBuilder class", () => {
-    it("should build Telegram keyboard via class method", () => {
-      const builder = new UIBuilder();
-      const result = builder.buildTelegramRunKeyboard({
-        sessionId: "session-123",
-        runId: "run-456",
-        lang: "en",
-      });
-
-      assert.ok(result.inline_keyboard);
-    });
-
-    it("should build Slack blocks via class method", () => {
-      const builder = new UIBuilder();
-      const result = builder.buildSlackRunBlocks({
-        sessionId: "session-123",
-        runId: "run-456",
-        lang: "en",
-      });
-
-      assert.ok(Array.isArray(result));
-    });
-
+  describe("buildRunActionMarkup", () => {
     it("should build run action markup for telegram", () => {
-      const builder = new UIBuilder();
-      const result = builder.buildRunActionMarkup("telegram", {
+      const result = buildRunActionMarkup("telegram", {
         sessionId: "session-123",
         runId: "run-456",
         lang: "en",
@@ -160,8 +137,7 @@ describe("UIBuilder", () => {
     });
 
     it("should build run action markup for slack", () => {
-      const builder = new UIBuilder();
-      const result = builder.buildRunActionMarkup("slack", {
+      const result = buildRunActionMarkup("slack", {
         sessionId: "session-123",
         runId: "run-456",
         lang: "en",
@@ -170,4 +146,6 @@ describe("UIBuilder", () => {
       assert.strictEqual(result.type, "blocks");
     });
   });
+
+  // Note: UIBuilder class was removed - use standalone functions directly
 });

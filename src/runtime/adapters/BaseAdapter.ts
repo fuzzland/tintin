@@ -10,7 +10,7 @@
 import type { Logger } from "../log.js";
 import type { ChatRequest, ChatResult, ActionResult, SessionPlatform } from "../orchestrator/types.js";
 import type { MessageContext, ResponseStrategy, PlatformAdapter } from "./types.js";
-import { t } from "../../locales/index.js";
+import { t, type UserLanguage } from "../../locales/index.js";
 
 export abstract class BaseAdapter implements PlatformAdapter {
   abstract readonly platform: SessionPlatform;
@@ -65,13 +65,13 @@ export abstract class BaseAdapter implements PlatformAdapter {
   /**
    * Build status message from ChatResult.
    */
-  protected buildStatusMessage(result: ChatResult, lang: string): string {
+  protected buildStatusMessage(result: ChatResult, lang: UserLanguage): string {
     if (result.error) {
       return result.error;
     }
 
     if (result.queued && result.pendingCount !== undefined) {
-      return t("session.queued", lang as "en" | "zh", { n: result.pendingCount });
+      return t("session.queued", lang, { n: result.pendingCount });
     }
 
     return result.statusMessage ?? "";
