@@ -421,6 +421,7 @@ export class SlackAdapter extends BaseAdapter {
         workspaceId: teamId ?? undefined,
         enterpriseId: enterpriseId ?? undefined,
       });
+      this.deps.logger.info("[adapter] handled_unsupported platform=slack event=non_dm_message");
       return { handled: true };
     }
 

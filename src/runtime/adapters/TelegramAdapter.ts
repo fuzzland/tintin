@@ -230,6 +230,7 @@ export class TelegramAdapter extends BaseAdapter {
           priority: "user",
         });
       }
+      this.deps.logger.info("[adapter] handled_unsupported platform=telegram event=non_text_message");
       return { handled: true };
     }
 
