@@ -1,16 +1,34 @@
 import type { SettingsCommand } from "./types.js";
 
 export function parseSettingsArgs(args: string): SettingsCommand {
-  if (!args) {
+  const trimmed = args.trim();
+  if (!trimmed) return { kind: "list" };
+  const parts = trimmed.split(/\s+/);
+  const head = (parts.shift() ?? "").toLowerCase();
+  if (!head) return { kind: "list" };
+  if (head === "list") return { kind: "list" };
+
+  if (head === "mcp") {
+    const sub = (parts.shift() ?? "").toLowerCase();
+    if (!sub) return { kind: "list" };
+    if (sub === "set" && parts.length >= 2) {
+      const target = `mcp.${parts.shift()!}`;
+      return { kind: "set", target, value: parts.join(" ") };
+    }
+    if (sub === "unset" && parts.length >= 1) {
+      return { kind: "unset", target: `mcp.${parts.join(" ")}` };
+    }
     return { kind: "list" };
   }
-  const setMatch = args.match(/^set\s+(\S+)\s+(.+)$/i);
-  if (setMatch) {
-    return { kind: "set", target: setMatch[1]!, value: setMatch[2]! };
+
+  if (head === "set" && parts.length >= 2) {
+    const target = parts.shift()!;
+    return { kind: "set", target, value: parts.join(" ") };
   }
-  const unsetMatch = args.match(/^(?:unset|del|delete|rm)\s+(\S+)$/i);
-  if (unsetMatch) {
-    return { kind: "unset", target: unsetMatch[1]! };
+  if (head === "unset" && parts.length >= 1) {
+    return { kind: "unset", target: parts.join(" ") };
   }
+
+  if (parts.length >= 1) return { kind: "set", target: head, value: parts.join(" ") };
   return { kind: "list" };
 }

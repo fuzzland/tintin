@@ -31,4 +31,14 @@ describe("shared commandParser", () => {
   it("keeps playground repo id constant", () => {
     assert.strictEqual(PLAYGROUND_REPO_ID, "__playground__");
   });
+
+  it("parses mcp set shorthand in settings args", () => {
+    const result = parseSettingsArgs("mcp set search http://localhost");
+    assert.deepStrictEqual(result, { kind: "set", target: "mcp.search", value: "http://localhost" });
+  });
+
+  it("parses active session filter", () => {
+    const result = parseSessionsArgs("active");
+    assert.deepStrictEqual(result, { page: 1, statuses: ["starting", "running"] });
+  });
 });
