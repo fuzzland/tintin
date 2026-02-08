@@ -1,21 +1,22 @@
 import type { Logger } from '../log.js';
 import type { Db } from '../db.js';
 import type { AppConfig } from '../config.js';
-import type { SessionManager } from '../sessionManager.js';
 import type { CloudManager } from '../cloud/manager.js';
 import type { WebSocketManager } from './manager.js';
 import type { ClientMessage, WebSocketSection } from './types.js';
 import { ErrorCodes } from './types.js';
 import { verifyProxyToken } from '../cloud/proxy.js';
 import { requireAuth } from './guards.js';
-import { GitHubService, GitHubDisconnectService, ChatService, SandboxLifecycleService } from './services/index.js';
+import { GitHubService, GitHubDisconnectService, SandboxLifecycleService } from './services/index.js';
 import { listRunsForGroup } from '../cloud/runsQuery.js';
 import { listCloudRunsForIdentity, getIdentity } from '../cloud/store.js';
+import { WebSocketChatOrchestrator } from '../orchestrator/WebSocketChatOrchestrator.js';
+import type { SessionManager } from '../sessionManager.js';
 
 export class WebSocketHandler {
   private readonly githubService: GitHubService;
   private readonly githubDisconnectService: GitHubDisconnectService;
-  readonly chatService: ChatService | null;
+  readonly chatOrchestrator: WebSocketChatOrchestrator | null;
   readonly sandboxLifecycleService: SandboxLifecycleService | null;
 
   constructor(
@@ -47,8 +48,16 @@ export class WebSocketHandler {
       ? new SandboxLifecycleService(wsManager, cloudManager, db, logger)
       : null;
 
-    this.chatService = cloudManager
-      ? new ChatService(wsManager, cloudManager, config, db, logger, this.sandboxLifecycleService)
+    this.chatOrchestrator = cloudManager
+      ? new WebSocketChatOrchestrator({
+          wsManager,
+          logger,
+          db,
+          config,
+          sessionManager,
+          cloudManager,
+          sandboxLifecycleService: this.sandboxLifecycleService,
+        })
       : null;
   }
 
@@ -106,7 +115,7 @@ export class WebSocketHandler {
       case 'chat': {
         const auth = requireAuth(this.wsManager, connId);
         if (!auth) return;
-        if (!this.chatService) {
+        if (!this.chatOrchestrator) {
           this.wsManager.sendToConnection(connId, {
             type: 'error',
             code: ErrorCodes.SERVICE_ERROR,
@@ -114,14 +123,14 @@ export class WebSocketHandler {
           });
           return;
         }
-        await this.chatService.handleChat(connId, auth.conn, message);
+        await this.chatOrchestrator.handleChat(connId, auth.conn, message);
         break;
       }
 
       case 'stop': {
         const auth = requireAuth(this.wsManager, connId);
         if (!auth) return;
-        if (!this.chatService) {
+        if (!this.chatOrchestrator) {
           this.wsManager.sendToConnection(connId, {
             type: 'error',
             code: ErrorCodes.SERVICE_ERROR,
@@ -129,14 +138,14 @@ export class WebSocketHandler {
           });
           return;
         }
-        await this.chatService.handleStop(connId, auth.conn, message);
+        await this.chatOrchestrator.handleStop(connId, auth.conn, message);
         break;
       }
 
       case 'subscribe': {
         const auth = requireAuth(this.wsManager, connId);
         if (!auth) return;
-        if (!this.chatService) {
+        if (!this.chatOrchestrator) {
           this.wsManager.sendToConnection(connId, {
             type: 'error',
             code: ErrorCodes.SERVICE_ERROR,
@@ -144,7 +153,7 @@ export class WebSocketHandler {
           });
           return;
         }
-        await this.chatService.handleSubscribe(connId, auth.conn, message);
+        await this.chatOrchestrator.handleSubscribe(connId, auth.conn, message);
         break;
       }
 

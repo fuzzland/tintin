@@ -49,6 +49,7 @@ export interface ChatMessage {
   repoIds?: string[];                     // Optional, specify repos on first message
   agent?: 'codex' | 'claude_code';        // Optional, specify agent on first message
   restoreSnapshotId?: string;             // Optional, restore from snapshot
+  mode?: 'queue' | 'interrupt';           // Optional, default queue (interrupt stops active run first)
 }
 
 export interface StopMessage {

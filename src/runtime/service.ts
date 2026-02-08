@@ -467,7 +467,7 @@ export async function createBotService(deps: BotServiceDeps) {
       const sandboxService = wsHandler.sandboxLifecycleService;
       wsManager.setDisconnectHandler(async (connId, conn) => {
         // Clean up resources for disconnected connection
-        wsHandler!.chatService?.cleanupConnection(connId);
+        wsHandler!.chatOrchestrator?.cleanupConnection(connId);
         await sandboxService.terminateSandbox(connId, conn);
       });
     }
