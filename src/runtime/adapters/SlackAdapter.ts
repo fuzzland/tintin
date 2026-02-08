@@ -396,11 +396,6 @@ export class SlackAdapter extends BaseAdapter {
     teamId: string | null,
     enterpriseId: string | null,
   ): Promise<HandleEventResult> {
-    // Skip if no router or orchestrator
-    if (!this.deps.router || !this.deps.orchestrator) {
-      return { handled: false };
-    }
-
     // Skip bot messages and subtypes
     if (event.subtype || event.bot_id || event.bot_profile) {
       return { handled: false };
@@ -414,8 +409,23 @@ export class SlackAdapter extends BaseAdapter {
       return { handled: false };
     }
 
-    // Only handle DM messages
+    // Only handle DM messages; respond ephemerally in channels
     if (!channelId.startsWith("D")) {
+      const slack = this.deps.slack;
+      if (!slack) return { handled: false };
+      await slack.postEphemeral({
+        channel: channelId,
+        user: userId,
+        text: "Please DM me to start or continue a session.",
+        thread_ts: event.thread_ts,
+        workspaceId: teamId ?? undefined,
+        enterpriseId: enterpriseId ?? undefined,
+      });
+      return { handled: true };
+    }
+
+    // Skip if no router or orchestrator
+    if (!this.deps.router || !this.deps.orchestrator) {
       return { handled: false };
     }
 
