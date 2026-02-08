@@ -262,6 +262,29 @@ describe("TelegramAdapter", () => {
       assert.strictEqual(result.handled, false);
     });
 
+    it("should handle non-text messages with a reply", async () => {
+      const deps: TelegramAdapterDeps = {
+        telegram: mockTelegram as any,
+        logger: mockLogger,
+        // No router needed for non-text handling
+      };
+      const adapterWithClient = new TelegramAdapter(deps);
+
+      const result = await adapterWithClient.handleUpdate({
+        update_id: 1,
+        message: {
+          message_id: 1,
+          date: Date.now(),
+          chat: { id: 123, type: "private" },
+          from: { id: 456, first_name: "Test" },
+          photo: [{ file_id: "abc", file_unique_id: "u", width: 1, height: 1, file_size: 10 }],
+        },
+      } as any);
+
+      assert.strictEqual(result.handled, true);
+      assert.strictEqual(mockTelegram.sendMessage.mock.calls.length, 1);
+    });
+
     it("should return not handled for unknown intent without session", async () => {
       const { createRequestRouter } = await import("../../src/runtime/adapters/RequestRouter.js");
       const router = createRequestRouter({ logger: mockLogger });
