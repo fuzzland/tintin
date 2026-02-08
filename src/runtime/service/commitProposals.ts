@@ -5,7 +5,7 @@ import type { Logger } from "../log.js";
 import { isTextMessage, type SessionMessage } from "../messaging.js";
 import type { TelegramClient } from "../platform/telegram.js";
 import type { SlackClient } from "../platform/slack.js";
-import type { CommitProposal, CommitProposalStore } from "../controller/types.js";
+import type { CommitProposal, CommitProposalStore } from "../shared/commitProposals.js";
 import type { InteractiveMarkup } from "../platform/base.js";
 import { isUserLanguage, t, type UserLanguage } from "../../locales/index.js";
 import { mergeTextIntoSlackBlocks } from "../message/slack.js";

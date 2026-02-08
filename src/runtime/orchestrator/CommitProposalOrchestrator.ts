@@ -1,7 +1,7 @@
 import type { Db } from "../db.js";
 import type { Logger } from "../log.js";
 import type { CloudManager } from "../cloud/manager.js";
-import type { CommitProposalStore, CommitProposalAction } from "../controller/types.js";
+import type { CommitProposalStore, CommitProposalAction } from "../shared/commitProposals.js";
 import type { SessionRow } from "../store.js";
 import type { IMessagingPlatform, InteractiveMarkup } from "../platform/base.js";
 import type { TelegramClient } from "../platform/telegram.js";

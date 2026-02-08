@@ -27,7 +27,7 @@ import { createCommandOrchestrator } from "../orchestrator/CommandOrchestrator.j
 import { createCloudOrchestrator } from "../orchestrator/CloudOrchestrator.js";
 import { CommitProposalOrchestrator } from "../orchestrator/CommitProposalOrchestrator.js";
 import { createForumTopicManager } from "../adapters/telegram/ForumTopicManager.js";
-import type { CommitProposalStore } from "../controller/types.js";
+import type { CommitProposalStore } from "../shared/commitProposals.js";
 import {
   getUserLanguage,
   getWizardState,
