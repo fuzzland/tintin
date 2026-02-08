@@ -247,7 +247,7 @@ describe("SlackAdapter", () => {
       assert.strictEqual(result.handled, false);
     });
 
-    it("should return not handled for non-DM channels", async () => {
+    it("should respond ephemerally for non-DM channels", async () => {
       const { createRequestRouter } = await import("../../src/runtime/adapters/RequestRouter.js");
       const router = createRequestRouter({ logger: mockLogger });
 
@@ -272,7 +272,8 @@ describe("SlackAdapter", () => {
         team_id: "T123456",
       });
 
-      assert.strictEqual(result.handled, false);
+      assert.strictEqual(result.handled, true);
+      assert.strictEqual(mockSlack.postEphemeral.mock.calls.length, 1);
     });
 
     it("should return not handled for unknown intent without session", async () => {
