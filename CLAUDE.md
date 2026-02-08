@@ -32,115 +32,74 @@ node dist/tinc.js lift|pull|attach
 ### System Layer Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                      User Interface Layer                        │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐ │
-│  │ Telegram │  │  Slack   │  │WebSocket │  │    Cloud UI      │ │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────────┬─────────┘ │
-└───────┼─────────────┼─────────────┼─────────────────┼───────────┘
-        │             │             │                 │
-        └─────────────┴──────┬──────┴─────────────────┘
-                             │
-┌────────────────────────────┼────────────────────────────────────┐
-│                      Service Layer                               │
-│                             │                                    │
-│  ┌──────────────────────────▼───────────────────────────────┐   │
-│  │                   service.ts                              │   │
-│  │  HTTP Server · Bot Init · OAuth Callbacks · UI Endpoints  │   │
-│  └──────────────────────────┬───────────────────────────────┘   │
-│                             │                                    │
-│  ┌──────────────────────────▼───────────────────────────────┐   │
-│  │                  controller2.ts                           │   │
-│  │   Command Parser · Conversation Flow · Session Dispatch   │   │
-│  │  ┌─────────────────────────────────────────────────────┐  │   │
-│  │  │  Platform Handlers (TG/Slack/Cloud/Interaction)     │  │   │
-│  │  └─────────────────────────────────────────────────────┘  │   │
-│  └────┬─────────────────────┬───────────────────────┬───────┘   │
-│       │                     │                       │            │
-│       │    ┌────────────────▼────────────────┐      │            │
-│       │    │        Shared Services          │      │            │
-│       │    │  ┌────────────┐ ┌─────────────┐ │      │            │
-│       │    │  │AccessControl│ │ ActionParser│ │      │            │
-│       │    │  │ UIBuilder  │ │IdentityRes. │ │      │            │
-│       │    │  └────────────┘ └─────────────┘ │      │            │
-│       │    └─────────────────────────────────┘      │            │
-└───────┼─────────────────────┼───────────────────────┼───────────┘
-        │                     │                       │
-┌───────┼─────────────────────┼───────────────────────┼───────────┐
-│       │       Execution Layer                       │           │
-│       │                     │                       │           │
-│  ┌────▼─────────────┐  ┌────▼─────────────┐  ┌─────▼────────┐  │
-│  │  SessionManager  │  │   CloudManager   │  │ Cloud Proxy  │  │
-│  │  ┌─────────────┐ │  │  ┌────────────┐  │  │ (token auth) │  │
-│  │  │StateMachine │ │  │  │ModalProvider│ │  └──────────────┘  │
-│  │  │ProcessMgr   │ │  │  │LocalProvider│ │                    │
-│  │  │ChatGptProxy │ │  │  └────────────┘  │                    │
-│  │  │EnvBuilder   │ │  └──────────────────┘                    │
-│  │  └─────────────┘ │                                          │
-│  └────────┬─────────┘                                          │
-└───────────┼────────────────────────────────────────────────────┘
-            │
-┌───────────┼────────────────────────────────────────────────────┐
-│           │           Agent Layer                               │
-│  ┌────────▼─────────┐                                          │
-│  │   AgentAdapter   │  ← Strategy Pattern                      │
-│  │  ┌─────────────┐ │                                          │
-│  │  │ CodexAgent  │ │  CLI: codex --json                       │
-│  │  │ ClaudeAgent │ │  CLI: claude --output-format stream-json │
-│  │  └─────────────┘ │                                          │
-│  └────────┬─────────┘                                          │
-└───────────┼────────────────────────────────────────────────────┘
-            │ JSONL Output
-┌───────────┼────────────────────────────────────────────────────┐
-│           │         Stream Layer                                │
-│  ┌────────▼─────────────────────────────────────────────────┐  │
-│  │                    JsonlStreamer                          │  │
-│  │  ┌────────────────┐  ┌─────────────────────────────────┐ │  │
-│  │  │ToolCallManager│  │ PlaywrightScreenshotManager     │ │  │
-│  │  │PlanUpdateHdlr │  │ EventMappers (Codex/Claude)     │ │  │
-│  │  └────────────────┘  └─────────────────────────────────┘ │  │
-│  └──────────────────────────────┬───────────────────────────┘  │
-└─────────────────────────────────┼──────────────────────────────┘
-                                  │ StreamFragment
-┌─────────────────────────────────┼──────────────────────────────┐
-│                                 │      Storage Layer           │
-│  ┌──────────────┐  ┌────────────▼───┐  ┌───────────────────┐  │
-│  │   Database   │  │  JSONL Files   │  │   S3 Artifacts    │  │
-│  │   (Kysely)   │  │  (sessions)    │  │  (screenshots)    │  │
-│  └──────────────┘  └────────────────┘  └───────────────────┘  │
-└────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│                        User Interface Layer                        │
+│      Telegram · Slack · WebSocket · Cloud UI · CLI                  │
+└───────────────┬───────────────────────────────┬────────────────────┘
+                │                               │
+        ┌───────▼────────┐               ┌──────▼────────┐
+        │ service.ts     │               │ WebSocket     │
+        │ HTTP + Bots    │               │ manager.ts    │
+        │ adapterFactory │               │ handler.ts    │
+        └───────┬────────┘               └──────┬────────┘
+                │                               │
+        ┌───────▼────────┐               ┌──────▼────────┐
+        │ Adapters       │               │ WS Adapter    │
+        │ RequestRouter  │               │ + WS Chat     │
+        │ (TG/Slack)     │               │ Orchestrator  │
+        └───────┬────────┘               └──────┬────────┘
+                │                               │
+                └──────────────┬────────────────┘
+                               │
+                     ┌─────────▼─────────┐
+                     │ Orchestrators     │
+                     │ Session/Cloud/    │
+                     │ Command/Wizard/   │
+                     │ CommitProposal    │
+                     └─────────┬─────────┘
+                               │
+                     ┌─────────▼─────────┐
+                     │ SessionManager    │
+                     │ CloudManager      │
+                     │ JsonlStreamer     │
+                     └─────────┬─────────┘
+                               │
+                     ┌─────────▼─────────┐
+                     │ DB · JSONL · S3   │
+                     └───────────────────┘
 ```
 
 ### Module Dependency Graph
 
 ```
-┌─────────────┐
-│ controller2 │
-└──────┬──────┘
-       │
-       ├──────────────────────────────────────────────────────┐
-       │                                                      │
-       ▼                                                      ▼
-┌──────────────────────────────────────────┐    ┌──────────────────────┐
-│           Platform Handlers               │    │    Shared Services   │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐  │    │  ┌────────────────┐  │
-│  │ Telegram │ │  Slack   │ │Interaction│ │───▶│  │ AccessControl  │  │
-│  │ Handler  │ │ Handler  │ │ Handler   │ │    │  │ ActionParser   │  │
-│  └──────────┘ └──────────┘ └──────────┘  │    │  │ UIBuilder      │  │
-└──────────────────┬───────────────────────┘    │  │ IdentityResolver│ │
-                   │                            │  └────────────────┘  │
-       ┌───────────┴───────────┬────────────┐   └──────────────────────┘
-       │                       │            │
-       ▼                       ▼            ▼
-┌──────────────┐       ┌──────────────┐ ┌──────────────┐
-│SessionManager│       │ CloudManager │ │ WebSocket    │
-└──────┬───────┘       └──────────────┘ │   Handler    │
-       │                                └──────────────┘
-       ▼
-┌──────────────┐       ┌──────────────┐
-│ AgentAdapter │       │  Streamer    │
-│ (Codex/CC)   │       │ EventMappers │
-└──────────────┘       └──────────────┘
+┌────────────┐
+│ service.ts │
+└──────┬─────┘
+       ├──────────────────────────────┐
+       │                              │
+       ▼                              ▼
+┌────────────────┐            ┌──────────────────┐
+│ adapterFactory │            │ WebSocket        │
+│ RequestRouter  │            │ manager/handler  │
+└──────┬─────────┘            └──────┬───────────┘
+       │                              │
+       ▼                              ▼
+┌────────────────┐            ┌──────────────────────┐
+│ TG/Slack        │            │ WebSocketChatOrch.   │
+│ Adapters        │            │ WebSocketAdapter     │
+└──────┬──────────┘            └─────────┬────────────┘
+       │                               │
+       └──────────────┬────────────────┘
+                      ▼
+               ┌──────────────┐
+               │ Orchestrators│
+               └──────┬───────┘
+                      ▼
+              ┌────────────────┐
+              │ SessionManager │
+              │ CloudManager   │
+              │ JsonlStreamer  │
+              └────────────────┘
 ```
 
 ## File Structure
@@ -150,9 +109,39 @@ node dist/tinc.js lift|pull|attach
 ```
 src/runtime/
 ├── service.ts              # HTTP server & bot initialization
-├── controller2.ts          # Central orchestration (4300+ LOC)
+├── service/                # HTTP utilities, adapter factory, commit proposals
+├── adapters/               # Platform adapters + request routing
+│   ├── BaseAdapter.ts
+│   ├── RequestRouter.ts
+│   ├── TelegramAdapter.ts
+│   ├── SlackAdapter.ts
+│   ├── WebSocketAdapter.ts
+│   └── telegram/           # Telegram-specific helpers (forum topics)
+├── orchestrator/           # Platform-agnostic orchestration
+│   ├── SessionOrchestrator.ts
+│   ├── CloudOrchestrator.ts
+│   ├── CommandOrchestrator.ts
+│   ├── WizardOrchestrator.ts
+│   ├── CommitProposalOrchestrator.ts
+│   └── WebSocketChatOrchestrator.ts
+├── websocket/              # WebSocket communication
+│   ├── manager.ts          # Connection management
+│   ├── handler.ts          # Message routing & auth
+│   ├── guards.ts           # Auth guard utilities
+│   ├── types.ts            # Protocol definitions
+│   └── services/           # GitHub OAuth + sandbox lifecycle
+│       ├── github.ts
+│       ├── githubDisconnect.ts
+│       └── sandboxLifecycle.ts
 ├── sessionManager.ts       # Agent session lifecycle
+├── session/                # State machine + process lifecycle
 ├── streamer.ts             # JSONL to chat fragments
+├── streamer/               # StreamFragment mappers + tool pairing
+├── cloud/                  # Cloud execution + providers
+├── platform/               # Telegram/Slack client wrappers
+├── notification/           # Run completion notifications
+├── shared/                 # Access control, UIBuilder, identity resolution
+├── chat/                   # Chat session helpers + store
 ├── agents.ts               # Agent adapter interface
 ├── codex.ts                # Codex CLI adapter
 ├── claudeCode.ts           # Claude Code CLI adapter
@@ -160,76 +149,7 @@ src/runtime/
 ├── db.ts                   # Database types & connection
 ├── store.ts                # Data access layer
 ├── messaging.ts            # Platform message sending
-├── playwrightMcp.ts        # Playwright MCP integration
-├── prompt.ts               # Prompt building utilities
 ├── redact.ts               # Secret redaction
-├── util.ts                 # Shared utilities
-│
-├── streamer/               # Modular streamer components
-│   ├── index.ts            # Public exports
-│   ├── types.ts            # StreamFragment, MessageVerbosity
-│   ├── ToolCallManager.ts  # Tool call/output pairing queue
-│   ├── PlanUpdateHandler.ts # Plan update parsing
-│   ├── PlaywrightScreenshotManager.ts # Browser screenshots
-│   └── eventMappers/
-│       ├── index.ts        # EVENT_MAPPERS registry
-│       ├── helpers.ts      # Shared formatting utilities
-│       ├── codexMapper.ts  # Codex JSONL → StreamFragment
-│       ├── claudeMapper.ts # Claude JSONL → StreamFragment
-│       └── messageDispatcher.ts # event_msg handling
-│
-├── session/                # Modular session components
-│   ├── index.ts            # Public exports
-│   ├── types.ts            # SessionStatus, VALID_TRANSITIONS
-│   ├── SessionStateMachine.ts  # State transition validation
-│   ├── ProcessLifecycleManager.ts # Process registration/kill
-│   ├── ChatGptProxyManager.ts  # ChatGPT OAuth proxy
-│   └── EnvironmentBuilder.ts   # Fluent env var builder
-│
-├── shared/                 # Cross-platform shared services
-│   ├── index.ts            # Public exports
-│   ├── types.ts            # Shared type definitions
-│   ├── AccessControl.ts    # Unified access control (TG/Slack/WS)
-│   ├── ActionParser.ts     # Button interaction parsing
-│   ├── UIBuilder.ts        # Platform-specific UI components
-│   └── IdentityResolver.ts # User identity resolution
-│
-├── orchestrator/           # Session orchestration (future)
-│   ├── index.ts            # Public exports
-│   ├── types.ts            # ChatRequest, ChatResult types
-│   └── SessionOrchestrator.ts  # Unified session handling
-│
-├── adapters/               # Platform adapters (future)
-│   ├── index.ts            # Public exports
-│   ├── types.ts            # Adapter interfaces
-│   ├── BaseAdapter.ts      # Shared adapter logic
-│   ├── TelegramAdapter.ts  # Telegram platform adapter
-│   ├── SlackAdapter.ts     # Slack platform adapter
-│   └── WebSocketAdapter.ts # WebSocket platform adapter
-│
-├── cloud/                  # Cloud execution
-│   ├── manager.ts          # Cloud run orchestration
-│   ├── modalProvider.ts    # Modal sandbox provider
-│   ├── localProvider.ts    # Local provider (testing)
-│   ├── proxy.ts            # Cloud Proxy token auth
-│   └── store.ts            # Identity/workspace storage
-│
-├── websocket/              # WebSocket communication
-│   ├── manager.ts          # Connection management
-│   ├── handler.ts          # Message routing & auth
-│   ├── guards.ts           # Auth guard utilities
-│   ├── types.ts            # Protocol definitions
-│   └── services/           # WebSocket message handlers
-│       ├── index.ts        # Public exports
-│       ├── cloud.ts        # CloudRunService - cloud_run handling
-│       ├── chat.ts         # ChatService - local chat handling
-│       ├── github.ts       # GitHubService - OAuth & repos
-│       └── sandboxLifecycle.ts # Sandbox lifecycle management
-│
-├── chatgpt/                # ChatGPT OAuth
-│   ├── oauth.ts            # Auth flow handling
-│   └── store.ts            # Token storage
-│
 └── migrations/             # Database migrations
 ```
 
@@ -237,40 +157,14 @@ src/runtime/
 
 ```
 tests/
-├── cloud-config.test.ts
-├── cloud-proxy.test.ts
-├── cloud-modal-provider.test.ts
-├── cloud-modal-logs.test.ts
-│
-├── streamer/
-│   ├── ToolCallManager.test.ts
-│   ├── PlanUpdateHandler.test.ts
-│   └── eventMappers/
-│       ├── helpers.test.ts
-│       ├── codexMapper.test.ts
-│       └── claudeMapper.test.ts
-│
-├── session/
-│   ├── types.test.ts
-│   ├── SessionStateMachine.test.ts
-│   ├── ProcessLifecycleManager.test.ts
-│   └── EnvironmentBuilder.test.ts
-│
-├── shared/
-│   ├── ActionParser.test.ts
-│   ├── AccessControl.test.ts
-│   ├── UIBuilder.test.ts
-│   └── IdentityResolver.test.ts
-│
+├── adapters/
 ├── orchestrator/
-│   ├── types.test.ts
-│   └── SessionOrchestrator.test.ts
-│
-└── adapters/
-    ├── BaseAdapter.test.ts
-    ├── TelegramAdapter.test.ts
-    ├── SlackAdapter.test.ts
-    └── WebSocketAdapter.test.ts
+├── websocket/
+├── session/
+├── streamer/
+├── shared/
+├── cloud/
+└── runtime/
 ```
 
 ## Data Flow Diagrams
@@ -290,90 +184,49 @@ tests/
                           └──────┬───────┘
                                  │
                                  ▼
+                          ┌──────────────────┐
+                          │ Adapter + Router │
+                          │ (TG/Slack)       │
+                          └──────┬───────────┘
+                                 │
+                                 ▼
+                          ┌──────────────────┐
+                          │ Orchestrators    │
+                          │ Session/Command  │
+                          │ Wizard/Cloud     │
+                          └──────┬───────────┘
+                                 │
+                                 ▼
                           ┌──────────────┐
-                          │ controller2  │
-                          │ handleChat() │
+                          │SessionManager│
                           └──────┬───────┘
                                  │
-              ┌──────────────────┼──────────────────┐
-              │                  │                  │
-              ▼                  ▼                  ▼
-       ┌────────────┐    ┌────────────┐     ┌────────────┐
-       │ New Session│    │Resume Sess │     │  Kill Sess │
-       └─────┬──────┘    └─────┬──────┘     └────────────┘
-             │                 │
-             └────────┬────────┘
-                      │
-                      ▼
-              ┌──────────────┐     env vars
-              │SessionManager│ ◄────────────┐
-              │startNew/     │              │
-              │resumeSession │     ┌────────┴────────┐
-              └──────┬───────┘     │EnvironmentBuilder│
-                     │             │ - Language       │
-                     │             │ - CloudProxy     │
-                     │             │ - ChatGptProxy   │
-                     │             └─────────────────┘
-                     ▼
-              ┌──────────────┐
-              │ AgentAdapter │
-              │  spawnExec() │
-              └──────┬───────┘
-                     │
-                     ▼
-         ┌─────────────────────┐
-         │   CLI Process       │
-         │ codex / claude-code │
-         │                     │
-         │  stdin ◄── prompt   │
-         │  stdout ──▶ JSONL   │
-         └──────────┬──────────┘
-                    │
-                    ▼ (write to file)
-         ┌─────────────────────┐
-         │    JSONL File       │
-         │ ~/.tintin/sessions/ │
-         └──────────┬──────────┘
-                    │
-                    │ (poll every N ms)
-                    ▼
-         ┌─────────────────────┐
-         │   JsonlStreamer     │
-         │     pollOnce()      │
-         └──────────┬──────────┘
-                    │
-                    ▼
-         ┌─────────────────────┐
-         │   EVENT_MAPPERS     │
-         │ - codexMapper       │
-         │ - claudeMapper      │
-         └──────────┬──────────┘
-                    │
-                    ▼
-         ┌─────────────────────┐
-         │  StreamFragment     │
-         │ - text              │
-         │ - tool_call         │
-         │ - tool_output       │
-         │ - plan_update       │
-         └──────────┬──────────┘
-                    │
-                    ▼
-         ┌─────────────────────┐
-         │  sendToSession()    │
-         │  (rate-limited)     │
-         └──────────┬──────────┘
-                    │
-                    ▼
-         ┌─────────────────────┐
-         │  Telegram / Slack   │
-         │     / WebSocket     │
-         └──────────┬──────────┘
-                    │
-                    ▼
-              ┌──────────┐
-              │   User   │
-              └──────────┘
+                                 ▼
+                          ┌──────────────┐
+                          │ AgentAdapter │
+                          │  spawnExec() │
+                          └──────┬───────┘
+                                 │
+                                 ▼
+                        ┌──────────────────┐
+                        │ CLI Process      │
+                        │ codex/claudeCode │
+                        └──────┬───────────┘
+                               │ JSONL
+                               ▼
+                        ┌──────────────────┐
+                        │ JsonlStreamer    │
+                        └──────┬───────────┘
+                               │
+                               ▼
+                        ┌──────────────────┐
+                        │ Adapter send()   │
+                        └──────┬───────────┘
+                               │
+                               ▼
+                            ┌─────┐
+                            │User │
+                            └─────┘
 ```
 
 ### Tool Call Pairing Flow
@@ -472,26 +325,25 @@ Valid Transitions:
       │  ◀─────── Connection Accepted ─────────  │
       │                                           │
       │  ──────── {"type": "chat",         ────▶  │
-      │            "content": "Hello"}            │
+      │            "chatId": "uuid",              │
+      │            "prompt": "Hello",             │
+      │            "mode": "queue|interrupt"}     │
       │                                           │
-      │                                    ┌──────┴──────┐
-      │                                    │  Handler    │
-      │                                    │handleMessage│
-      │                                    └──────┬──────┘
+      │  ◀─────── {"type": "run_status",  ─────  │
+      │            "chatId": "uuid",              │
+      │            "status": "queued"}            │
       │                                           │
-      │                                    ┌──────┴──────┐
-      │                                    │ Session     │
-      │                                    │ Manager     │
-      │                                    └──────┬──────┘
-      │                                           │
-      │  ◀─────── {"type": "fragment",     ─────  │
-      │            "text": "I'll help..."}        │
+      │  ◀─────── {"type": "chunk",       ─────  │
+      │            "chatId": "uuid",              │
+      │            "content": "I'll help"}        │
       │                                           │
       │  ◀─────── {"type": "tool_call",    ─────  │
+      │            "chatId": "uuid",              │
       │            "name": "Read"}                │
       │                                           │
       │  ◀─────── {"type": "tool_output",  ─────  │
-      │            "content": "..."}              │
+      │            "chatId": "uuid",              │
+      │            "output": "..."}               │
       │                                           │
       │  ◀─────── {"type": "done"}         ─────  │
       │                                           │
@@ -507,34 +359,44 @@ Valid Transitions:
       │  ──────── {"type": "auth"} ───────────▶  │
       │  ◀─────── {"type": "auth_ok"} ─────────  │
       │                                           │
-      │  ──────── {"type": "cloud_run",    ────▶  │
+      │  ──────── {"type": "chat",         ────▶  │
+      │            "chatId": "uuid",              │
       │            "repoIds": [...],              │
       │            "prompt": "Fix bug"}           │
-      │                                           │
-      │                                    ┌──────┴──────┐
-      │                                    │CloudRunSvc  │
-      │                                    │handleCloudRun│
-      │                                    └──────┬──────┘
       │                                           │
       │                                    ┌──────┴──────┐
       │                                    │CloudManager │
       │                                    │  startRun   │
       │                                    └──────┬──────┘
       │                                           │
-      │  ◀─────── {"type": "run_status"}   ─────  │
-      │  ◀─────── {"type": "session_started"} ──  │
-      │  ◀─────── {"type": "run_links"}    ─────  │
+      │  ◀─────── {"type": "run_status",   ─────  │
+      │            "chatId": "uuid"}              │
+      │  ◀─────── {"type": "browser_session"}     │
       │  ◀─────── {"type": "chunk", ...}   ─────  │
       │  ◀─────── {"type": "tool_call"}    ─────  │
       │  ◀─────── {"type": "tool_output"}  ─────  │
       │  ◀─────── {"type": "done"}         ─────  │
 ```
 
+### Business Flow (High-level)
+
+```
+User (TG/Slack) → Adapter → RequestRouter → Orchestrators
+  → SessionManager/CloudManager → JsonlStreamer → Adapter → User
+```
+
+```
+WebSocket Client → WebSocketHandler → WebSocketChatOrchestrator
+  → CloudManager → SessionManager → JsonlStreamer → WebSocketAdapter → Client
+```
+
 ## Key Modules (`src/runtime/`)
 
 ### Core Modules
 
-- **controller2.ts**: Central orchestration (4300+ LOC). Parses chat commands, manages conversation flow, coordinates sessions and cloud runs.
+- **orchestrator/**: Platform-agnostic flows (session, cloud, command, wizard, commit proposals, WebSocket chat).
+- **adapters/**: Telegram/Slack adapters + `RequestRouter`; WebSocketAdapter for outbound WS messages.
+- **service/adapterFactory.ts**: Wires adapters ↔ orchestrators ↔ Session/Cloud managers.
 - **sessionManager.ts**: Agent session lifecycle - spawns processes, monitors JSONL output, handles termination.
 - **streamer.ts**: Converts JSONL events to chat fragments with rate-limiting and chunking.
 - **service.ts**: HTTP server & bot initialization - Slack webhooks, OAuth callbacks, UI endpoints.
@@ -570,9 +432,9 @@ Cross-platform shared services that eliminate duplicate code across Telegram, Sl
 - **cloud/proxy.ts**: Cloud Proxy token authentication - allows CLI agents to access cloud API endpoints securely.
 - **websocket/**: WebSocket real-time communication
   - `manager.ts` manages connections, `handler.ts` routes messages
-  - `services/CloudRunService` handles `cloud_run` and `subscribe_run` for cloud sandbox execution
-  - `services/ChatService` handles local `chat` sessions
-  - `services/GitHubService` handles OAuth and repository listing
+  - `orchestrator/WebSocketChatOrchestrator.ts` handles `chat`/`stop`/`subscribe`
+  - `adapters/WebSocketAdapter.ts` emits WS responses
+  - `services/` handles GitHub OAuth + sandbox lifecycle
 - **chatgpt/**: ChatGPT OAuth integration - `oauth.ts` handles authentication flow, `store.ts` manages tokens.
 
 ## Code Conventions
