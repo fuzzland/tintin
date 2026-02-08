@@ -277,7 +277,7 @@ graph LR
 |------|------|----------|
 | `auth` | 认证 | `token` |
 | `ping` | 心跳 | - |
-| `chat` | 发送消息 | `chatId`, `prompt`, `repoIds?`, `agent?` |
+| `chat` | 发送消息 | `chatId`, `prompt`, `repoIds?`, `agent?`, `mode?` |
 | `stop` | 停止会话 | `chatId` |
 | `subscribe` | 订阅会话 | `chatId` |
 | `list_runs` | 运行列表 | `limit?` |
@@ -363,6 +363,14 @@ ws.send(JSON.stringify({
   type: 'chat',
   chatId: 'unique-chat-id',      // 相同 chatId
   prompt: '添加单元测试'          // 自动继承上下文
+}));
+
+// 立即中断当前运行并开始新会话（同一 chatId）
+ws.send(JSON.stringify({
+  type: 'chat',
+  chatId: 'unique-chat-id',
+  prompt: '立刻改用另一种实现',
+  mode: 'interrupt'              // 可选：interrupt 会先 stop 再启动新 run
 }));
 ```
 
@@ -889,6 +897,7 @@ interface ChatMessage {
   repoIds?: string[];                // 可选，首条消息指定仓库
   agent?: 'codex' | 'claude_code';   // 可选，指定 Agent
   restoreSnapshotId?: string;        // 可选，从快照恢复
+  mode?: 'queue' | 'interrupt';      // 可选，默认 queue；interrupt 会先 stop 再启动新 run
 }
 
 // 停止会话
