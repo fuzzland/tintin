@@ -30,7 +30,7 @@ import {
   applyIdentitySettingsCommand,
   applyCloudSettingsCommand,
   formatSettingsSummary,
-} from "../controller/settings.js";
+} from "../shared/settingsApply.js";
 
 // ============================================================================
 // Types
