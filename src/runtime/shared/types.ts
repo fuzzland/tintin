@@ -123,7 +123,9 @@ export type SettingsCommand =
   | { kind: "set"; target: string; value: string }
   | { kind: "unset"; target: string };
 
-export type { CloudCommand, SettingsIntent, LanguageCommand } from "../controller/commands.js";
+export type SettingsIntent = { cmd: SettingsCommand; defaultAgent: SessionAgent };
+
+export type { CloudCommand, LanguageCommand } from "./commands.js";
 
 // ============================================================================
 // Agent Selection
