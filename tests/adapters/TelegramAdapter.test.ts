@@ -247,7 +247,7 @@ describe("TelegramAdapter", () => {
       assert.strictEqual(result.handled, false);
     });
 
-    it("should return not handled for empty message", async () => {
+    it("should reply for empty message text", async () => {
       const result = await adapter.handleUpdate({
         update_id: 1,
         message: {
@@ -259,7 +259,8 @@ describe("TelegramAdapter", () => {
         },
       });
 
-      assert.strictEqual(result.handled, false);
+      assert.strictEqual(result.handled, true);
+      assert.strictEqual(mockTelegram.sendMessage.mock.calls.length, 1);
     });
 
     it("should handle non-text messages with a reply", async () => {

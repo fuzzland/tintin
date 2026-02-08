@@ -219,13 +219,22 @@ export class TelegramAdapter extends BaseAdapter {
    * Handle a message update.
    */
   private async handleMessageUpdate(message: TelegramMessage): Promise<HandleUpdateResult> {
-    // Skip if no router or orchestrator
-    if (!this.deps.router || !this.deps.orchestrator) {
-      return { handled: false };
-    }
-
     const text = message.text?.trim() || "";
     if (!text) {
+      if (this.deps.telegram) {
+        await this.deps.telegram.sendMessage({
+          chatId: String(message.chat.id),
+          text: "Text only for now—please send a prompt.",
+          replyToMessageId: message.message_id,
+          messageThreadId: message.message_thread_id,
+          priority: "user",
+        });
+      }
+      return { handled: true };
+    }
+
+    // Skip if no router or orchestrator
+    if (!this.deps.router || !this.deps.orchestrator) {
       return { handled: false };
     }
 
