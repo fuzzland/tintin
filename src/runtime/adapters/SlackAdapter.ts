@@ -859,7 +859,7 @@ export class SlackAdapter extends BaseAdapter {
    * Handle cloud intent.
    */
   private async handleCloudIntent(
-    command: import("../controller/commands.js").CloudCommand,
+    command: import("../shared/types.js").CloudCommand,
     messageCtx: SlackMessageContext,
   ): Promise<import("../orchestrator/CloudOrchestrator.js").CloudResult | null> {
     if (!this.deps.cloudOrchestrator) {

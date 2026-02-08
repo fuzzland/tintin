@@ -64,7 +64,7 @@ import {
   parseRepoIndex,
   truncateText,
   type CloudCommand,
-} from "../controller/commands.js";
+} from "../shared/commands.js";
 import { buildCloudHelpText } from "../shared/SessionListFormatter.js";
 import { listRunsForGroup, formatTimeAgo } from "../cloud/runsQuery.js";
 
