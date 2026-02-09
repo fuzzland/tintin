@@ -817,8 +817,8 @@ export class SessionManager {
         const headers = buildParallelAuthHeaders(apiKey);
         if (provider.search_enabled !== false) {
           const bearerTokenEnvVar = formatMcpBearerEnvVar("parallel_search");
-          servers.set("parallel-search", {
-            id: "parallel-search",
+          servers.set("parallel_search", {
+            id: "parallel_search",
             transport: "http",
             url: getParallelSearchMcpUrl(),
             headers,
@@ -830,8 +830,8 @@ export class SessionManager {
         }
         if (provider.task_enabled !== false) {
           const bearerTokenEnvVar = formatMcpBearerEnvVar("parallel_task");
-          servers.set("parallel-task", {
-            id: "parallel-task",
+          servers.set("parallel_task", {
+            id: "parallel_task",
             transport: "http",
             url: getParallelTaskMcpUrl(),
             headers,

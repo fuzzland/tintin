@@ -6,9 +6,9 @@ import type { McpServerInfo } from "../../src/runtime/mcp/types.js";
 test("codex MCP args include bearer_token_env_var for parallel servers", () => {
   const servers = new Map<string, McpServerInfo>([
     [
-      "parallel-search",
+      "parallel_search",
       {
-        id: "parallel-search",
+        id: "parallel_search",
         transport: "http",
         url: "https://search-mcp.parallel.ai/mcp",
         headers: { Authorization: "Bearer test" },
@@ -18,9 +18,9 @@ test("codex MCP args include bearer_token_env_var for parallel servers", () => {
       },
     ],
     [
-      "parallel-task",
+      "parallel_task",
       {
-        id: "parallel-task",
+        id: "parallel_task",
         transport: "http",
         url: "https://task-mcp.parallel.ai/mcp",
         headers: { Authorization: "Bearer test" },
@@ -35,8 +35,10 @@ test("codex MCP args include bearer_token_env_var for parallel servers", () => {
   const args = adapter.buildMcpCliArgs({ servers, globalTimeout: 60 });
   const joined = args.join(" ");
 
-  assert.match(joined, /mcp_servers\."parallel-search"\.bearer_token_env_var/);
-  assert.match(joined, /mcp_servers\."parallel-task"\.bearer_token_env_var/);
+  assert.match(joined, /mcp_servers\.parallel_search\.bearer_token_env_var/);
+  assert.match(joined, /mcp_servers\.parallel_task\.bearer_token_env_var/);
+  assert.doesNotMatch(joined, /mcp_servers\."parallel_search"\./);
+  assert.doesNotMatch(joined, /mcp_servers\."parallel_task"\./);
   assert.doesNotMatch(joined, /Authorization/);
 });
 

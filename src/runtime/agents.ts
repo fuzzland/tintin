@@ -92,13 +92,6 @@ export interface AgentAdapter {
   }): Promise<string | null>;
 }
 
-function formatCodexConfigPathSegment(segment: string): string {
-  const trimmed = segment.trim();
-  if (!trimmed) return JSON.stringify(segment);
-  if (/^[A-Za-z0-9_]+$/.test(trimmed)) return trimmed;
-  return JSON.stringify(trimmed);
-}
-
 const CodexAgent: AgentAdapter = {
   id: "codex",
   displayName: "Codex",
@@ -152,8 +145,7 @@ const CodexAgent: AgentAdapter = {
     const args: string[] = [];
     const entries = Array.from(opts.servers.entries()).sort(([a], [b]) => a.localeCompare(b));
     for (const [name, info] of entries) {
-      const key = formatCodexConfigPathSegment(name);
-      const prefix = `mcp_servers.${key}`;
+      const prefix = `mcp_servers.${name}`;
       if (info.transport === "stdio") {
         args.push("--config", `${prefix}.type="stdio"`);
         if (info.command) args.push("--config", `${prefix}.command=${JSON.stringify(info.command)}`);

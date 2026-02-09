@@ -1714,7 +1714,7 @@ export class CloudManager {
   private buildParallelSearchServerInfo(provider: ParallelMcpProviderConfig, apiKey: string): McpServerInfo {
     const bearerTokenEnvVar = formatMcpBearerEnvVar("parallel_search");
     return {
-      id: "parallel-search",
+      id: "parallel_search",
       transport: "http",
       url: getParallelSearchMcpUrl(),
       headers: buildParallelAuthHeaders(apiKey),
@@ -1728,7 +1728,7 @@ export class CloudManager {
   private buildParallelTaskServerInfo(provider: ParallelMcpProviderConfig, apiKey: string): McpServerInfo {
     const bearerTokenEnvVar = formatMcpBearerEnvVar("parallel_task");
     return {
-      id: "parallel-task",
+      id: "parallel_task",
       transport: "http",
       url: getParallelTaskMcpUrl(),
       headers: buildParallelAuthHeaders(apiKey),
@@ -1787,10 +1787,10 @@ export class CloudManager {
       if (provider.type === "parallel") {
         const apiKey = await this.resolveParallelApiKey(identityId, provider.api_key);
         if (provider.search_enabled !== false) {
-          servers.set("parallel-search", this.buildParallelSearchServerInfo(provider, apiKey));
+          servers.set("parallel_search", this.buildParallelSearchServerInfo(provider, apiKey));
         }
         if (provider.task_enabled !== false) {
-          servers.set("parallel-task", this.buildParallelTaskServerInfo(provider, apiKey));
+          servers.set("parallel_task", this.buildParallelTaskServerInfo(provider, apiKey));
         }
         this.logger.debug(
           `[cloud][mcp] parallel configured identity=${identityId} search=${provider.search_enabled} task=${provider.task_enabled}`,
@@ -1918,7 +1918,7 @@ export class CloudManager {
     for (let i = 0; i < args.length - 1; i += 1) {
       if (args[i] !== "--config") continue;
       const value = args[i + 1] ?? "";
-      const match = /^mcp_servers\.((?:"(?:[^"\\]|\\.)+"|[A-Za-z0-9_]+))\./.exec(value);
+      const match = /^mcp_servers\.((?:"(?:[^"\\]|\\.)+"|[A-Za-z0-9_-]+))\./.exec(value);
       if (!match) continue;
       const key = match[1];
       if (!key) continue;
