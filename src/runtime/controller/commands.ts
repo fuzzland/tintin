@@ -36,11 +36,14 @@ export type CloudCommand =
   | { kind: "secrets_list" }
   | { kind: "secrets_delete"; name: string }
   | { kind: "mcp_github_token_set"; token: string | null }
+  | { kind: "mcp_github_token_status" }
+  | { kind: "mcp_github_token_delete" }
   | { kind: "mcp_exa_key_set"; key: string | null }
   | { kind: "mcp_exa_key_status" }
   | { kind: "mcp_exa_key_delete" }
   | { kind: "mcp_notion_connect" }
   | { kind: "mcp_notion_status" }
+  | { kind: "mcp_notion_disconnect" }
   | { kind: "snapshot_save"; note?: string }
   | { kind: "snapshot_list"; limit?: number }
   | { kind: "snapshot_search"; query: string }
@@ -427,6 +430,7 @@ export function parseCloudCommand(text: string): CloudCommand | null {
       const action = tokens.shift()?.toLowerCase() ?? "";
       if (action === "connect") return { kind: "mcp_notion_connect" };
       if (action === "status") return { kind: "mcp_notion_status" };
+      if (action === "disconnect") return { kind: "mcp_notion_disconnect" };
     }
     if (provider === "github" && tokens.length >= 1) {
       const sub = tokens.shift()!.toLowerCase();
@@ -436,6 +440,8 @@ export function parseCloudCommand(text: string): CloudCommand | null {
           const token = tokens.length > 0 ? tokens.join(" ").trim() : null;
           return { kind: "mcp_github_token_set", token };
         }
+        if (action === "status") return { kind: "mcp_github_token_status" };
+        if (action === "delete") return { kind: "mcp_github_token_delete" };
       }
     }
     if (provider === "exa" && tokens.length >= 1) {

@@ -565,6 +565,11 @@ export async function getGithubMcpToken(db: Db, identityId: string) {
     .executeTakeFirst();
 }
 
+export async function deleteGithubMcpToken(db: Db, identityId: string): Promise<boolean> {
+  const res = await db.deleteFrom("github_mcp_tokens").where("identity_id", "=", identityId).executeTakeFirst();
+  return Number(res.numDeletedRows ?? 0) > 0;
+}
+
 export async function getExaApiKey(db: Db, identityId: string): Promise<string | null> {
   const row = await db
     .selectFrom("exa_api_keys")
