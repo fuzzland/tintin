@@ -1894,6 +1894,20 @@ export class CloudManager {
     this.logger.info(`[cloud] mcp servers agent=${agent} ${parts.join(" ")}`);
   }
 
+  private extractCodexMcpConfigKeys(args: string[]): string[] {
+    const keys = new Set<string>();
+    for (let i = 0; i < args.length - 1; i += 1) {
+      if (args[i] !== "--config") continue;
+      const value = args[i + 1] ?? "";
+      const match = /^mcp_servers\.((?:"(?:[^"\\]|\\.)+"|[A-Za-z0-9_]+))\./.exec(value);
+      if (!match) continue;
+      const key = match[1];
+      if (!key) continue;
+      keys.add(key);
+    }
+    return Array.from(keys).sort((a, b) => a.localeCompare(b));
+  }
+
   private isBrowserbaseEnabled(): boolean {
     const cfg = this.resolvePlaywrightConfig();
     return this.provider.id === "modal" && Boolean(cfg?.enabled && cfg.provider === "browserbase");
@@ -2994,6 +3008,10 @@ AGENTS_EOF`;
     const mcpConfig = await this.buildRemoteMcpArgs(opts.agent, opts.identityId, opts.prompt, opts.playwright?.server);
     const mcpArgs = mcpConfig.args;
     const mcpEnabled = mcpArgs.length > 0;
+    if (opts.agent === "codex") {
+      const keys = this.extractCodexMcpConfigKeys(mcpArgs);
+      this.logger.debug(`[cloud][mcp] codex config keys session=${opts.sessionId} keys=${keys.join(",") || "(none)"}`);
+    }
     const localLogPaths: string[] = [];
 
     if (opts.agent === "claude_code") {
@@ -3288,6 +3306,10 @@ AGENTS_EOF`;
     const mcpConfig = await this.buildRemoteMcpArgs(opts.agent, opts.identityId, opts.prompt, opts.playwright?.server);
     const mcpArgs = mcpConfig.args;
     const mcpEnabled = mcpArgs.length > 0;
+    if (opts.agent === "codex") {
+      const keys = this.extractCodexMcpConfigKeys(mcpArgs);
+      this.logger.debug(`[cloud][mcp] codex config keys session=${opts.sessionId} keys=${keys.join(",") || "(none)"}`);
+    }
 
     if (opts.agent === "claude_code") {
       if (!this.config.claude_code) throw new Error("Claude Code is not configured.");

@@ -35,8 +35,28 @@ test("codex MCP args include bearer_token_env_var for parallel servers", () => {
   const args = adapter.buildMcpCliArgs({ servers, globalTimeout: 60 });
   const joined = args.join(" ");
 
-  assert.match(joined, /mcp_servers\.parallel-search\.bearer_token_env_var/);
-  assert.match(joined, /mcp_servers\.parallel-task\.bearer_token_env_var/);
+  assert.match(joined, /mcp_servers\."parallel-search"\.bearer_token_env_var/);
+  assert.match(joined, /mcp_servers\."parallel-task"\.bearer_token_env_var/);
   assert.doesNotMatch(joined, /Authorization/);
 });
 
+test("codex MCP args keep unquoted keys for simple server names", () => {
+  const servers = new Map<string, McpServerInfo>([
+    [
+      "exa",
+      {
+        id: "exa",
+        transport: "http",
+        url: "https://mcp.exa.ai/mcp",
+        status: "running",
+      },
+    ],
+  ]);
+
+  const adapter = getAgentAdapter("codex");
+  const args = adapter.buildMcpCliArgs({ servers, globalTimeout: 60 });
+  const joined = args.join(" ");
+
+  assert.match(joined, /mcp_servers\.exa\.url=/);
+  assert.doesNotMatch(joined, /mcp_servers\."exa"\.url=/);
+});
