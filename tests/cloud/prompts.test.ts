@@ -48,6 +48,7 @@ describe("prompts", () => {
 
     it("should not append locale directive for English", async () => {
       const content = await buildAgentsMdContent("en");
+      assert.ok(content.includes("You must respond in English"));
       assert.ok(!content.includes("你必须用中文回答"));
     });
   });

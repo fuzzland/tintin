@@ -816,21 +816,27 @@ export class SessionManager {
         const apiKey = await this.resolveParallelApiKey(identityId, provider.api_key);
         const headers = buildParallelAuthHeaders(apiKey);
         if (provider.search_enabled !== false) {
+          const bearerTokenEnvVar = formatMcpBearerEnvVar("parallel_search");
           servers.set("parallel-search", {
             id: "parallel-search",
             transport: "http",
             url: getParallelSearchMcpUrl(),
             headers,
+            bearerTokenEnvVar,
+            bearerToken: apiKey,
             status: "running",
             startupTimeoutSec: provider.startup_timeout_sec,
           });
         }
         if (provider.task_enabled !== false) {
+          const bearerTokenEnvVar = formatMcpBearerEnvVar("parallel_task");
           servers.set("parallel-task", {
             id: "parallel-task",
             transport: "http",
             url: getParallelTaskMcpUrl(),
             headers,
+            bearerTokenEnvVar,
+            bearerToken: apiKey,
             status: "running",
             startupTimeoutSec: provider.startup_timeout_sec,
           });

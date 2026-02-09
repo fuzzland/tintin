@@ -77,12 +77,10 @@ export async function buildAgentsMdContent(language: UserLanguage): Promise<stri
     parts.push(prompt.content);
   }
 
-  // 3. Locale directive (if not English)
-  if (language !== "en") {
-    const localeDirective = t("prompt.language_directive", language);
-    if (localeDirective) {
-      parts.push(`\n\n---\n\n## Language Directive\n\n${localeDirective}\n`);
-    }
+  // 3. Locale directive (always include, including English)
+  const localeDirective = t("prompt.language_directive", language);
+  if (localeDirective) {
+    parts.push(`\n\n---\n\n## Language Directive\n\n${localeDirective}\n`);
   }
 
   return parts.join("");

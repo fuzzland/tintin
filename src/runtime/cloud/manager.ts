@@ -1712,22 +1712,28 @@ export class CloudManager {
   }
 
   private buildParallelSearchServerInfo(provider: ParallelMcpProviderConfig, apiKey: string): McpServerInfo {
+    const bearerTokenEnvVar = formatMcpBearerEnvVar("parallel_search");
     return {
       id: "parallel-search",
       transport: "http",
       url: getParallelSearchMcpUrl(),
       headers: buildParallelAuthHeaders(apiKey),
+      bearerTokenEnvVar,
+      bearerToken: apiKey,
       status: "running",
       startupTimeoutSec: provider.startup_timeout_sec,
     };
   }
 
   private buildParallelTaskServerInfo(provider: ParallelMcpProviderConfig, apiKey: string): McpServerInfo {
+    const bearerTokenEnvVar = formatMcpBearerEnvVar("parallel_task");
     return {
       id: "parallel-task",
       transport: "http",
       url: getParallelTaskMcpUrl(),
       headers: buildParallelAuthHeaders(apiKey),
+      bearerTokenEnvVar,
+      bearerToken: apiKey,
       status: "running",
       startupTimeoutSec: provider.startup_timeout_sec,
     };
