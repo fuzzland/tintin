@@ -27,7 +27,14 @@ export class McpRegistry {
 
     for (const [name, providerConfig] of Object.entries(config.providers)) {
       if (!providerConfig.enabled) continue;
-      if (providerConfig.type === "github" || providerConfig.type === "notion" || providerConfig.type === "exa") continue;
+      if (
+        providerConfig.type === "github" ||
+        providerConfig.type === "notion" ||
+        providerConfig.type === "exa" ||
+        providerConfig.type === "parallel"
+      ) {
+        continue;
+      }
       const provider = createMcpProvider(name, providerConfig);
       await this.lifecycle.initProvider(provider, providerConfig, context);
       this.providers.set(name, {

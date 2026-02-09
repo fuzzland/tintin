@@ -262,3 +262,121 @@ api_key = "test-exa-key"
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("loadConfig allows parallel provider without explicit type", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "tintin-config-"));
+  const configPath = path.join(dir, "config.toml");
+  await writeFile(
+    configPath,
+    baseConfig(`
+[cloud]
+secrets_key = "test-secrets-key"
+
+[mcp]
+global_timeout_sec = 60
+log_level = "info"
+
+[mcp.providers.parallel]
+enabled = true
+api_key = "test-parallel-key"
+`),
+    "utf8",
+  );
+
+  try {
+    const config = await loadConfig(configPath);
+    const provider = config.mcp?.providers.parallel;
+    assert.ok(provider);
+    if (provider.type !== "parallel") throw new Error("Expected parallel provider");
+    assert.equal(provider.search_enabled, true);
+    assert.equal(provider.task_enabled, true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects parallel provider without api_key", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "tintin-config-"));
+  const configPath = path.join(dir, "config.toml");
+  await writeFile(
+    configPath,
+    baseConfig(`
+[cloud]
+secrets_key = "test-secrets-key"
+
+[mcp]
+global_timeout_sec = 60
+log_level = "info"
+
+[mcp.providers.parallel]
+enabled = true
+`),
+    "utf8",
+  );
+
+  try {
+    await assert.rejects(() => loadConfig(configPath));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects parallel provider with wrong name", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "tintin-config-"));
+  const configPath = path.join(dir, "config.toml");
+  await writeFile(
+    configPath,
+    baseConfig(`
+[cloud]
+secrets_key = "test-secrets-key"
+
+[mcp]
+global_timeout_sec = 60
+log_level = "info"
+
+[mcp.providers.parallel_alt]
+type = "parallel"
+api_key = "test-parallel-key"
+`),
+    "utf8",
+  );
+
+  try {
+    await assert.rejects(() => loadConfig(configPath));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig respects parallel search_enabled=false", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "tintin-config-"));
+  const configPath = path.join(dir, "config.toml");
+  await writeFile(
+    configPath,
+    baseConfig(`
+[cloud]
+secrets_key = "test-secrets-key"
+
+[mcp]
+global_timeout_sec = 60
+log_level = "info"
+
+[mcp.providers.parallel]
+enabled = true
+api_key = "test-parallel-key"
+search_enabled = false
+`),
+    "utf8",
+  );
+
+  try {
+    const config = await loadConfig(configPath);
+    const provider = config.mcp?.providers.parallel;
+    assert.ok(provider);
+    if (provider.type !== "parallel") throw new Error("Expected parallel provider");
+    assert.equal(provider.search_enabled, false);
+    assert.equal(provider.task_enabled, true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

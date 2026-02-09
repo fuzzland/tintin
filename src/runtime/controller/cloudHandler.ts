@@ -38,9 +38,11 @@ import {
   replaceGithubInstallationRepos,
   setIdentityActiveRepo,
   setExaApiKey,
+  setParallelApiKey,
   setGithubMcpToken,
   getGithubMcpToken,
   getExaApiKey,
+  getParallelApiKey,
   getNotionMcpToken,
   deleteNotionMcpToken,
   setSecret,
@@ -48,6 +50,7 @@ import {
   unshareRepo,
   deleteSecret,
   deleteExaApiKey,
+  deleteParallelApiKey,
   deleteGithubMcpToken,
   putSetupSpec,
 } from "../cloud/store.js";
@@ -1601,6 +1604,46 @@ export class CloudHandler {
         }
         const ok = await deleteExaApiKey(this.deps.db, identity.id);
         await replyText(ok ? "mcp.exa_key.deleted" : "mcp.exa_key.delete_missing");
+        return true;
+      }
+      case "mcp_parallel_key_set": {
+        if (!opts.isDirect) {
+          await replyText("command.dm_only", { cmd: formatCmd("mcp parallel key set") });
+          return true;
+        }
+        const cmd = opts.command as Extract<CloudCommand, { kind: "mcp_parallel_key_set" }>;
+        if (!cmd.key) {
+          await replyText("mcp.parallel_key.usage_set", { cmd: formatCmd("mcp parallel key set <key>") });
+          return true;
+        }
+        if (!cloud.secrets_key) {
+          await replyText("cloud.secrets_missing");
+          return true;
+        }
+        try {
+          await setParallelApiKey(this.deps.db, identity.id, cmd.key, cloud.secrets_key);
+          await replyText("mcp.parallel_key.saved");
+        } catch (e) {
+          await replyText("mcp.parallel_key.save_failed", { error: String(e) });
+        }
+        return true;
+      }
+      case "mcp_parallel_key_status": {
+        if (!opts.isDirect) {
+          await replyText("command.dm_only", { cmd: formatCmd("mcp parallel key status") });
+          return true;
+        }
+        const key = await getParallelApiKey(this.deps.db, identity.id);
+        await replyText(key ? "mcp.parallel_key.status_set" : "mcp.parallel_key.status_missing");
+        return true;
+      }
+      case "mcp_parallel_key_delete": {
+        if (!opts.isDirect) {
+          await replyText("command.dm_only", { cmd: formatCmd("mcp parallel key delete") });
+          return true;
+        }
+        const ok = await deleteParallelApiKey(this.deps.db, identity.id);
+        await replyText(ok ? "mcp.parallel_key.deleted" : "mcp.parallel_key.delete_missing");
         return true;
       }
     }

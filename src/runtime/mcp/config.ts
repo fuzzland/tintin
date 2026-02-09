@@ -1,7 +1,7 @@
 import { McpConfigSchema, type McpLogLevel } from "./schemas.js";
 import { normalizePlaywrightMcpSection, type PlaywrightMcpSection } from "./providers/playwright/config.js";
 
-export type McpProviderType = "stdio" | "http" | "sse" | "playwright" | "github" | "notion" | "exa";
+export type McpProviderType = "stdio" | "http" | "sse" | "playwright" | "github" | "notion" | "exa" | "parallel";
 
 export interface BaseMcpProviderConfig {
   enabled: boolean;
@@ -45,13 +45,21 @@ export interface ExaMcpProviderConfig extends BaseMcpProviderConfig {
   api_key: string;
 }
 
+export interface ParallelMcpProviderConfig extends BaseMcpProviderConfig {
+  type: "parallel";
+  api_key: string;
+  search_enabled: boolean;
+  task_enabled: boolean;
+}
+
 export type McpProviderConfig =
   | StdioMcpProviderConfig
   | HttpMcpProviderConfig
   | PlaywrightMcpProviderConfig
   | GitHubMcpProviderConfig
   | NotionMcpProviderConfig
-  | ExaMcpProviderConfig;
+  | ExaMcpProviderConfig
+  | ParallelMcpProviderConfig;
 
 export interface McpConfig {
   global_timeout_sec: number;
@@ -128,6 +136,17 @@ export function normalizeMcpSection(
     }
     providersWithDefaults[name] = { ...provider, type: "exa" };
   }
+  for (const [name, provider] of Object.entries(rawProviders)) {
+    if (name !== "parallel") continue;
+    if (!isRecord(provider)) continue;
+    if (typeof provider.type === "string" && provider.type.length > 0) {
+      if (provider.type !== "parallel") {
+        throw new Error(`[mcp.providers.${name}] Parallel MCP does not allow type="${provider.type}".`);
+      }
+      continue;
+    }
+    providersWithDefaults[name] = { ...provider, type: "parallel" };
+  }
   const parsed = McpConfigSchema.parse({
     ...value,
     providers: providersWithDefaults,
@@ -142,6 +161,9 @@ export function normalizeMcpSection(
     }
     if (raw.type === "exa" && name !== "exa") {
       throw new Error(`[mcp.providers.${name}] Exa MCP must be named "exa".`);
+    }
+    if (raw.type === "parallel" && name !== "parallel") {
+      throw new Error(`[mcp.providers.${name}] Parallel MCP must be named "parallel".`);
     }
     providers[name] = normalizeProviderConfig(name, raw, opts);
     if (providers[name]?.enabled && providers[name]?.type === "playwright") {

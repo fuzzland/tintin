@@ -41,6 +41,9 @@ export type CloudCommand =
   | { kind: "mcp_exa_key_set"; key: string | null }
   | { kind: "mcp_exa_key_status" }
   | { kind: "mcp_exa_key_delete" }
+  | { kind: "mcp_parallel_key_set"; key: string | null }
+  | { kind: "mcp_parallel_key_status" }
+  | { kind: "mcp_parallel_key_delete" }
   | { kind: "mcp_notion_connect" }
   | { kind: "mcp_notion_status" }
   | { kind: "mcp_notion_disconnect" }
@@ -454,6 +457,18 @@ export function parseCloudCommand(text: string): CloudCommand | null {
         }
         if (action === "status") return { kind: "mcp_exa_key_status" };
         if (action === "delete") return { kind: "mcp_exa_key_delete" };
+      }
+    }
+    if (provider === "parallel" && tokens.length >= 1) {
+      const sub = tokens.shift()!.toLowerCase();
+      if (sub === "key") {
+        const action = tokens.shift()?.toLowerCase() ?? "";
+        if (action === "set") {
+          const key = tokens.length > 0 ? tokens.join(" ").trim() : null;
+          return { kind: "mcp_parallel_key_set", key };
+        }
+        if (action === "status") return { kind: "mcp_parallel_key_status" };
+        if (action === "delete") return { kind: "mcp_parallel_key_delete" };
       }
     }
   }

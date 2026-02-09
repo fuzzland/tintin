@@ -26,6 +26,7 @@ import * as slackInstallations0023 from "./migrations/0023_slack_installations.j
 import * as githubMcpTokens0024 from "./migrations/0024_github_mcp_tokens.js";
 import * as notionMcp0025 from "./migrations/0025_notion_mcp.js";
 import * as exaApiKeys0026 from "./migrations/0026_exa_api_keys.js";
+import * as parallelApiKeys0027 from "./migrations/0027_parallel_api_keys.js";
 
 const provider = {
   async getMigrations() {
@@ -55,6 +56,7 @@ const provider = {
       "0024_github_mcp_tokens": githubMcpTokens0024,
       "0025_notion_mcp": notionMcp0025,
       "0026_exa_api_keys": exaApiKeys0026,
+      "0027_parallel_api_keys": parallelApiKeys0027,
     };
   },
 };

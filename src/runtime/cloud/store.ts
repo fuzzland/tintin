@@ -606,6 +606,42 @@ export async function deleteExaApiKey(db: Db, identityId: string): Promise<boole
   return Number(res.numDeletedRows ?? 0) > 0;
 }
 
+export async function getParallelApiKey(db: Db, identityId: string): Promise<string | null> {
+  const row = await db
+    .selectFrom("parallel_api_keys")
+    .select(["api_key"])
+    .where("identity_id", "=", identityId)
+    .executeTakeFirst();
+  return row?.api_key ?? null;
+}
+
+export async function setParallelApiKey(db: Db, identityId: string, apiKey: string, secretsKey: string): Promise<void> {
+  const encrypted = encryptSecret(apiKey, secretsKey);
+  const now = nowMs();
+  const id = crypto.randomUUID();
+  await db
+    .insertInto("parallel_api_keys")
+    .values({
+      id,
+      identity_id: identityId,
+      api_key: encrypted,
+      created_at: now,
+      updated_at: now,
+    })
+    .onConflict((oc) =>
+      oc.column("identity_id").doUpdateSet({
+        api_key: encrypted,
+        updated_at: now,
+      }),
+    )
+    .execute();
+}
+
+export async function deleteParallelApiKey(db: Db, identityId: string): Promise<boolean> {
+  const res = await db.deleteFrom("parallel_api_keys").where("identity_id", "=", identityId).executeTakeFirst();
+  return Number(res.numDeletedRows ?? 0) > 0;
+}
+
 export async function getLatestNotionMcpClient(db: Db) {
   return await db
     .selectFrom("notion_mcp_clients")

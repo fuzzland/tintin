@@ -37,6 +37,7 @@ const BOOTSTRAP_SELECTORS: Record<McpProviderType, BootstrapSelector> = {
   },
   notion: () => null,
   exa: () => null,
+  parallel: () => null,
 };
 
 export function buildMcpBootstrapConfig(mcp: McpConfig | null | undefined): McpBootstrapConfig | null {

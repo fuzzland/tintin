@@ -15,8 +15,9 @@ import { nowMs, sleep } from "./util.js";
 import type { McpRegistry } from "./mcp/registry.js";
 import { collectMcpAgentEnv, formatMcpBearerEnvVar } from "./mcp/utils.js";
 import { buildExaMcpUrl } from "./mcp/providers/exa.js";
+import { buildParallelAuthHeaders, getParallelSearchMcpUrl, getParallelTaskMcpUrl } from "./mcp/providers/parallel.js";
 import { ensureNotionToken } from "./cloud/notion/token.js";
-import { getExaApiKey, getGithubMcpToken, getOrCreateIdentity } from "./cloud/store.js";
+import { getExaApiKey, getGithubMcpToken, getOrCreateIdentity, getParallelApiKey } from "./cloud/store.js";
 import { decryptSecret } from "./cloud/secrets.js";
 import { buildLocalizedPrompt } from "./prompt.js";
 import {
@@ -802,6 +803,32 @@ export class SessionManager {
           startupTimeoutSec: provider.startup_timeout_sec,
         });
       }
+      for (const [_name, provider] of Object.entries(mcp.providers)) {
+        if (!provider.enabled) continue;
+        if (provider.type !== "parallel") continue;
+        const apiKey = await this.resolveParallelApiKey(identityId, provider.api_key);
+        const headers = buildParallelAuthHeaders(apiKey);
+        if (provider.search_enabled !== false) {
+          servers.set("parallel-search", {
+            id: "parallel-search",
+            transport: "http",
+            url: getParallelSearchMcpUrl(),
+            headers,
+            status: "running",
+            startupTimeoutSec: provider.startup_timeout_sec,
+          });
+        }
+        if (provider.task_enabled !== false) {
+          servers.set("parallel-task", {
+            id: "parallel-task",
+            transport: "http",
+            url: getParallelTaskMcpUrl(),
+            headers,
+            status: "running",
+            startupTimeoutSec: provider.startup_timeout_sec,
+          });
+        }
+      }
     }
     if (servers.size === 0) return null;
     const adapter = getAgentAdapter(agent);
@@ -844,6 +871,25 @@ export class SessionManager {
       const envValue = process.env[envVar];
       if (envValue) return envValue;
       throw new Error(`Exa API key env var ${envVar} is not set. Set it or configure [mcp.providers.exa].api_key.`);
+    }
+    return configKey;
+  }
+
+  private async resolveParallelApiKey(identityId: string, configKey: string): Promise<string> {
+    const secretKey = this.config.cloud?.secrets_key ?? "";
+    if (secretKey) {
+      const encrypted = await getParallelApiKey(this.db, identityId);
+      if (encrypted) {
+        return decryptSecret(encrypted, secretKey);
+      }
+    }
+    if (configKey.startsWith("env:")) {
+      const envVar = configKey.slice(4);
+      const envValue = process.env[envVar];
+      if (envValue) return envValue;
+      throw new Error(
+        `Parallel API key env var ${envVar} is not set. Set it or configure [mcp.providers.parallel].api_key.`,
+      );
     }
     return configKey;
   }

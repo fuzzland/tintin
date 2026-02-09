@@ -232,6 +232,15 @@ enabled = true
 # Get your key at: https://dashboard.exa.ai/api-keys
 api_key = "env:EXA_API_KEY"
 
+# Parallel.ai MCP (web search + deep research)
+[mcp.providers.parallel]
+enabled = true
+# Get your key at: https://platform.parallel.ai
+api_key = "env:PARALLEL_API_KEY"
+# Enable/disable individual MCP servers (both default to true)
+search_enabled = true   # Search MCP: web_search, web_fetch
+task_enabled = true     # Task MCP: deep research, task groups
+
 [pinecone]
 api_key = "<PINECONE_API_KEY>"
 index = "tintin-snapshots"

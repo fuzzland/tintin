@@ -47,6 +47,13 @@ export const ExaMcpProviderSchema = BaseMcpProviderSchema.extend({
   api_key: z.string().min(1),
 });
 
+export const ParallelMcpProviderSchema = BaseMcpProviderSchema.extend({
+  type: z.literal("parallel"),
+  api_key: z.string().min(1),
+  search_enabled: z.boolean().default(true),
+  task_enabled: z.boolean().default(true),
+});
+
 const PlaywrightSnapshotModeSchema = z.enum(["incremental", "full", "none"]);
 const PlaywrightImageResponseSchema = z.enum(["allow", "omit"]);
 const PlaywrightProviderSchema = z.enum(["local", "browserbase", "hyperbrowser"]);
@@ -105,6 +112,7 @@ export const McpProviderConfigSchema = z.discriminatedUnion("type", [
   GitHubMcpProviderSchema,
   NotionMcpProviderSchema,
   ExaMcpProviderSchema,
+  ParallelMcpProviderSchema,
 ]);
 
 export const McpConfigSchema = z.object({

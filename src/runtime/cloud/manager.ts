@@ -16,6 +16,7 @@ import type { McpServerInfo } from "../mcp/types.js";
 import { buildMcpBootstrapConfig, encodeMcpBootstrapConfig, type McpBootstrapConfig } from "../mcp/bootstrap.js";
 import { collectMcpAgentEnv, formatMcpBearerEnvVar } from "../mcp/utils.js";
 import { buildExaMcpUrl } from "../mcp/providers/exa.js";
+import { buildParallelAuthHeaders, getParallelSearchMcpUrl, getParallelTaskMcpUrl } from "../mcp/providers/parallel.js";
 import {
   resolvePlaywrightProvider,
   resolvePlaywrightProviderEntry,
@@ -23,6 +24,7 @@ import {
   type McpProviderConfig,
   type NotionMcpProviderConfig,
   type ExaMcpProviderConfig,
+  type ParallelMcpProviderConfig,
 } from "../mcp/config.js";
 import { resolveCodexHomeFromSessionsRoot, resolveSessionsRoot } from "../codex.js";
 import { resolveClaudeConfigDirFromSessionsRoot, resolveClaudeSessionJsonlPath } from "../claudeCode.js";
@@ -59,6 +61,7 @@ import {
   getCloudSnapshot,
   getGithubMcpToken,
   getExaApiKey,
+  getParallelApiKey,
   getLatestSetupSpec,
   getLatestRunForIdentity,
   listSecrets,
@@ -1648,6 +1651,8 @@ export class CloudManager {
         return this.buildNotionServerInfo(name, provider);
       case "exa":
         throw new Error(`[mcp.providers.${name}] Exa MCP requires API key resolution.`);
+      case "parallel":
+        throw new Error(`[mcp.providers.${name}] Parallel MCP requires API key resolution.`);
       default: {
         const unreachable: never = provider;
         throw new Error(`Unsupported MCP provider type: ${(unreachable as { type?: string }).type ?? "unknown"}`);
@@ -1705,6 +1710,28 @@ export class CloudManager {
     };
   }
 
+  private buildParallelSearchServerInfo(provider: ParallelMcpProviderConfig, apiKey: string): McpServerInfo {
+    return {
+      id: "parallel-search",
+      transport: "http",
+      url: getParallelSearchMcpUrl(),
+      headers: buildParallelAuthHeaders(apiKey),
+      status: "running",
+      startupTimeoutSec: provider.startup_timeout_sec,
+    };
+  }
+
+  private buildParallelTaskServerInfo(provider: ParallelMcpProviderConfig, apiKey: string): McpServerInfo {
+    return {
+      id: "parallel-task",
+      transport: "http",
+      url: getParallelTaskMcpUrl(),
+      headers: buildParallelAuthHeaders(apiKey),
+      status: "running",
+      startupTimeoutSec: provider.startup_timeout_sec,
+    };
+  }
+
   private async buildRemoteMcpArgs(
     agent: SessionAgent,
     identityId: string,
@@ -1726,6 +1753,19 @@ export class CloudManager {
         const apiKey = await this.resolveExaApiKey(identityId, provider.api_key);
         servers.set(name, this.buildExaServerInfo(name, provider, apiKey));
         this.logger.debug(`[cloud][mcp] exa configured identity=${identityId}`);
+        continue;
+      }
+      if (provider.type === "parallel") {
+        const apiKey = await this.resolveParallelApiKey(identityId, provider.api_key);
+        if (provider.search_enabled !== false) {
+          servers.set("parallel-search", this.buildParallelSearchServerInfo(provider, apiKey));
+        }
+        if (provider.task_enabled !== false) {
+          servers.set("parallel-task", this.buildParallelTaskServerInfo(provider, apiKey));
+        }
+        this.logger.debug(
+          `[cloud][mcp] parallel configured identity=${identityId} search=${provider.search_enabled} task=${provider.task_enabled}`,
+        );
         continue;
       }
       const serverInfo = this.buildServerInfoFromConfig(name, provider);
@@ -1798,6 +1838,25 @@ export class CloudManager {
       const envValue = process.env[envVar];
       if (envValue) return envValue;
       throw new Error(`Exa API key env var ${envVar} is not set. Set it or configure [mcp.providers.exa].api_key.`);
+    }
+    return configKey;
+  }
+
+  private async resolveParallelApiKey(identityId: string, configKey: string): Promise<string> {
+    const secretKey = this.config.cloud?.secrets_key ?? "";
+    if (secretKey) {
+      const encrypted = await getParallelApiKey(this.db, identityId);
+      if (encrypted) {
+        return decryptSecret(encrypted, secretKey);
+      }
+    }
+    if (configKey.startsWith("env:")) {
+      const envVar = configKey.slice(4);
+      const envValue = process.env[envVar];
+      if (envValue) return envValue;
+      throw new Error(
+        `Parallel API key env var ${envVar} is not set. Set it or configure [mcp.providers.parallel].api_key.`,
+      );
     }
     return configKey;
   }
