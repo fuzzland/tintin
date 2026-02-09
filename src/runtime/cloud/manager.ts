@@ -1749,6 +1749,25 @@ export class CloudManager {
     const mcp = this.config.mcp;
     if (!mcp) return { args: [], env: {} };
     const activation = resolveMcpProviderActivation(mcp, prompt);
+    const providerSummary = Object.entries(mcp.providers)
+      .map(([name, provider]) => {
+        const base = `${name}{type=${provider.type},enabled=${provider.enabled ? 1 : 0}`;
+        if (provider.type === "parallel") {
+          const searchEnabled = provider.search_enabled !== false ? 1 : 0;
+          const taskEnabled = provider.task_enabled !== false ? 1 : 0;
+          return `${base},search=${searchEnabled},task=${taskEnabled}}`;
+        }
+        return `${base}}`;
+      })
+      .join(" ");
+    const activeProviders = Array.from(activation.activeProviderNames).sort((a, b) => a.localeCompare(b));
+    const deferredProviders = Array.from(activation.deferredProviderNames).sort((a, b) => a.localeCompare(b));
+    this.logger.debug(
+      `[cloud][mcp] provider snapshot identity=${identityId} configured=${providerSummary || "(none)"}`,
+    );
+    this.logger.debug(
+      `[cloud][mcp] activation identity=${identityId} active=${activeProviders.join(",") || "(none)"} deferred=${deferredProviders.join(",") || "(none)"}`,
+    );
     const servers = new Map<string, McpServerInfo>();
     for (const [name, provider] of Object.entries(mcp.providers)) {
       if (!provider.enabled) continue;
