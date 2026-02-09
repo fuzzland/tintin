@@ -26,6 +26,7 @@ import {
   type ExaMcpProviderConfig,
   type ParallelMcpProviderConfig,
 } from "../mcp/config.js";
+import { resolveMcpProviderActivation } from "../mcp/activation.js";
 import { resolveCodexHomeFromSessionsRoot, resolveSessionsRoot } from "../codex.js";
 import { resolveClaudeConfigDirFromSessionsRoot, resolveClaudeSessionJsonlPath } from "../claudeCode.js";
 import { LocalCloudProvider } from "./localProvider.js";
@@ -1735,14 +1736,17 @@ export class CloudManager {
   private async buildRemoteMcpArgs(
     agent: SessionAgent,
     identityId: string,
+    prompt: string,
     serverOverride?: McpServerInfo,
   ): Promise<{ args: string[]; env: Record<string, string> }> {
     if (this.provider.id === "local") return { args: [], env: {} };
     const mcp = this.config.mcp;
     if (!mcp) return { args: [], env: {} };
+    const activation = resolveMcpProviderActivation(mcp, prompt);
     const servers = new Map<string, McpServerInfo>();
     for (const [name, provider] of Object.entries(mcp.providers)) {
       if (!provider.enabled) continue;
+      if (!activation.activeProviderNames.has(name)) continue;
       if (provider.type === "playwright") continue;
       if (provider.type === "github") {
         const token = await this.requireGithubMcpToken(identityId);
@@ -1774,7 +1778,9 @@ export class CloudManager {
         serverInfo.bearerTokenEnvVar =
           serverInfo.bearerTokenEnvVar ?? provider.bearer_token_env_var ?? formatMcpBearerEnvVar(name);
         serverInfo.bearerToken = token;
-        this.logger.debug(`[cloud][mcp] notion token set identity=${identityId} env_var=${serverInfo.bearerTokenEnvVar} token_len=${token.length}`);
+        this.logger.debug(
+          `[cloud][mcp] notion token set identity=${identityId} env_var=${serverInfo.bearerTokenEnvVar} token_len=${token.length}`,
+        );
       }
       servers.set(name, serverInfo);
     }
@@ -2979,7 +2985,7 @@ AGENTS_EOF`;
     let relayLogPath: string | null = null;
     let cmd = "";
     let env: Record<string, string> = {};
-    const mcpConfig = await this.buildRemoteMcpArgs(opts.agent, opts.identityId, opts.playwright?.server);
+    const mcpConfig = await this.buildRemoteMcpArgs(opts.agent, opts.identityId, opts.prompt, opts.playwright?.server);
     const mcpArgs = mcpConfig.args;
     const mcpEnabled = mcpArgs.length > 0;
     const localLogPaths: string[] = [];
@@ -3273,7 +3279,7 @@ AGENTS_EOF`;
     let cmd = "";
     let env: Record<string, string> = {};
     const playwrightCfg = this.resolvePlaywrightConfig();
-    const mcpConfig = await this.buildRemoteMcpArgs(opts.agent, opts.identityId, opts.playwright?.server);
+    const mcpConfig = await this.buildRemoteMcpArgs(opts.agent, opts.identityId, opts.prompt, opts.playwright?.server);
     const mcpArgs = mcpConfig.args;
     const mcpEnabled = mcpArgs.length > 0;
 

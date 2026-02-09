@@ -16,6 +16,7 @@ import type { McpRegistry } from "./mcp/registry.js";
 import { collectMcpAgentEnv, formatMcpBearerEnvVar } from "./mcp/utils.js";
 import { buildExaMcpUrl } from "./mcp/providers/exa.js";
 import { buildParallelAuthHeaders, getParallelSearchMcpUrl, getParallelTaskMcpUrl } from "./mcp/providers/parallel.js";
+import { resolveMcpProviderActivation } from "./mcp/activation.js";
 import { ensureNotionToken } from "./cloud/notion/token.js";
 import { getExaApiKey, getGithubMcpToken, getOrCreateIdentity, getParallelApiKey } from "./cloud/store.js";
 import { decryptSecret } from "./cloud/secrets.js";
@@ -364,7 +365,7 @@ export class SessionManager {
         workspaceId: opts.workspaceId,
         userId: opts.userId,
       });
-      const mcpConfig = await this.mcpCliArgs(opts.agent, identity.id);
+      const mcpConfig = await this.mcpCliArgs(opts.agent, identity.id, opts.initialPrompt);
       const cloudProxyArgs = this.buildCloudProxyCliArgs(opts.agent, envOverrides);
       const extraArgs = [...(mcpConfig?.args ?? []), ...cloudProxyArgs];
       const spawnedProc = adapter.spawnExec({
@@ -495,7 +496,7 @@ export class SessionManager {
       workspaceId: session.workspace_id,
       userId: session.created_by_user_id,
     });
-    const mcpConfig = await this.mcpCliArgs(session.agent, identity.id);
+    const mcpConfig = await this.mcpCliArgs(session.agent, identity.id, prompt);
     const cloudProxyArgs = this.buildCloudProxyCliArgs(session.agent, envWithCloudProxy);
     const extraArgs = [...(mcpConfig?.args ?? []), ...cloudProxyArgs];
     try {
@@ -733,13 +734,16 @@ export class SessionManager {
   private async mcpCliArgs(
     agent: SessionAgent,
     identityId: string,
+    prompt: string,
   ): Promise<{ args: string[]; env: Record<string, string> } | null> {
     if (!this.mcpRegistry) return null;
-    const servers = await this.mcpRegistry.startAll();
     const mcp = this.config.mcp;
+    const activation = resolveMcpProviderActivation(mcp, prompt);
+    const servers = await this.mcpRegistry.startAll();
     if (mcp) {
       for (const [name, provider] of Object.entries(mcp.providers)) {
         if (!provider.enabled) continue;
+        if (!activation.activeProviderNames.has(name)) continue;
         if (provider.type !== "github") continue;
         const token = await this.requireGithubMcpToken(identityId);
         const headers: Record<string, string> = {
@@ -764,6 +768,7 @@ export class SessionManager {
       }
       for (const [name, provider] of Object.entries(mcp.providers)) {
         if (!provider.enabled) continue;
+        if (!activation.activeProviderNames.has(name)) continue;
         if (provider.type !== "notion") continue;
         const token = await this.requireNotionMcpToken(identityId);
         const existing = servers.get(name);
@@ -792,6 +797,7 @@ export class SessionManager {
       }
       for (const [name, provider] of Object.entries(mcp.providers)) {
         if (!provider.enabled) continue;
+        if (!activation.activeProviderNames.has(name)) continue;
         if (provider.type !== "exa") continue;
         const apiKey = await this.resolveExaApiKey(identityId, provider.api_key);
         servers.set(name, {
@@ -803,8 +809,9 @@ export class SessionManager {
           startupTimeoutSec: provider.startup_timeout_sec,
         });
       }
-      for (const [_name, provider] of Object.entries(mcp.providers)) {
+      for (const [name, provider] of Object.entries(mcp.providers)) {
         if (!provider.enabled) continue;
+        if (!activation.activeProviderNames.has(name)) continue;
         if (provider.type !== "parallel") continue;
         const apiKey = await this.resolveParallelApiKey(identityId, provider.api_key);
         const headers = buildParallelAuthHeaders(apiKey);
