@@ -1,7 +1,7 @@
 import { McpConfigSchema, type McpLogLevel } from "./schemas.js";
 import { normalizePlaywrightMcpSection, type PlaywrightMcpSection } from "./providers/playwright/config.js";
 
-export type McpProviderType = "stdio" | "http" | "sse" | "playwright" | "github" | "notion";
+export type McpProviderType = "stdio" | "http" | "sse" | "playwright" | "github" | "notion" | "exa";
 
 export interface BaseMcpProviderConfig {
   enabled: boolean;
@@ -40,12 +40,18 @@ export interface NotionMcpProviderConfig extends BaseMcpProviderConfig {
   bearer_token_env_var?: string;
 }
 
+export interface ExaMcpProviderConfig extends BaseMcpProviderConfig {
+  type: "exa";
+  api_key: string;
+}
+
 export type McpProviderConfig =
   | StdioMcpProviderConfig
   | HttpMcpProviderConfig
   | PlaywrightMcpProviderConfig
   | GitHubMcpProviderConfig
-  | NotionMcpProviderConfig;
+  | NotionMcpProviderConfig
+  | ExaMcpProviderConfig;
 
 export interface McpConfig {
   global_timeout_sec: number;
@@ -111,6 +117,17 @@ export function normalizeMcpSection(
     }
     providersWithDefaults[name] = { ...provider, type: "notion" };
   }
+  for (const [name, provider] of Object.entries(rawProviders)) {
+    if (name !== "exa") continue;
+    if (!isRecord(provider)) continue;
+    if (typeof provider.type === "string" && provider.type.length > 0) {
+      if (provider.type !== "exa") {
+        throw new Error(`[mcp.providers.${name}] Exa MCP does not allow type="${provider.type}".`);
+      }
+      continue;
+    }
+    providersWithDefaults[name] = { ...provider, type: "exa" };
+  }
   const parsed = McpConfigSchema.parse({
     ...value,
     providers: providersWithDefaults,
@@ -122,6 +139,9 @@ export function normalizeMcpSection(
     assertValidProviderName(name);
     if (raw.type === "notion" && name !== "notion") {
       throw new Error(`[mcp.providers.${name}] Notion MCP must be named "notion".`);
+    }
+    if (raw.type === "exa" && name !== "exa") {
+      throw new Error(`[mcp.providers.${name}] Exa MCP must be named "exa".`);
     }
     providers[name] = normalizeProviderConfig(name, raw, opts);
     if (providers[name]?.enabled && providers[name]?.type === "playwright") {

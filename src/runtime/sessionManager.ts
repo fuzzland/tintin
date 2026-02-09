@@ -14,8 +14,9 @@ import { redactText } from "./redact.js";
 import { nowMs, sleep } from "./util.js";
 import type { McpRegistry } from "./mcp/registry.js";
 import { collectMcpAgentEnv, formatMcpBearerEnvVar } from "./mcp/utils.js";
+import { buildExaMcpUrl } from "./mcp/providers/exa.js";
 import { ensureNotionToken } from "./cloud/notion/token.js";
-import { getGithubMcpToken, getOrCreateIdentity } from "./cloud/store.js";
+import { getExaApiKey, getGithubMcpToken, getOrCreateIdentity } from "./cloud/store.js";
 import { decryptSecret } from "./cloud/secrets.js";
 import { buildLocalizedPrompt } from "./prompt.js";
 import {
@@ -788,6 +789,19 @@ export class SessionManager {
           });
         }
       }
+      for (const [name, provider] of Object.entries(mcp.providers)) {
+        if (!provider.enabled) continue;
+        if (provider.type !== "exa") continue;
+        const apiKey = await this.resolveExaApiKey(identityId, provider.api_key);
+        servers.set(name, {
+          id: name,
+          transport: "http",
+          url: buildExaMcpUrl(apiKey),
+          headers: {},
+          status: "running",
+          startupTimeoutSec: provider.startup_timeout_sec,
+        });
+      }
     }
     if (servers.size === 0) return null;
     const adapter = getAgentAdapter(agent);
@@ -815,6 +829,23 @@ export class SessionManager {
       throw new Error("cloud.secrets_key is required to use Notion MCP tokens.");
     }
     return await ensureNotionToken({ db: this.db, identityId, secretKey, logger: this.logger });
+  }
+
+  private async resolveExaApiKey(identityId: string, configKey: string): Promise<string> {
+    const secretKey = this.config.cloud?.secrets_key ?? "";
+    if (secretKey) {
+      const encrypted = await getExaApiKey(this.db, identityId);
+      if (encrypted) {
+        return decryptSecret(encrypted, secretKey);
+      }
+    }
+    if (configKey.startsWith("env:")) {
+      const envVar = configKey.slice(4);
+      const envValue = process.env[envVar];
+      if (envValue) return envValue;
+      throw new Error(`Exa API key env var ${envVar} is not set. Set it or configure [mcp.providers.exa].api_key.`);
+    }
+    return configKey;
   }
 
   private async resolveChatgptProxyBin(): Promise<string | null> {

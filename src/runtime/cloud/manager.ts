@@ -15,12 +15,14 @@ import type { Sandbox } from "modal";
 import type { McpServerInfo } from "../mcp/types.js";
 import { buildMcpBootstrapConfig, encodeMcpBootstrapConfig, type McpBootstrapConfig } from "../mcp/bootstrap.js";
 import { collectMcpAgentEnv, formatMcpBearerEnvVar } from "../mcp/utils.js";
+import { buildExaMcpUrl } from "../mcp/providers/exa.js";
 import {
   resolvePlaywrightProvider,
   resolvePlaywrightProviderEntry,
   type GitHubMcpProviderConfig,
   type McpProviderConfig,
   type NotionMcpProviderConfig,
+  type ExaMcpProviderConfig,
 } from "../mcp/config.js";
 import { resolveCodexHomeFromSessionsRoot, resolveSessionsRoot } from "../codex.js";
 import { resolveClaudeConfigDirFromSessionsRoot, resolveClaudeSessionJsonlPath } from "../claudeCode.js";
@@ -56,6 +58,7 @@ import {
   getCloudRunBySession,
   getCloudSnapshot,
   getGithubMcpToken,
+  getExaApiKey,
   getLatestSetupSpec,
   getLatestRunForIdentity,
   listSecrets,
@@ -1643,6 +1646,8 @@ export class CloudManager {
         throw new Error(`[mcp.providers.${name}] GitHub MCP requires a per-user token.`);
       case "notion":
         return this.buildNotionServerInfo(name, provider);
+      case "exa":
+        throw new Error(`[mcp.providers.${name}] Exa MCP requires API key resolution.`);
       default: {
         const unreachable: never = provider;
         throw new Error(`Unsupported MCP provider type: ${(unreachable as { type?: string }).type ?? "unknown"}`);
@@ -1689,6 +1694,17 @@ export class CloudManager {
     };
   }
 
+  private buildExaServerInfo(name: string, provider: ExaMcpProviderConfig, apiKey: string): McpServerInfo {
+    return {
+      id: name,
+      transport: "http",
+      url: buildExaMcpUrl(apiKey),
+      headers: {},
+      status: "running",
+      startupTimeoutSec: provider.startup_timeout_sec,
+    };
+  }
+
   private async buildRemoteMcpArgs(
     agent: SessionAgent,
     identityId: string,
@@ -1704,6 +1720,12 @@ export class CloudManager {
       if (provider.type === "github") {
         const token = await this.requireGithubMcpToken(identityId);
         servers.set(name, this.buildGithubServerInfo(name, provider, token));
+        continue;
+      }
+      if (provider.type === "exa") {
+        const apiKey = await this.resolveExaApiKey(identityId, provider.api_key);
+        servers.set(name, this.buildExaServerInfo(name, provider, apiKey));
+        this.logger.debug(`[cloud][mcp] exa configured identity=${identityId}`);
         continue;
       }
       const serverInfo = this.buildServerInfoFromConfig(name, provider);
@@ -1761,6 +1783,23 @@ export class CloudManager {
       throw new Error("cloud.secrets_key is required to use Notion MCP tokens.");
     }
     return await ensureNotionToken({ db: this.db, identityId, secretKey, logger: this.logger });
+  }
+
+  private async resolveExaApiKey(identityId: string, configKey: string): Promise<string> {
+    const secretKey = this.config.cloud?.secrets_key ?? "";
+    if (secretKey) {
+      const encrypted = await getExaApiKey(this.db, identityId);
+      if (encrypted) {
+        return decryptSecret(encrypted, secretKey);
+      }
+    }
+    if (configKey.startsWith("env:")) {
+      const envVar = configKey.slice(4);
+      const envValue = process.env[envVar];
+      if (envValue) return envValue;
+      throw new Error(`Exa API key env var ${envVar} is not set. Set it or configure [mcp.providers.exa].api_key.`);
+    }
+    return configKey;
   }
 
   private logMcpServerSummary(agent: SessionAgent, servers: Map<string, McpServerInfo>): void {

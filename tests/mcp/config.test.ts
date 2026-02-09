@@ -179,3 +179,86 @@ type = "notion"
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("loadConfig allows exa provider without explicit type", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "tintin-config-"));
+  const configPath = path.join(dir, "config.toml");
+  await writeFile(
+    configPath,
+    baseConfig(`
+[cloud]
+secrets_key = "test-secrets-key"
+
+[mcp]
+global_timeout_sec = 60
+log_level = "info"
+
+[mcp.providers.exa]
+enabled = true
+api_key = "test-exa-key"
+`),
+    "utf8",
+  );
+
+  try {
+    const config = await loadConfig(configPath);
+    const provider = config.mcp?.providers.exa;
+    assert.ok(provider);
+    if (provider.type !== "exa") throw new Error("Expected exa provider");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects exa provider without api_key", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "tintin-config-"));
+  const configPath = path.join(dir, "config.toml");
+  await writeFile(
+    configPath,
+    baseConfig(`
+[cloud]
+secrets_key = "test-secrets-key"
+
+[mcp]
+global_timeout_sec = 60
+log_level = "info"
+
+[mcp.providers.exa]
+enabled = true
+`),
+    "utf8",
+  );
+
+  try {
+    await assert.rejects(() => loadConfig(configPath));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects exa provider with wrong name", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "tintin-config-"));
+  const configPath = path.join(dir, "config.toml");
+  await writeFile(
+    configPath,
+    baseConfig(`
+[cloud]
+secrets_key = "test-secrets-key"
+
+[mcp]
+global_timeout_sec = 60
+log_level = "info"
+
+[mcp.providers.exa_alt]
+type = "exa"
+api_key = "test-exa-key"
+`),
+    "utf8",
+  );
+
+  try {
+    await assert.rejects(() => loadConfig(configPath));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

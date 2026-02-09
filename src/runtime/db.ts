@@ -406,6 +406,14 @@ export interface GithubMcpTokensTable {
   updated_at: number;
 }
 
+export interface ExaApiKeysTable {
+  id: string;
+  identity_id: string;
+  api_key: string;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface NotionMcpClientsTable {
   id: string;
   client_id: string;
@@ -464,6 +472,7 @@ export interface DatabaseSchema {
   chatgpt_oauth_states: ChatgptOAuthStatesTable;
   slack_installations: SlackInstallationsTable;
   github_mcp_tokens: GithubMcpTokensTable;
+  exa_api_keys: ExaApiKeysTable;
   notion_mcp_clients: NotionMcpClientsTable;
   notion_mcp_tokens: NotionMcpTokensTable;
 }

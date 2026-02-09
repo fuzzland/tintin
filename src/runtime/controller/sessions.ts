@@ -63,6 +63,7 @@ export function buildCloudHelpText(platform: "telegram" | "slack", lang: UserLan
       cmd3: `\`${cmd("connect local")}\``,
     }),
     t("cloud.help.cmd.mcp_github_token", lang, { cmd: `\`${cmd("mcp github token set <token>")}\`` }),
+    t("cloud.help.cmd.mcp_exa_key", lang, { cmd: `\`${cmd("mcp exa key set <key>")}\`` }),
     t("cloud.help.cmd.mcp_notion_connect", lang, { cmd: `\`${cmd("mcp notion connect")}\`` }),
     t("cloud.help.cmd.mcp_notion_status", lang, { cmd: `\`${cmd("mcp notion status")}\`` }),
     "",

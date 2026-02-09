@@ -42,6 +42,11 @@ export const NotionMcpProviderSchema = BaseMcpProviderSchema.extend({
   bearer_token_env_var: z.string().min(1).optional(),
 });
 
+export const ExaMcpProviderSchema = BaseMcpProviderSchema.extend({
+  type: z.literal("exa"),
+  api_key: z.string().min(1),
+});
+
 const PlaywrightSnapshotModeSchema = z.enum(["incremental", "full", "none"]);
 const PlaywrightImageResponseSchema = z.enum(["allow", "omit"]);
 const PlaywrightProviderSchema = z.enum(["local", "browserbase", "hyperbrowser"]);
@@ -99,6 +104,7 @@ export const McpProviderConfigSchema = z.discriminatedUnion("type", [
   PlaywrightMcpProviderSchema,
   GitHubMcpProviderSchema,
   NotionMcpProviderSchema,
+  ExaMcpProviderSchema,
 ]);
 
 export const McpConfigSchema = z.object({

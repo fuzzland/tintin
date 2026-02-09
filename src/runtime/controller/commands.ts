@@ -36,6 +36,9 @@ export type CloudCommand =
   | { kind: "secrets_list" }
   | { kind: "secrets_delete"; name: string }
   | { kind: "mcp_github_token_set"; token: string | null }
+  | { kind: "mcp_exa_key_set"; key: string | null }
+  | { kind: "mcp_exa_key_status" }
+  | { kind: "mcp_exa_key_delete" }
   | { kind: "mcp_notion_connect" }
   | { kind: "mcp_notion_status" }
   | { kind: "snapshot_save"; note?: string }
@@ -433,6 +436,18 @@ export function parseCloudCommand(text: string): CloudCommand | null {
           const token = tokens.length > 0 ? tokens.join(" ").trim() : null;
           return { kind: "mcp_github_token_set", token };
         }
+      }
+    }
+    if (provider === "exa" && tokens.length >= 1) {
+      const sub = tokens.shift()!.toLowerCase();
+      if (sub === "key") {
+        const action = tokens.shift()?.toLowerCase() ?? "";
+        if (action === "set") {
+          const key = tokens.length > 0 ? tokens.join(" ").trim() : null;
+          return { kind: "mcp_exa_key_set", key };
+        }
+        if (action === "status") return { kind: "mcp_exa_key_status" };
+        if (action === "delete") return { kind: "mcp_exa_key_delete" };
       }
     }
   }

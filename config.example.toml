@@ -226,6 +226,12 @@ toolsets = ["repos", "issues", "pull_requests"]
 [mcp.providers.notion]
 enabled = false
 
+# Exa.ai MCP (web search, code search, company research)
+[mcp.providers.exa]
+enabled = true
+# Get your key at: https://dashboard.exa.ai/api-keys
+api_key = "env:EXA_API_KEY"
+
 [pinecone]
 api_key = "<PINECONE_API_KEY>"
 index = "tintin-snapshots"
