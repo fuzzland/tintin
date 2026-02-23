@@ -470,6 +470,19 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
     const lang = deps.resolveSessionLanguage(session);
 
     const wsManager = deps.getWsManager();
+
+    // WebSocket-only: progress events bypass all platform-specific logic
+    if (message.type === "progress_event") {
+      if (wsManager?.hasSubscribers(sessionId)) {
+        wsManager.broadcastToSession(sessionId, {
+          type: "progress_event",
+          sessionId,
+          event: message.event,
+        });
+      }
+      return;
+    }
+
     if (wsManager?.hasSubscribers(sessionId)) {
       let wsMessage: ServerMessage | null = null;
       if (message.type === "finalize") {
