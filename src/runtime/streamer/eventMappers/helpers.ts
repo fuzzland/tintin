@@ -76,6 +76,16 @@ export function normalizeMessageVerbosity(value: unknown): MessageVerbosity {
   return 3;
 }
 
+export type NormalizedPlanStatus = "pending" | "in_progress" | "completed" | "failed";
+
+export function normalizePlanStatus(raw: string): NormalizedPlanStatus {
+  const s = raw.trim().toLowerCase();
+  if (s === "completed" || s === "done" || s === "finished") return "completed";
+  if (s === "in_progress" || s === "in progress" || s === "active" || s === "running") return "in_progress";
+  if (s === "failed" || s === "error") return "failed";
+  return "pending";
+}
+
 export function formatTitledText(title: string, body?: string | null, opts?: { inline?: boolean }): string {
   const cleanTitle = title.trim();
   const hasBody = typeof body === "string" && body.trim().length > 0;

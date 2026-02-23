@@ -8,6 +8,7 @@ import {
   truncateJson,
   truncateLogLine,
   normalizeMessageVerbosity,
+  normalizePlanStatus,
   formatTitledText,
   formatCommand,
   decodeBase64ToString,
@@ -298,5 +299,33 @@ test("extractCommandFromToolArgs", async (t) => {
 
   await t.test("should return null for invalid JSON", () => {
     assert.equal(extractCommandFromToolArgs("shell", "not json"), null);
+  });
+});
+
+test("normalizePlanStatus", async (t) => {
+  await t.test("should normalize completed variants", () => {
+    assert.equal(normalizePlanStatus("completed"), "completed");
+    assert.equal(normalizePlanStatus("done"), "completed");
+    assert.equal(normalizePlanStatus("finished"), "completed");
+    assert.equal(normalizePlanStatus("COMPLETED"), "completed");
+  });
+
+  await t.test("should normalize in_progress variants", () => {
+    assert.equal(normalizePlanStatus("in_progress"), "in_progress");
+    assert.equal(normalizePlanStatus("in progress"), "in_progress");
+    assert.equal(normalizePlanStatus("active"), "in_progress");
+    assert.equal(normalizePlanStatus("running"), "in_progress");
+  });
+
+  await t.test("should normalize failed", () => {
+    assert.equal(normalizePlanStatus("failed"), "failed");
+    assert.equal(normalizePlanStatus("FAILED"), "failed");
+    assert.equal(normalizePlanStatus("error"), "failed");
+  });
+
+  await t.test("should default to pending", () => {
+    assert.equal(normalizePlanStatus("pending"), "pending");
+    assert.equal(normalizePlanStatus("unknown"), "pending");
+    assert.equal(normalizePlanStatus(""), "pending");
   });
 });

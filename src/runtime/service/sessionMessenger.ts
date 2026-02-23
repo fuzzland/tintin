@@ -11,6 +11,7 @@ import type { ServerMessage } from "../websocket/types.js";
 import { t, type UserLanguage } from "../../locales/index.js";
 import { mergeTextIntoSlackBlocks } from "../message/slack.js";
 import { formatToolPairMessage } from "../streamer.js";
+import { normalizePlanStatus } from "../streamer/eventMappers/helpers.js";
 
 type SessionLanguageResolver = (session: { language?: string | null }) => UserLanguage;
 
@@ -278,13 +279,6 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
 
   const buildSlackBlocksWithText = (text: string, blocks?: unknown[]): unknown[] | undefined => {
     return mergeTextIntoSlackBlocks(text, blocks);
-  };
-
-  const normalizePlanStatus = (raw: string): "pending" | "in_progress" | "completed" => {
-    const s = raw.trim().toLowerCase();
-    if (s === "completed" || s === "done" || s === "finished") return "completed";
-    if (s === "in_progress" || s === "in progress" || s === "active" || s === "running") return "in_progress";
-    return "pending";
   };
 
   const formatPlanMessageTelegramHtml = (opts: {
