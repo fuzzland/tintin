@@ -44,6 +44,11 @@ export type SessionMessage =
       callText?: string;
       formatAsCode?: boolean;
       priority?: "user" | "background";
+    }
+  | {
+      type: "progress_event";
+      event: import("./streamer/progress/types.js").ProgressEvent;
+      priority?: "user" | "background";
     };
 
 /** Type guard to check if a SessionMessage is a text message */

@@ -1,4 +1,5 @@
 import type { CloudRunWsStatus as CloudRunStatus, BrowserProvider } from '../cloud/types.js';
+import type { ProgressEvent } from '../streamer/progress/types.js';
 
 // Re-export types for backward compatibility
 export type { CloudRunStatus, BrowserProvider };
@@ -173,6 +174,12 @@ export interface FollowUpStatusMessage {
   position?: number;  // only when status='queued'
 }
 
+export interface ProgressEventMessage {
+  type: 'progress_event';
+  sessionId: string;
+  event: ProgressEvent;
+}
+
 export type ServerMessage =
   | AuthResultMessage
   | ChunkMessage
@@ -187,7 +194,8 @@ export type ServerMessage =
   | RunLinksMessage
   | BrowserSessionMessage
   | SandboxStatusMessage
-  | FollowUpStatusMessage;
+  | FollowUpStatusMessage
+  | ProgressEventMessage;
 
 // ============ Error Codes ============
 
