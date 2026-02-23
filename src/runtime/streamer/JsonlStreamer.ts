@@ -24,6 +24,7 @@ import {
   parseMcpFunctionName,
 } from "./PlaywrightScreenshotManager.js";
 import { EVENT_MAPPERS } from "./eventMappers/index.js";
+import { extractProgress } from "./progress/index.js";
 import {
   extractCommandFromToolArgs,
   extractMcpResultText,
@@ -241,6 +242,7 @@ export class JsonlStreamer {
                 lang,
               }),
             );
+            this.emitProgressEvents(session.id, session.agent, obj);
           } catch {
             continue;
           }
@@ -716,6 +718,14 @@ export class JsonlStreamer {
     ].filter(Boolean);
     const log = isErrorEvent ? this.logger.warn.bind(this.logger) : this.logger.debug.bind(this.logger);
     log(`[cloud][codex][event] ${parts.join(" ")}`);
+  }
+
+  private emitProgressEvents(sessionId: string, agent: SessionAgent, obj: unknown): void {
+    const events = extractProgress(agent, obj);
+    if (events.length === 0) return;
+    for (const evt of events) {
+      void this.sendToSession(sessionId, { type: "progress_event", event: evt });
+    }
   }
 
 }
