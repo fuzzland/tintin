@@ -40,6 +40,8 @@ import type { StreamFragment, BufferState, MessageVerbosity } from "./types.js";
 const USER_PRIORITY_BURST_MESSAGES = 5;
 const CLOUD_PROJECT_PREFIX = "cloud:";
 const MAX_DEBUG_EVENT_CHARS = 2000;
+const FLUSH_CHAR_THRESHOLD = 1600;
+const FLUSH_INTERVAL_MS = 1000;
 
 export class JsonlStreamer {
   private readonly buffers = new Map<string, BufferState>();
@@ -639,7 +641,7 @@ export class JsonlStreamer {
       return;
     }
     const now = nowMs();
-    const should = force || s.text.length >= 1600 || now - s.lastFlushMs >= 1000;
+    const should = force || s.text.length >= FLUSH_CHAR_THRESHOLD || now - s.lastFlushMs >= FLUSH_INTERVAL_MS;
     if (!should) return;
     const payload = s.text.trim();
     this.buffers.set(sessionId, { text: "", lastFlushMs: now });

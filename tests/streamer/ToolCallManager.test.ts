@@ -10,11 +10,14 @@ const call = (text: string, toolName: string, toolInput?: string): PendingToolCa
 });
 
 test("ToolCallManager push/shift", async (t) => {
-  await t.test("should push tool call to queue", () => {
+  await t.test("should push and shift a tool call", () => {
     const manager = new ToolCallManager();
     manager.push("session-1", call("$ ls -la", "Bash", "ls -la"));
-    assert.equal(manager.hasPending("session-1"), true);
-    assert.equal(manager.pendingCount("session-1"), 1);
+    const shifted = manager.shift("session-1");
+    assert.ok(shifted);
+    assert.equal(shifted.text, "$ ls -la");
+    assert.equal(shifted.toolName, "Bash");
+    assert.equal(shifted.toolInput, "ls -la");
   });
 
   await t.test("should shift tool call in FIFO order", () => {
@@ -53,28 +56,8 @@ test("ToolCallManager push/shift", async (t) => {
     assert.ok(s2);
     assert.equal(s2.text, "call-2");
     assert.equal(s2.toolName, "Read");
-    assert.equal(manager.hasPending("session-1"), false);
-    assert.equal(manager.hasPending("session-2"), false);
-  });
-});
-
-test("ToolCallManager hasPending", async (t) => {
-  await t.test("should return true when queue has items", () => {
-    const manager = new ToolCallManager();
-    manager.push("session-1", call("call-1", "Bash"));
-    assert.equal(manager.hasPending("session-1"), true);
-  });
-
-  await t.test("should return false for empty queue", () => {
-    const manager = new ToolCallManager();
-    manager.push("session-1", call("call-1", "Bash"));
-    manager.shift("session-1");
-    assert.equal(manager.hasPending("session-1"), false);
-  });
-
-  await t.test("should return false for unknown session", () => {
-    const manager = new ToolCallManager();
-    assert.equal(manager.hasPending("unknown-session"), false);
+    assert.equal(manager.shift("session-1"), null);
+    assert.equal(manager.shift("session-2"), null);
   });
 });
 
@@ -85,8 +68,7 @@ test("ToolCallManager clear", async (t) => {
     manager.push("session-1", call("call-2", "Read"));
     manager.clear("session-1");
 
-    assert.equal(manager.hasPending("session-1"), false);
-    assert.equal(manager.pendingCount("session-1"), 0);
+    assert.equal(manager.shift("session-1"), null);
   });
 
   await t.test("should not affect other sessions", () => {
@@ -95,8 +77,10 @@ test("ToolCallManager clear", async (t) => {
     manager.push("session-2", call("call-2", "Read"));
     manager.clear("session-1");
 
-    assert.equal(manager.hasPending("session-1"), false);
-    assert.equal(manager.hasPending("session-2"), true);
+    assert.equal(manager.shift("session-1"), null);
+    const s2 = manager.shift("session-2");
+    assert.ok(s2);
+    assert.equal(s2.text, "call-2");
   });
 });
 
@@ -109,9 +93,9 @@ test("ToolCallManager clearExcept", async (t) => {
 
     manager.clearExcept(new Set(["session-2"]));
 
-    assert.equal(manager.hasPending("session-1"), false);
-    assert.equal(manager.hasPending("session-2"), true);
-    assert.equal(manager.hasPending("session-3"), false);
+    assert.equal(manager.shift("session-1"), null);
+    assert.ok(manager.shift("session-2"));
+    assert.equal(manager.shift("session-3"), null);
   });
 
   await t.test("should handle empty keep set", () => {
@@ -121,25 +105,7 @@ test("ToolCallManager clearExcept", async (t) => {
 
     manager.clearExcept(new Set());
 
-    assert.equal(manager.hasPending("session-1"), false);
-    assert.equal(manager.hasPending("session-2"), false);
-  });
-});
-
-test("ToolCallManager getSessionIds", async (t) => {
-  await t.test("should return all session IDs with pending calls", () => {
-    const manager = new ToolCallManager();
-    manager.push("session-1", call("call-1", "Bash"));
-    manager.push("session-2", call("call-2", "Read"));
-
-    const ids = manager.getSessionIds();
-    assert.equal(ids.length, 2);
-    assert.ok(ids.includes("session-1"));
-    assert.ok(ids.includes("session-2"));
-  });
-
-  await t.test("should return empty array when no sessions", () => {
-    const manager = new ToolCallManager();
-    assert.deepEqual(manager.getSessionIds(), []);
+    assert.equal(manager.shift("session-1"), null);
+    assert.equal(manager.shift("session-2"), null);
   });
 });

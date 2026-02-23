@@ -1,3 +1,5 @@
+import { stringOrEmpty } from "./eventMappers/helpers.js";
+
 /**
  * PlanUpdateHandler - Manages plan update parsing and suppression of plan tool outputs.
  *
@@ -137,10 +139,6 @@ export class PlanUpdateHandler {
 }
 
 // Helper functions (private to this module)
-
-function stringOrEmpty(value: unknown): string {
-  return typeof value === "string" ? value : "";
-}
 
 function parseJsonObject(value: unknown): Record<string, unknown> | null {
   if (value && typeof value === "object") return value as Record<string, unknown>;

@@ -34,22 +34,6 @@ export class ToolCallManager {
   }
 
   /**
-   * Check if a session has pending tool calls.
-   */
-  hasPending(sessionId: string): boolean {
-    const q = this.pending.get(sessionId);
-    return q !== undefined && q.length > 0;
-  }
-
-  /**
-   * Get the number of pending tool calls for a session.
-   */
-  pendingCount(sessionId: string): number {
-    const q = this.pending.get(sessionId);
-    return q ? q.length : 0;
-  }
-
-  /**
    * Clear all pending tool calls for a specific session.
    */
   clear(sessionId: string): void {
@@ -68,10 +52,4 @@ export class ToolCallManager {
     }
   }
 
-  /**
-   * Get all session IDs with pending tool calls.
-   */
-  getSessionIds(): string[] {
-    return Array.from(this.pending.keys());
-  }
 }
