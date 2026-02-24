@@ -30,7 +30,8 @@ import {
   updateDynamicDeployEntry,
   updateStaticDeployEntry,
 } from "../../cloud/store.js";
-import { createSession } from "../../store.js";
+import { createSession, listSessionOffsets } from "../../store.js";
+import { extractProgress } from "../../streamer/progress/index.js";
 
 const STATIC_SITE_ROOT = "/mnt/data/sites";
 const NGINX_CONF_DIR = "/etc/nginx/conf.d";
@@ -881,6 +882,52 @@ export async function handleAgentRoutes(params: {
         await rm(tmpArchive, { force: true }).catch(() => {});
       }
     }
+  }
+
+  if (command === "progress-timeline") {
+    if (req.method !== "GET") {
+      sendText(res, 404, "not found");
+      return true;
+    }
+    try {
+      const session = await deps.db
+        .selectFrom("sessions")
+        .select(["agent"])
+        .where("id", "=", ctx.sessionId)
+        .executeTakeFirst();
+      if (!session) {
+        sendAgentText(404, "session not found", { method: req.method ?? "", path: pathname });
+        return true;
+      }
+      const offsets = await listSessionOffsets(deps.db, ctx.sessionId);
+      const events: import("../../streamer/progress/types.js").ProgressEvent[] = [];
+      for (const off of offsets) {
+        let content: string;
+        try {
+          content = await readFile(off.jsonl_path, "utf8");
+        } catch {
+          continue;
+        }
+        for (const line of content.split("\n")) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const obj = JSON.parse(trimmed);
+            events.push(...extractProgress(session.agent as "codex" | "claude_code", obj));
+          } catch {
+            continue;
+          }
+        }
+      }
+      sendAgentJson(200, { sessionId: ctx.sessionId, agent: session.agent, events }, {
+        method: req.method ?? "",
+        path: pathname,
+      });
+    } catch (e) {
+      logger.error(`[progress-timeline] error session=${ctx.sessionId}: ${String(e)}`);
+      sendAgentText(500, "internal error", { method: req.method ?? "", path: pathname });
+    }
+    return true;
   }
 
   sendText(res, 404, "not found");
