@@ -16,6 +16,7 @@ _.log
 report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 docs/plans/
 docs/designs/
+docs/guides/
 references/
 
 # dotenv environment variable files

@@ -133,14 +133,18 @@ function resolveWebIdentityId(db, wsIdentityId): Promise<string>
 ```
 
 ### messaging.ts
-Platform message sending abstraction
+Session message types & platform sending abstraction
 
 **Key Exports:**
 ```typescript
-interface IMessagingPlatform {
-    sendMessage(chatId, text): Promise<void>
-    sendPhoto(chatId, photo): Promise<void>
-}
+type SessionMessage =
+    | TextMessage
+    | { type: "finalize" }
+    | { type: "plan_update"; plan: PlanUpdateItem[] }
+    | { type: "image"; path: string; file: Buffer }
+    | { type: "tool_call"; name: string; input?: string }
+    | { type: "tool_output"; name: string; output: string }
+    | { type: "progress_event"; event: ProgressEvent }  // WebSocket-only
 ```
 
 ### httpClient.ts
@@ -273,14 +277,14 @@ const env = EnvironmentBuilder.create()
 
 ## Streamer Modules (`src/runtime/streamer/`)
 
-### JsonlStreamer.ts (840 LOC)
-Main streaming logic
+### JsonlStreamer.ts (852 LOC)
+Main streaming logic + progress event extraction
 
 **Responsibilities:**
 - Poll JSONL file
-- Convert to StreamFragment
-- Rate limiting
-- Chunking
+- Convert to StreamFragment via EventMappers
+- Extract ProgressEvent via progress/ extractors (parallel pipeline)
+- Rate limiting & chunking (FLUSH_CHAR_THRESHOLD=1600, FLUSH_INTERVAL_MS=1000)
 
 **Key Exports:**
 ```typescript
@@ -288,6 +292,7 @@ class JsonlStreamer {
     pollOnce(): Promise<StreamFragment[]>
     start(onFragment): void
     stop(): void
+    // private: emitProgressEvents(sessionId, agent, obj)
 }
 ```
 
@@ -299,6 +304,8 @@ Tool call/output pairing queue
 class ToolCallManager {
     push(call): void
     shift(): { call, output } | null
+    clear(sessionId): void
+    clearExcept(sessionId): void
 }
 ```
 
@@ -314,8 +321,33 @@ Agent-specific event mapping
 **Files:**
 - `claudeMapper.ts` (183 LOC) - Claude Code JSONL event → StreamFragment
 - `codexMapper.ts` (275 LOC) - Codex JSONL event → StreamFragment
-- `helpers.ts` (428 LOC) - Shared mapping utilities, text formatting, tool output formatting
+- `helpers.ts` (428 LOC) - Shared mapping utilities, text formatting, tool output formatting, normalizePlanStatus()
 - `messageDispatcher.ts` (304 LOC) - Routes fragments to platform/WebSocket destinations
+
+### progress/ (399 LOC total)
+Agent-agnostic progress event extraction — parallel pipeline delivering structured events exclusively to WebSocket clients.
+
+**Architecture:** Runs alongside the EventMapper pipeline in `JsonlStreamer.pollOnce()`. Each JSONL event is passed to agent-specific extractors that emit typed `ProgressEvent` objects. These are routed through `SessionMessenger` with an early-return that broadcasts only to WebSocket subscribers, bypassing Telegram/Slack entirely.
+
+**Files:**
+- `types.ts` (58 LOC) - ProgressEvent union type (7 event kinds)
+- `claudeExtractor.ts` (120 LOC) - Claude Code JSONL → ProgressEvent
+- `codexExtractor.ts` (203 LOC) - Codex JSONL → ProgressEvent
+- `index.ts` (18 LOC) - Registry dispatch: `extractProgress(agent, obj)`
+
+**Event Kinds:**
+- `tool_call_start` — Tool invocation begins (id, tool, input?, ts)
+- `tool_call_end` — Tool execution completes (id, ts)
+- `tool_call_result` — Tool output available (id, output?, ts)
+- `plan_update` — Plan status snapshot (steps[], progress, currentStep?, ts)
+- `thinking_start` / `thinking_end` — Model reasoning phase
+- `run_error` — Execution error (message, ts)
+
+**Key Exports:**
+```typescript
+type ProgressEvent = ToolCallStartEvent | ToolCallEndEvent | ...
+function extractProgress(agent: SessionAgent, obj: unknown): ProgressEvent[]
+```
 
 ## Cloud Execution (`src/runtime/cloud/`)
 
@@ -405,12 +437,13 @@ HTTP server setup & route mounting
 - Middleware setup
 - Static file serving
 
-### sessionMessenger.ts (752 LOC)
+### sessionMessenger.ts (759 LOC)
 Platform message formatting & WebSocket routing
 
 **Responsibilities:**
 - Format StreamFragment for platform delivery (Telegram/Slack/WebSocket)
 - Route tool_call and tool_output messages to WebSocket subscribers
+- Route progress_event exclusively to WebSocket (early-return, bypasses TG/Slack)
 - Verbosity-based message filtering
 - Platform-specific message adaptation
 
@@ -443,13 +476,14 @@ GitHub HTTP REST API endpoints
 
 **Authentication:** Bearer token via `cloud.proxy.shared_secret`
 
-### agentRoutes.ts (888 LOC)
+### agentRoutes.ts (935 LOC)
 Agent log relay & execution API endpoints
 
 **Responsibilities:**
 - Agent log relay from JSONL to HTTP streaming
 - Cloud run execution API
 - Session event broadcasting
+- Progress timeline replay (`GET progress-timeline`)
 
 ### cloudApiRoutes.ts (440 LOC)
 Cloud API endpoints
@@ -467,12 +501,17 @@ Connection management
 ### handler.ts (256 LOC)
 Agent execution message routing & authentication
 
-**Message Types:**
+**Client → Server Message Types:**
 - `auth` - Authentication
 - `cloud_run` - Start cloud run
 - `subscribe_chat` - Subscribe to chat updates
 - `cloud_follow_up` - Follow-up prompts
 - `cloud_stop` - Stop execution
+
+**Server → Client Message Types:**
+- `auth_result`, `chunk`, `tool_call`, `tool_output`, `plan_update`, `done`, `error`, `pong`
+- `run_status`, `run_links`, `browser_session`, `sandbox_status`, `follow_up_status`
+- `progress_event` — Structured progress events (WebSocket-only)
 
 ### services/cloud.ts (827 LOC)
 CloudRunService

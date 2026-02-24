@@ -415,6 +415,72 @@ sequenceDiagram
     MSG->>P: Format as text for TG/Slack
 ```
 
+## Progress Event Extraction Flow
+
+```mermaid
+sequenceDiagram
+    participant CLI as Agent CLI
+    participant JL as JSONL File
+    participant JS as JsonlStreamer
+    participant EM as EventMappers
+    participant PE as progress/extractors
+    participant MSG as SessionMessenger
+    participant WS as WebSocket
+    participant P as Platform (TG/Slack)
+
+    CLI->>JL: Write JSONL event
+
+    JS->>JL: pollOnce() - read new lines
+    JL-->>JS: JSONL object
+
+    par Parallel Pipelines
+        JS->>EM: mapToFragment()
+        EM-->>JS: StreamFragment[]
+    and
+        JS->>PE: extractProgress(agent, obj)
+        PE-->>JS: ProgressEvent[]
+    end
+
+    Note over JS, MSG: StreamFragments → all platforms
+
+    JS->>MSG: sendToSession(text/tool_call/tool_output)
+    MSG->>WS: WebSocket message
+    MSG->>P: Telegram/Slack message
+
+    Note over JS, MSG: ProgressEvents → WebSocket only
+
+    JS->>MSG: sendToSession({type: "progress_event"})
+    MSG->>MSG: Early return for progress_event
+    MSG->>WS: {"type": "progress_event", "event": {...}}
+    Note over P: Telegram/Slack never receives progress events
+```
+
+## Progress Timeline Replay (HTTP)
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant AGR as agentRoutes
+    participant DB as Database
+    participant JL as JSONL Files
+    participant PE as progress/extractors
+
+    C->>AGR: GET /api/cloud/agent/progress-timeline
+    AGR->>DB: Query session agent type
+    AGR->>DB: listSessionOffsets(sessionId)
+    DB-->>AGR: JSONL file paths
+
+    loop Each JSONL file
+        AGR->>JL: Read file content
+        loop Each line
+            AGR->>PE: extractProgress(agent, obj)
+            PE-->>AGR: ProgressEvent[]
+        end
+    end
+
+    AGR-->>C: {"sessionId", "agent", "events": [...]}
+```
+
 ## Message Verbosity Levels
 
 ```mermaid

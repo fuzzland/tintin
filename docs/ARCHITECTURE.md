@@ -38,6 +38,7 @@ graph TB
         JS[JsonlStreamer]
         TCM[ToolCallManager]
         PSM[PlaywrightScreenshotManager]
+        PE[progress/<br/>ProgressExtractors]
     end
 
     subgraph Storage["Storage Layer"]
@@ -70,7 +71,9 @@ graph TB
     JL --> JS
     JS --> TCM
     JS --> PSM
+    JS --> PE
     JS --> MSG
+    PE -->|WS only| MSG
     SM --> DB
     CM --> DB
     CM --> S3
@@ -113,6 +116,7 @@ graph TD
     AG --> JS[streamer/<br/>JsonlStreamer]
     JS --> TM[streamer/<br/>ToolCallManager]
     JS --> EM[streamer/<br/>eventMappers]
+    JS --> PE[streamer/<br/>progress]
     JS --> SMSG
 
     SM --> MR[mcp/<br/>registry]
@@ -275,7 +279,7 @@ sequenceDiagram
 | **service/httpServer.ts** | HTTP server setup & route mounting | createServer(), mountRoutes() |
 | **service/sessionMessenger.ts** | Platform message formatting & WebSocket routing | sendToSession(), formatFragment() |
 | **service/http/githubRoutes.ts** | GitHub HTTP REST API (auth, repos, OAuth, disconnect) | handleGithubApiRoutes() |
-| **service/http/agentRoutes.ts** | Agent log relay & execution API | handleAgentLogRelay() |
+| **service/http/agentRoutes.ts** | Agent log relay, execution API & progress timeline | handleAgentLogRelay(), progress-timeline |
 | **service/http/cloudApiRoutes.ts** | Cloud API endpoints | handleCloudApiRoutes() |
 | **controller2.ts** | Central BotController | handleChat(), handleInteraction() |
 | **controller/telegramHandler.ts** | Telegram-specific handling | handleCommand(), handleCallback() |
@@ -295,10 +299,11 @@ sequenceDiagram
 | **websocket/handler.ts** | WebSocket agent execution messaging | handleMessage(), authenticate() |
 | **websocket/services/cloud.ts** | CloudRunService | handleCloudRun(), subscribeRun() |
 | **websocket/services/sandboxLifecycle.ts** | Sandbox provisioning | provisionSandbox() |
-| **streamer/JsonlStreamer.ts** | JSONL to StreamFragment | pollOnce(), mapToFragment() |
-| **streamer/ToolCallManager.ts** | Tool call/output pairing | push(), shift(), formatPair() |
+| **streamer/JsonlStreamer.ts** | JSONL to StreamFragment + progress emission | pollOnce(), emitProgressEvents() |
+| **streamer/ToolCallManager.ts** | Tool call/output pairing | push(), shift(), clear() |
 | **streamer/PlanUpdateHandler.ts** | Plan update parsing | handlePlanUpdate() |
 | **streamer/eventMappers/** | Agent-specific event mapping | claudeMapper, codexMapper, helpers |
+| **streamer/progress/** | Progress event extraction (WS-only) | extractProgress(), claudeExtractor, codexExtractor |
 | **mcp/registry.ts** | MCP server lifecycle | register(), startAll(), stopAll() |
 | **platform/telegram.ts** | Telegram client | sendMessage(), sendPhoto() |
 | **platform/slack.ts** | Slack client | postMessage(), update() |

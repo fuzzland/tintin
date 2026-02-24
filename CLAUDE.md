@@ -51,6 +51,7 @@ npm run migrate        # Database migrations
 ├─────────────────────────────────────────────────────────────┤
 │  Stream Layer                                               │
 │  JsonlStreamer → StreamFragment → Platform                  │
+│                → progress/ → ProgressEvent → WebSocket only │
 ├─────────────────────────────────────────────────────────────┤
 │  Storage Layer                                              │
 │  Database (SQLite/Postgres) │ JSONL Files │ S3             │
@@ -64,9 +65,10 @@ npm run migrate        # Database migrations
 | **controller2.ts** | 367 | Central BotController - platform dispatch, command routing |
 | **sessionManager.ts** | 1174 | Agent session lifecycle - spawn, monitor, terminate |
 | **cloud/manager.ts** | 4699 | Cloud orchestration - Modal/Local providers |
-| **streamer/JsonlStreamer.ts** | 840 | JSONL to chat fragments conversion |
-| **service/sessionMessenger.ts** | 752 | Platform message formatting & WebSocket routing |
-| **service/http/agentRoutes.ts** | 888 | Agent log relay & cloud API endpoints |
+| **streamer/JsonlStreamer.ts** | 852 | JSONL to chat fragments + progress event extraction |
+| **streamer/progress/** | 399 | Agent-agnostic progress event extraction pipeline |
+| **service/sessionMessenger.ts** | 759 | Platform message formatting & WebSocket routing |
+| **service/http/agentRoutes.ts** | 935 | Agent log relay, cloud API & progress timeline |
 | **service/http/githubRoutes.ts** | 487 | GitHub HTTP REST API (auth, repos, OAuth, disconnect) |
 | **websocket/handler.ts** | 256 | WebSocket agent execution messaging |
 | **mcp/registry.ts** | 108 | MCP server lifecycle management |
@@ -80,7 +82,8 @@ src/runtime/
 │   ├── controller2.ts          # Central BotController
 │   ├── sessionManager.ts       # Session lifecycle
 │   ├── streamer/               # JSONL streaming components
-│   │   └── eventMappers/       # Agent-specific event mapping
+│   │   ├── eventMappers/       # Agent-specific event mapping
+│   │   └── progress/           # Progress event extraction pipeline (WS-only)
 │   ├── cloud/                  # Cloud execution (30+ files)
 │   │   ├── repos.ts            # Centralized repo sync logic
 │   │   └── notion/             # Notion MCP OAuth integration
@@ -108,7 +111,7 @@ src/runtime/
 | **State Machine** | SessionStateMachine (wizard→starting→running→finished/error/killed) |
 | **Builder** | EnvironmentBuilder (fluent env var construction) |
 | **Factory** | mcp/factory.ts, platform/adapters.ts |
-| **Registry** | mcp/registry.ts, streamer/eventMappers |
+| **Registry** | mcp/registry.ts, streamer/eventMappers, streamer/progress |
 | **Dependency Injection** | All services receive deps via constructor |
 
 ## 💾 Database
