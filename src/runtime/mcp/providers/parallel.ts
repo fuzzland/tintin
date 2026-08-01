@@ -1,4 +1,4 @@
-const PARALLEL_SEARCH_MCP_URL = "https://search-mcp.parallel.ai/mcp";
+const PARALLEL_SEARCH_MCP_URL = "https://search.parallel.ai/mcp";
 const PARALLEL_TASK_MCP_URL = "https://task-mcp.parallel.ai/mcp";
 
 export const PARALLEL_SEARCH_TOOLS = ["web_search", "web_fetch"] as const;
